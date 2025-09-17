@@ -11,6 +11,7 @@ RUN apt-get update && apt-get upgrade -y && \
 	xfce4 \
 	xfce4-goodies \
 	xfce4-terminal \
+	xfconf \
 	tightvncserver \
 	novnc \
 	websockify \
@@ -65,6 +66,17 @@ RUN mkdir -p /home/ubuntu/.vnc && \
 	chmod +x /home/ubuntu/.vnc/xstartup && \
 	chown -R ubuntu:ubuntu /home/ubuntu
 
+# Create autostart entry for setting background
+RUN mkdir -p /home/ubuntu/.config/autostart && \
+	echo '[Desktop Entry]' > /home/ubuntu/.config/autostart/set-background.desktop && \
+	echo 'Type=Application' >> /home/ubuntu/.config/autostart/set-background.desktop && \
+	echo 'Name=Set Background' >> /home/ubuntu/.config/autostart/set-background.desktop && \
+	echo 'Exec=bash -c "sleep 5; for monitor in monitorVNC-0 monitor0 monitor1 monitordisplay1; do xfconf-query -c xfce4-desktop -p /backdrop/screen0/\$monitor/workspace0/last-image -s /usr/share/pixmaps/desktop-background.jpg 2>/dev/null; xfconf-query -c xfce4-desktop -p /backdrop/screen0/\$monitor/workspace0/image-style -s 5 2>/dev/null; xfconf-query -c xfce4-desktop -p /backdrop/screen0/\$monitor/workspace0/image-show -s true 2>/dev/null; done; xfdesktop --reload"' >> /home/ubuntu/.config/autostart/set-background.desktop && \
+	echo 'Hidden=false' >> /home/ubuntu/.config/autostart/set-background.desktop && \
+	echo 'NoDisplay=false' >> /home/ubuntu/.config/autostart/set-background.desktop && \
+	echo 'X-GNOME-Autostart-enabled=true' >> /home/ubuntu/.config/autostart/set-background.desktop && \
+	chown -R ubuntu:ubuntu /home/ubuntu/.config
+
 # Configure XFCE to disable problematic plugins
 RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml && \
 	echo '<?xml version="1.0" encoding="UTF-8"?>' > /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
@@ -116,6 +128,45 @@ RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml && \
 	echo '    <property name="show-tray-icon" type="bool" value="false"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
 	echo '  </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
 	echo '</channel>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
+	chown -R ubuntu:ubuntu /home/ubuntu/.config
+
+# Copy and configure desktop background
+COPY desktop-background.jpg /usr/share/pixmaps/desktop-background.jpg
+RUN chmod 644 /usr/share/pixmaps/desktop-background.jpg && \
+	mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml && \
+	echo '<?xml version="1.0" encoding="UTF-8"?>' > /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '<channel name="xfce4-desktop" version="1.0">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '  <property name="backdrop" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '    <property name="screen0" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '      <property name="monitorVNC-0" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '        <property name="workspace0" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="color-style" type="int" value="0"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="image-style" type="int" value="5"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="last-image" type="string" value="/usr/share/pixmaps/desktop-background.jpg"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="image-show" type="bool" value="true"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '        </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '        <property name="workspace1" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="color-style" type="int" value="0"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="image-style" type="int" value="5"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="last-image" type="string" value="/usr/share/pixmaps/desktop-background.jpg"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="image-show" type="bool" value="true"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '        </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '        <property name="workspace2" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="color-style" type="int" value="0"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="image-style" type="int" value="5"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="last-image" type="string" value="/usr/share/pixmaps/desktop-background.jpg"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="image-show" type="bool" value="true"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '        </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '        <property name="workspace3" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="color-style" type="int" value="0"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="image-style" type="int" value="5"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="last-image" type="string" value="/usr/share/pixmaps/desktop-background.jpg"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '          <property name="image-show" type="bool" value="true"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '        </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '      </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '    </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '  </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
+	echo '</channel>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
 	chown -R ubuntu:ubuntu /home/ubuntu/.config
 
 # Create desktop shortcuts
