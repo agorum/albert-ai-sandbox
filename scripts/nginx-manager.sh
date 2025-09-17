@@ -51,21 +51,6 @@ EOF
     if [ -n "${mcphub_port}" ]; then
         cat >> "$cfg" <<EOF
 
-# MCP Hub proxy
-location /${container_name}/mcphub/ {
-    proxy_pass http://localhost:${mcphub_port}/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_read_timeout 86400;
-    proxy_buffering off;
-    proxy_request_buffering off;
-}
-
 # MCP Hub API endpoints
 location /${container_name}/mcphub/mcp {
     proxy_pass http://localhost:${mcphub_port}/mcp;
@@ -108,21 +93,6 @@ create_global_mcphub_config() {
     local cfg="${NGINX_CONF_DIR}/albert-mcphub-global.conf"
 
     cat > "$cfg" <<EOF
-# Global MCP Hub proxy
-location /mcphub/ {
-    proxy_pass http://localhost:${mcphub_port}/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_read_timeout 86400;
-    proxy_buffering off;
-    proxy_request_buffering off;
-}
-
 # Global MCP Hub API endpoints
 location /mcphub/mcp {
     proxy_pass http://localhost:${mcphub_port}/mcp;

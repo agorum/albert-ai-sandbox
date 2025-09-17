@@ -106,9 +106,8 @@ create_container() {
 		echo -e "${GREEN}Name: ${name}${NC}"
 		echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
 		echo -e "${GREEN}MCP Hub: http://$(hostname -I | awk '{print $1}')/${name}/mcphub/${NC}"
-		echo -e "${GREEN}Global MCP Hub: http://$(hostname -I | awk '{print $1}')/mcphub/${NC}"
-		echo -e "${YELLOW}VNC Password: albert${NC}"
 		echo -e "${YELLOW}MCP Hub Login: admin / albert${NC}"
+		echo -e "${YELLOW}MCP Hub Bearer token: albert${NC}"
 		echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
 	else
 		echo -e "${RED}Error creating container${NC}"

@@ -19,29 +19,22 @@
   "users": [
     {
       "username": "admin",
-      "password": "$2b$10$N9qo8uLOickgx2ZMRZoMye/92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi",
-      "admin": true
+      "password": "$2b$10$jlJL.q/UYijkDRYj3kW/uOrNTG5zETcP67D9W7SncPNxOzJxnAgFq",
+      "isAdmin": true
     }
   ],
-  "groups": [],
   "systemConfig": {
-    "port": 3000,
-    "authentication": {
-      "enabled": true,
-      "defaultAdmin": {
-        "username": "admin",
-        "password": "albert"
-      }
-    }
-  },
-  "userConfigs": {
-    "admin": {
-      "routing": {
-        "enableGlobalRoute": true,
-        "enableGroupNameRoute": true,
-        "enableBearerAuth": true,
-        "bearerAuthKey": "albert"
-      }
+    "routing": {
+      "enableGlobalRoute": true,
+      "enableGroupNameRoute": true,
+      "enableBearerAuth": true,
+      "bearerAuthKey": "albert",
+      "skipAuth": false
+    },
+    "install": {
+      "pythonIndexUrl": "",
+      "npmRegistry": "",
+      "baseUrl": "http://localhost:3000"
     }
   }
 }
