@@ -7,8 +7,46 @@ create_nginx_config() {
 	local container_name=$1
 	local novnc_port=$2
 	local mcphub_port=$3
-    
-	cat > "${NGINX_CONF_DIR}/albert-${container_name}.conf" << EOCONF
+	
+	# Check if mcphub_port is provided, if not, skip MCP Hub configuration
+	if [ -z "$mcphub_port" ]; then
+		cat > "${NGINX_CONF_DIR}/albert-${container_name}.conf" << EOCONF
+
+# Auto-redirect to noVNC with correct websocket path
+location = /${container_name}/ {
+	return 301 /${container_name}/vnc.html?path=${container_name}/websockify&password=albert&autoconnect=true&resize=scale;
+}
+
+# Main proxy for noVNC interface
+location /${container_name}/ {
+	proxy_pass http://localhost:${novnc_port}/;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+}
+
+# Websocket proxy for VNC connection
+location /${container_name}/websockify {
+	proxy_pass http://localhost:${novnc_port}/websockify;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+}
+EOCONF
+	else
+		cat > "${NGINX_CONF_DIR}/albert-${container_name}.conf" << EOCONF
 
 # Auto-redirect to noVNC with correct websocket path
 location = /${container_name}/ {
@@ -46,6 +84,50 @@ location /${container_name}/websockify {
 # MCP Hub proxy
 location /${container_name}/mcphub/ {
 	proxy_pass http://localhost:${mcphub_port}/;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+}
+
+# MCP Hub API endpoints (including SSE/streaming)
+location /${container_name}/mcphub/mcp {
+	proxy_pass http://localhost:${mcphub_port}/mcp;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+	proxy_cache off;
+}
+
+location /${container_name}/mcphub/sse {
+	proxy_pass http://localhost:${mcphub_port}/sse;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+	proxy_cache off;
+}
+EOCONF
+	fi
 	proxy_http_version 1.1;
 	proxy_set_header Upgrade \$http_upgrade;
 	proxy_set_header Connection "upgrade";

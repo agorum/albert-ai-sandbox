@@ -39,6 +39,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && \
 
 # Install MCP Hub and MCP Servers
 RUN npm install -g @samanhappy/mcphub@latest && \
+	npm install -g mcp-shell@latest && \
 	npm install -g @playwright/mcp@latest
 
 # Install additional dependencies for Playwright MCP

@@ -26,15 +26,27 @@ add_to_registry() {
 	local name=$1
 	local port=$2
 	local vnc_port=$3
+	local mcphub_port=$4
 	
 	init_registry
 	
-	local entry=$(jq -n \
-		--arg name "$name" \
-		--arg port "$port" \
-		--arg vnc_port "$vnc_port" \
-		--arg created "$(date -Iseconds)" \
-		'{name: $name, port: $port, vnc_port: $vnc_port, created: $created}')
+	# Create entry with optional mcphub_port
+	if [ -n "$mcphub_port" ]; then
+		local entry=$(jq -n \
+			--arg name "$name" \
+			--arg port "$port" \
+			--arg vnc_port "$vnc_port" \
+			--arg mcphub_port "$mcphub_port" \
+			--arg created "$(date -Iseconds)" \
+			'{name: $name, port: $port, vnc_port: $vnc_port, mcphub_port: $mcphub_port, created: $created}')
+	else
+		local entry=$(jq -n \
+			--arg name "$name" \
+			--arg port "$port" \
+			--arg vnc_port "$vnc_port" \
+			--arg created "$(date -Iseconds)" \
+			'{name: $name, port: $port, vnc_port: $vnc_port, created: $created}')
+	fi
 	
 	jq ". += [$entry]" "$REGISTRY_FILE" > "${REGISTRY_FILE}.tmp" && mv "${REGISTRY_FILE}.tmp" "$REGISTRY_FILE"
 }

@@ -60,8 +60,9 @@ create_container() {
 	# Find free ports
 	local novnc_port=$(find_free_novnc_port)
 	local vnc_port=$(find_free_vnc_port)
+	local mcphub_port=$(find_free_mcphub_port)
 	
-	if [ -z "$novnc_port" ] || [ -z "$vnc_port" ]; then
+	if [ -z "$novnc_port" ] || [ -z "$vnc_port" ] || [ -z "$mcphub_port" ]; then
 		echo -e "${RED}Error: No free ports available${NC}"
 		return 1
 	fi
@@ -69,6 +70,7 @@ create_container() {
 	echo -e "${YELLOW}Creating sandbox container '$name'...${NC}"
 	echo -e "${BLUE}  noVNC Port: $novnc_port${NC}"
 	echo -e "${BLUE}  VNC Port: $vnc_port${NC}"
+	echo -e "${BLUE}  MCP Hub Port: $mcphub_port${NC}"
 	
 	# Create Docker container
 	docker run -d \
@@ -78,25 +80,35 @@ create_container() {
 		--security-opt seccomp=unconfined \
 		-p ${novnc_port}:6081 \
 		-p ${vnc_port}:5901 \
+		-p ${mcphub_port}:3000 \
 		-e VNC_PORT=5901 \
 		-e NO_VNC_PORT=6081 \
+		-e MCP_HUB_PORT=3000 \
 		-v ${name}_data:/home/ubuntu \
 		--shm-size=2g \
 		$DOCKER_IMAGE
 	
 	if [ $? -eq 0 ]; then
 		# Register in registry
-		add_to_registry "$name" "$novnc_port" "$vnc_port"
+		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port"
 		
 		# Configure nginx
-		create_nginx_config "$name" "$novnc_port"
+		create_nginx_config "$name" "$novnc_port" "$mcphub_port"
+		
+		# Create global MCP Hub configuration (only once)
+		if [ ! -f "${NGINX_CONF_DIR}/albert-mcphub-global.conf" ]; then
+			create_global_mcphub_config "$mcphub_port"
+		fi
 		
 		echo -e "${GREEN}========================================${NC}"
 		echo -e "${GREEN}Sandbox container created successfully!${NC}"
 		echo -e "${GREEN}========================================${NC}"
 		echo -e "${GREEN}Name: ${name}${NC}"
 		echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
+		echo -e "${GREEN}MCP Hub: http://$(hostname -I | awk '{print $1}')/${name}/mcphub/${NC}"
+		echo -e "${GREEN}Global MCP Hub: http://$(hostname -I | awk '{print $1}')/mcphub/${NC}"
 		echo -e "${YELLOW}VNC Password: albert${NC}"
+		echo -e "${YELLOW}MCP Hub Login: admin / albert${NC}"
 		echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
 	else
 		echo -e "${RED}Error creating container${NC}"
