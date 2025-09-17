@@ -23,21 +23,6 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# Installiere dos2unix falls nicht vorhanden
-echo -e "${YELLOW}Prüfe dos2unix...${NC}"
-if ! command -v dos2unix &> /dev/null; then
-    echo -e "${YELLOW}Installiere dos2unix...${NC}"
-    apt-get update
-    apt-get install -y dos2unix
-fi
-
-# Konvertiere alle Shell-Scripte zu Unix-Zeilenenden
-echo -e "${YELLOW}Konvertiere Zeilenenden aller Shell-Scripte...${NC}"
-find "${SCRIPT_DIR}" -type f -name "*.sh" -exec dos2unix {} \; 2>/dev/null || {
-    echo -e "${YELLOW}dos2unix nicht verfügbar, nutze sed...${NC}"
-    find "${SCRIPT_DIR}" -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
-}
-
 # Mache alle Shell-Scripte ausführbar
 echo -e "${YELLOW}Setze Ausführungsrechte...${NC}"
 find "${SCRIPT_DIR}" -type f -name "*.sh" -exec chmod +x {} \;
