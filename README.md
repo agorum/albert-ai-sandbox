@@ -1,32 +1,26 @@
 # ALBERT Sandbox Manager
 
-Ein Docker-basiertes System zur Verwaltung isolierter Desktop-Umgebungen mit Browser-Zugriff über noVNC.
+A Docker-based system for managing isolated desktop environments with browser access via noVNC.
 
 ## Features
 
-- 🖥️ Ubuntu 22.04 Desktop-Umgebung
-- 🌐 Browser-Zugriff ohne Client-Software (noVNC)
-- 🔒 Sicherheit durch kryptische Container-Namen (kein Passwort nötig)
-- 🚀 Firefox und Chromium vorinstalliert
-- 💾 Persistente Daten über Docker Volumes
-- 🔧 Einfache Verwaltung über CLI
+- 🖥️ Ubuntu 22.04 desktop environment
+- 🌐 Browser access without client software (noVNC)
+- 🔒 Security through cryptic container names (no password needed)
+- 🚀 Firefox and Chromium pre-installed
+- 💾 Persistent data via Docker volumes
+- 🔧 Easy management via CLI
 
 ## Installation
 
 ```bash
 git clone <repository-url> albert-sandbox-manager
 cd albert-sandbox-manager
-bash prepare.sh
-./install.sh
+bash install.sh
 ```
 
-## Aufruf
+## Usage
 ```bash
 cd /opt/albert-sandbox-manager
-
-albert-sandbox-manager create        - Neuen Sandbox mit kryptischem Namen
-albert-sandbox-manager create <name> - Neuen Sandbox mit eigenem Namen
-albert-sandbox-manager list          - Container auflisten
-albert-sandbox-manager status        - Status anzeigen
-albert-sandbox-manager help          - Hilfe anzeigen
+./albert-sandbox-manager
 ```

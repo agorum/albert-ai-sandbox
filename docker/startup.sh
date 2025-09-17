@@ -3,12 +3,12 @@
 echo "Starting VNC server with 1280x720 resolution..."
 rm -rf /tmp/.X*-lock /tmp/.X11-unix
 
-# Setze automatisch das Passwort "albert"
+# Automatically set password "albert"
 su - ubuntu -c "mkdir -p ~/.vnc"
 su - ubuntu -c "echo 'albert' | vncpasswd -f > ~/.vnc/passwd"
 su - ubuntu -c "chmod 600 ~/.vnc/passwd"
 
-# Starte VNC mit 1280x720 Auflösung
+# Start VNC with 1280x720 resolution
 su - ubuntu -c 'tightvncserver :1 -geometry 1280x720 -depth 24 -rfbauth ~/.vnc/passwd' &
 
 echo "Waiting for VNC to start..."
