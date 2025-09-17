@@ -5,7 +5,7 @@ REGISTRY_FILE="/opt/albert-ai-sandbox-manager/config/container-registry.json"
 NGINX_CONF_DIR="/etc/nginx/sites-available"
 NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
 BASE_PORT=6080
-MAX_PORT=6180
+MAX_PORT=8080
 
 # Colors
 RED='\033[0;31m'

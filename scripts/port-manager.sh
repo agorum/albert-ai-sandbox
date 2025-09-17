@@ -34,12 +34,14 @@ find_free_vnc_port() {
 
 # Find a free port for MCP Hub
 find_free_mcphub_port() {
-	local port=$BASE_PORT
+	local port=$((BASE_PORT + 1000))  # Start 1000 ports higher than BASE_PORT
 	while [ $port -le $MAX_PORT ]; do
 		if ! netstat -tuln | grep -q ":$port "; then
 			if ! jq -e ".[] | select(.mcphub_port == \"$port\")" "$REGISTRY_FILE" > /dev/null 2>&1; then
-				echo $port
-				return 0
+				if ! jq -e ".[] | select(.port == \"$port\")" "$REGISTRY_FILE" > /dev/null 2>&1; then
+					echo $port
+					return 0
+				fi
 			fi
 		fi
 		((port++))

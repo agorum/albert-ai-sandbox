@@ -100,23 +100,31 @@ docker build -t albert-ai-sandbox:latest . || {
 	exit 1
 }
 
-# Configure nginx
+# Configure nginx (idempotent include handling)
 echo -e "${YELLOW}Configuring nginx...${NC}"
 
-# IMPORTANT: Clean up duplicate includes BEFORE setup
-echo -e "${YELLOW}Cleaning nginx configuration...${NC}"
-if [ -f "/etc/nginx/sites-enabled/default" ]; then
-	# Create backup
-	#cp /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.backup.$(date +%Y%m%d_%H%M%S)
-	
-	# Remove ALL old ALBERT-AI-Sandbox includes
-	sed -i '/# ALBERT Sandbox Configs/d' /etc/nginx/sites-enabled/default
-	sed -i '/include .*albert-\*.conf;/d' /etc/nginx/sites-enabled/default
-	
-	# Add ONE new include
-	sed -i '/server_name _;/a\\n\t# ALBERT Sandbox Configs\n\tinclude /etc/nginx/sites-available/albert-*.conf;' /etc/nginx/sites-enabled/default
-	
-	echo -e "${GREEN}✓ Nginx configuration cleaned${NC}"
+DEFAULT_SITE="${NGINX_ENABLED_DIR}/default"
+INCLUDE_LINE="include ${NGINX_CONF_DIR}/albert-*.conf;"
+
+if [ -f "${DEFAULT_SITE}" ]; then
+	echo -e "${YELLOW}Reconciling nginx default site includes...${NC}"
+	include_count=$(grep -c "include .*albert-\\*.conf;" "${DEFAULT_SITE}" 2>/dev/null || echo 0)
+
+	if [ "${include_count}" -gt 1 ]; then
+		# Too many includes -> clean up to a single include
+		cp "${DEFAULT_SITE}" "${DEFAULT_SITE}.backup.$(date +%Y%m%d_%H%M%S)"
+		sed -i '/# Albert Sandbox Configs/d' "${DEFAULT_SITE}"
+		sed -i '/# ALBERT Sandbox Configs/d' "${DEFAULT_SITE}"
+		sed -i '/include .*albert-\*.conf;/d' "${DEFAULT_SITE}"
+		sed -i "/server_name _;/a\\n\t# Albert Sandbox Configs\n\t${INCLUDE_LINE}" "${DEFAULT_SITE}"
+		echo -e "${GREEN}✓ Nginx includes normalized to a single line${NC}"
+	elif [ "${include_count}" -eq 0 ]; then
+		# No include -> add one
+		sed -i "/server_name _;/a\\n\t# Albert Sandbox Configs\n\t${INCLUDE_LINE}" "${DEFAULT_SITE}"
+		echo -e "${GREEN}✓ Nginx include added${NC}"
+	else
+		echo -e "${GREEN}✓ Nginx include already present (1)${NC}"
+	fi
 fi
 
 # Start/restart nginx

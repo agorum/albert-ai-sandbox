@@ -288,22 +288,22 @@ list_containers() {
 # Main program
 case "$1" in
 	create)
-		create_container "$2"
+		create_container "${2:-}"
 		;;
 	remove|delete)
-		remove_container "$2"
+		remove_container "${2:-}"
 		;;
 	start)
-		start_container "$2"
+		start_container "${2:-}"
 		;;
 	stop)
-		stop_container "$2"
+		stop_container "${2:-}"
 		;;
 	restart)
-		restart_container "$2"
+		restart_container "${2:-}"
 		;;
 	status)
-		show_status "$2"
+		show_status "${2:-}"
 		;;
 	list)
 		list_containers
