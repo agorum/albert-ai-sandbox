@@ -42,7 +42,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && \
 RUN npm install -g @samanhappy/mcphub@latest && \
 	npm i -g --omit=dev i18next@latest i18next-fs-backend@latest || true; && \
 	mkdir -p /app/frontend && \
-	# enable frontend hack && \
 	ln -s /usr/lib/node_modules/@samanhappy/mcphub/frontend/dist /app/frontend/dist && \
 	cd /app && \
 	git clone https://github.com/samanhappy/mcphub.git && \
