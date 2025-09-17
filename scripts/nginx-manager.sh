@@ -170,19 +170,36 @@ _ensure_include_and_reload() {
     local default_site="${NGINX_ENABLED_DIR}/default"
     local include_line="include ${NGINX_CONF_DIR}/albert-*.conf;"
 
-    # Proactively clean up duplicate include lines first
+    # Proactively clean up duplicate include lines first and ensure exactly one include
     cleanup_nginx_includes
-
-    if ! grep -q "${include_line}" "${default_site}"; then
-        # Insert include after server_name _; using configured NGINX_CONF_DIR
-        sed -i "/server_name _;/a\\n\t# Albert Sandbox Configs\n\t${include_line}" "${default_site}"
-        echo -e "${GREEN}✓ Nginx include added${NC}"
-    else
-        echo -e "${YELLOW}ℹ Nginx include already present${NC}"
-    fi
+    _ensure_single_include_line "$default_site" "$include_line"
 
     # Validate and reload
     nginx -t && systemctl reload nginx
+}
+
+# Internal: ensure exactly one include line exists after server_name _;
+_ensure_single_include_line() {
+    local file_path="$1"
+    local include_line="$2"
+
+    # Remove any existing markers/includes
+    sed -i '/# Albert Sandbox Configs/d' "$file_path"
+    sed -i '/# ALBERT Sandbox Configs/d' "$file_path"
+    sed -i '/include .*albert-\*.conf;/d' "$file_path"
+
+    # Insert once after server_name _; using awk to avoid sed escape quirks
+    awk -v inc_line="$include_line" '
+        BEGIN { inserted=0 }
+        {
+            print $0
+            if (!inserted && $0 ~ /server_name[[:space:]]+_;/) {
+                print "\t# Albert Sandbox Configs"
+                print "\t" inc_line
+                inserted=1
+            }
+        }
+    ' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
 }
 
 # Tidies duplicate include lines in default site
@@ -199,8 +216,8 @@ cleanup_nginx_includes() {
         sed -i '/# Albert Sandbox Configs/d' "$config_file"
         sed -i '/# ALBERT Sandbox Configs/d' "$config_file"
         sed -i "/$pattern/d" "$config_file"
-        # Add a single include line back using variables
-        sed -i "/server_name _;/a\\n\t# Albert Sandbox Configs\n\tinclude ${NGINX_CONF_DIR//\//\/}\/albert-*.conf;" "$config_file"
+        # Add a single include line back using helper
+        _ensure_single_include_line "$config_file" "include ${NGINX_CONF_DIR}/albert-*.conf;"
         echo -e "${GREEN}✓ Nginx includes cleaned up${NC}"
     fi
 }

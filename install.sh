@@ -106,22 +106,40 @@ echo -e "${YELLOW}Configuring nginx...${NC}"
 DEFAULT_SITE="${NGINX_ENABLED_DIR}/default"
 INCLUDE_LINE="include ${NGINX_CONF_DIR}/albert-*.conf;"
 
+# Helper to ensure exactly one include line after 'server_name _;' using awk (robust vs sed newlines)
+ensure_single_include_line() {
+	local file_path="$1"
+	local include_line="$2"
+
+	# Backup original once per run
+	cp "$file_path" "${file_path}.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+
+	# Remove all old markers and include lines (also catches stray variants)
+	sed -i '/# Albert Sandbox Configs/d' "$file_path"
+	sed -i '/# ALBERT Sandbox Configs/d' "$file_path"
+	sed -i '/include .*albert-\*.conf;/d' "$file_path"
+
+	# Insert a single include block after the first server_name _; line
+	awk -v inc_line="$include_line" '
+		BEGIN { inserted=0 }
+		{
+			print $0
+			if (!inserted && $0 ~ /server_name[[:space:]]+_;/) {
+				print "\t# Albert Sandbox Configs"
+				print "\t" inc_line
+				inserted=1
+			}
+		}
+	' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
+}
+
 if [ -f "${DEFAULT_SITE}" ]; then
 	echo -e "${YELLOW}Reconciling nginx default site includes...${NC}"
 	include_count=$(grep -c "include .*albert-\\*.conf;" "${DEFAULT_SITE}" 2>/dev/null || echo 0)
 
-	if [ "${include_count}" -gt 1 ]; then
-		# Too many includes -> clean up to a single include
-		cp "${DEFAULT_SITE}" "${DEFAULT_SITE}.backup.$(date +%Y%m%d_%H%M%S)"
-		sed -i '/# Albert Sandbox Configs/d' "${DEFAULT_SITE}"
-		sed -i '/# ALBERT Sandbox Configs/d' "${DEFAULT_SITE}"
-		sed -i '/include .*albert-\*.conf;/d' "${DEFAULT_SITE}"
-		sed -i "/server_name _;/a\\n\t# Albert Sandbox Configs\n\t${INCLUDE_LINE}" "${DEFAULT_SITE}"
-		echo -e "${GREEN}✓ Nginx includes normalized to a single line${NC}"
-	elif [ "${include_count}" -eq 0 ]; then
-		# No include -> add one
-		sed -i "/server_name _;/a\\n\t# Albert Sandbox Configs\n\t${INCLUDE_LINE}" "${DEFAULT_SITE}"
-		echo -e "${GREEN}✓ Nginx include added${NC}"
+	if [ "${include_count}" -ne 1 ]; then
+		ensure_single_include_line "${DEFAULT_SITE}" "${INCLUDE_LINE}"
+		echo -e "${GREEN}✓ Nginx include normalized to a single line${NC}"
 	else
 		echo -e "${GREEN}✓ Nginx include already present (1)${NC}"
 	fi
