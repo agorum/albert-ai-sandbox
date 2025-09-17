@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Common variables and functions
-REGISTRY_FILE="/opt/albert-sandbox-manager/config/container-registry.json"
+REGISTRY_FILE="/opt/albert-ai-sandbox-manager/config/container-registry.json"
 NGINX_CONF_DIR="/etc/nginx/sites-available"
 NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
 BASE_PORT=6080

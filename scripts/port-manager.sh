@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source /opt/albert-sandbox-manager/scripts/common.sh
+source /opt/albert-ai-sandbox-manager/scripts/common.sh
 
 # Find a free port for noVNC
 find_free_novnc_port() {

@@ -14,13 +14,13 @@ A Docker-based system for managing isolated desktop environments with browser ac
 ## Installation
 
 ```bash
-git clone <repository-url> albert-sandbox-manager
-cd albert-sandbox-manager
+git clone <repository-url> albert-ai-sandbox-manager
+cd albert-ai-sandbox-manager
 bash install.sh
 ```
 
 ## Usage
 ```bash
-cd /opt/albert-sandbox-manager
-./albert-sandbox-manager
+cd /opt/albert-ai-sandbox-manager
+./albert-ai-sandbox-manager
 ```

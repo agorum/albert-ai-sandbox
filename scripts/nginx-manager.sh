@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source /opt/albert-sandbox-manager/scripts/common.sh
+source /opt/albert-ai-sandbox-manager/scripts/common.sh
 
 # Create nginx configuration for container
 create_nginx_config() {

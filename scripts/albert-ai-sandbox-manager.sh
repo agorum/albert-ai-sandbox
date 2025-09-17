@@ -1,14 +1,14 @@
 #!/bin/bash
 
-source /opt/albert-sandbox-manager/scripts/common.sh
-source /opt/albert-sandbox-manager/scripts/port-manager.sh
-source /opt/albert-sandbox-manager/scripts/nginx-manager.sh
+source /opt/albert-ai-sandbox-manager/scripts/common.sh
+source /opt/albert-ai-sandbox-manager/scripts/port-manager.sh
+source /opt/albert-ai-sandbox-manager/scripts/nginx-manager.sh
 
-DOCKER_IMAGE="albert-sandbox:latest"
+DOCKER_IMAGE="albert-ai-sandbox:latest"
 
 # Show help
 show_help() {
-	echo -e "${GREEN}ALBERT Sandbox Manager${NC}"
+	echo -e "${GREEN}ALBERT | AI Sandbox Manager${NC}"
 	echo -e "${GREEN}=======================${NC}"
 	echo "Usage: $0 [COMMAND] [OPTIONS]"
 	echo ""
@@ -36,7 +36,7 @@ show_help() {
 # Build Docker image
 build_image() {
 	echo -e "${YELLOW}Building Docker image...${NC}"
-	cd /opt/albert-sandbox-manager/docker
+	cd /opt/albert-ai-sandbox-manager/docker
 	docker build -t $DOCKER_IMAGE .
 	echo -e "${GREEN}Image built successfully${NC}"
 }

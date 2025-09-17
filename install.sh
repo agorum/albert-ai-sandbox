@@ -9,7 +9,7 @@ NC='\033[0m'
 
 # Base variables
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-INSTALL_DIR="/opt/albert-sandbox-manager"
+INSTALL_DIR="/opt/albert-ai-sandbox-manager"
 NGINX_CONF_DIR="/etc/nginx/sites-available"
 NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
 
@@ -94,7 +94,7 @@ fi
 # Build Docker image
 echo -e "${YELLOW}Building Docker image...${NC}"
 cd ${INSTALL_DIR}/docker
-docker build -t albert-sandbox:latest . || {
+docker build -t albert-ai-sandbox:latest . || {
 	echo -e "${RED}Error building Docker image!${NC}"
 	echo -e "${YELLOW}Please check Docker installation and Dockerfile.${NC}"
 	exit 1
@@ -109,7 +109,7 @@ if [ -f "/etc/nginx/sites-enabled/default" ]; then
 	# Create backup
 	#cp /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.backup.$(date +%Y%m%d_%H%M%S)
 	
-	# Remove ALL old ALBERT-Sandbox includes
+	# Remove ALL old ALBERT-AI-Sandbox includes
 	sed -i '/# ALBERT Sandbox Configs/d' /etc/nginx/sites-enabled/default
 	sed -i '/include .*albert-\*.conf;/d' /etc/nginx/sites-enabled/default
 	
@@ -128,18 +128,18 @@ nginx -t && systemctl reload nginx || {
 
 # Create symlink for easy access
 echo -e "${YELLOW}Creating symlink for global access...${NC}"
-ln -sf ${INSTALL_DIR}/scripts/albert-sandbox-manager.sh /usr/local/bin/albert-sandbox-manager
+ln -sf ${INSTALL_DIR}/scripts/albert-ai-sandbox-manager.sh /usr/local/bin/albert-ai-sandbox-manager
 
 # Verify installation
 echo -e "${YELLOW}Verifying installation...${NC}"
-if [ -f "/usr/local/bin/albert-sandbox-manager" ] && [ -x "/usr/local/bin/albert-sandbox-manager" ]; then
-	echo -e "${GREEN}✓ albert-sandbox-manager successfully installed${NC}"
+if [ -f "/usr/local/bin/albert-ai-sandbox-manager" ] && [ -x "/usr/local/bin/albert-ai-sandbox-manager" ]; then
+	echo -e "${GREEN}✓ albert-ai-sandbox-manager successfully installed${NC}"
 else
-	echo -e "${RED}✗ albert-sandbox-manager installation failed${NC}"
+	echo -e "${RED}✗ albert-ai-sandbox-manager installation failed${NC}"
 	exit 1
 fi
 
-if docker images | grep -q "albert-sandbox"; then
+if docker images | grep -q "albert-ai-sandbox"; then
 	echo -e "${GREEN}✓ Docker image successfully built${NC}"
 else
 	echo -e "${RED}✗ Docker image not found${NC}"
@@ -170,23 +170,23 @@ echo -e "${GREEN}Installation completed!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 echo "Usage:"
-echo "  albert-sandbox-manager create        - New sandbox with cryptic name"
-echo "  albert-sandbox-manager create <name> - New sandbox with custom name"
-echo "  albert-sandbox-manager list          - List containers"
-echo "  albert-sandbox-manager status        - Show status"
-echo "  albert-sandbox-manager help          - Show help"
+echo "  albert-ai-sandbox-manager create        - New sandbox with cryptic name"
+echo "  albert-ai-sandbox-manager create <name> - New sandbox with custom name"
+echo "  albert-ai-sandbox-manager list          - List containers"
+echo "  albert-ai-sandbox-manager status        - Show status"
+echo "  albert-ai-sandbox-manager help          - Show help"
 echo ""
 echo -e "${YELLOW}Info: VNC password for all containers: albert${NC}"
 echo ""
 echo "Example:"
-echo "  albert-sandbox-manager create"
+echo "  albert-ai-sandbox-manager create"
 echo ""
 echo -e "${YELLOW}Create first test sandbox? (y/n)${NC}"
 read -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-	albert-sandbox-manager create test-sandbox || {
+	albert-ai-sandbox-manager create test-sandbox || {
 		echo -e "${RED}Error creating test sandbox${NC}"
-		echo -e "${YELLOW}Try: albert-sandbox-manager create${NC}"
+		echo -e "${YELLOW}Try: albert-ai-sandbox-manager create${NC}"
 	}
 fi
