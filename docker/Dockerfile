@@ -65,6 +65,59 @@ RUN mkdir -p /home/ubuntu/.vnc && \
 	chmod +x /home/ubuntu/.vnc/xstartup && \
 	chown -R ubuntu:ubuntu /home/ubuntu
 
+# Configure XFCE to disable problematic plugins
+RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml && \
+	echo '<?xml version="1.0" encoding="UTF-8"?>' > /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '<channel name="xfce4-panel" version="1.0">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '  <property name="configver" type="int" value="2"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '  <property name="panels" type="array">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '    <value type="int" value="1"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '    <property name="panel-1" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '      <property name="position" type="string" value="p=6;x=0;y=0"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '      <property name="length" type="uint" value="100"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '      <property name="position-locked" type="bool" value="true"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '      <property name="size" type="uint" value="30"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '      <property name="plugin-ids" type="array">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '        <value type="int" value="1"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '        <value type="int" value="2"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '        <value type="int" value="3"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '        <value type="int" value="4"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '      </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '    </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '  </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '  <property name="plugins" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '    <property name="plugin-1" type="string" value="applicationsmenu"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '    <property name="plugin-2" type="string" value="tasklist"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '    <property name="plugin-3" type="string" value="separator"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '    <property name="plugin-4" type="string" value="clock"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '  </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	echo '</channel>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml && \
+	chown -R ubuntu:ubuntu /home/ubuntu/.config
+
+# Disable XFCE session management and power manager to prevent error dialogs
+RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml && \
+	echo '<?xml version="1.0" encoding="UTF-8"?>' > /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '<channel name="xfce4-session" version="1.0">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '  <property name="startup" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '    <property name="screensaver" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '      <property name="enabled" type="bool" value="false"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '    </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '  </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '  <property name="general" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '    <property name="FailsafeSessionName" type="string" value="Failsafe"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '    <property name="SessionName" type="string" value="Default"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '    <property name="SaveOnExit" type="bool" value="false"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '  </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '</channel>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml && \
+	echo '<?xml version="1.0" encoding="UTF-8"?>' > /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
+	echo '<channel name="xfce4-power-manager" version="1.0">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
+	echo '  <property name="xfce4-power-manager" type="empty">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
+	echo '    <property name="power-button-action" type="uint" value="3"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
+	echo '    <property name="show-tray-icon" type="bool" value="false"/>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
+	echo '  </property>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
+	echo '</channel>' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml && \
+	chown -R ubuntu:ubuntu /home/ubuntu/.config
+
 # Create desktop shortcuts
 RUN mkdir -p /home/ubuntu/Desktop && \
 	echo "[Desktop Entry]" > /home/ubuntu/Desktop/firefox.desktop && \
