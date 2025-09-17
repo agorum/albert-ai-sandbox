@@ -145,7 +145,7 @@ RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml && \
 
 # Copy and configure desktop background
 COPY desktop-background.jpg /usr/share/pixmaps/desktop-background.jpg
-RUN chmod 644 /usr/share/pixmaps/desktop-background.jpg && \
+RUN chmod 644 /usr/share/pixmaps/desktop-background.jpg
 
 # Copy MCP Hub configuration
 COPY mcp_settings.json /app/mcp_settings.json
