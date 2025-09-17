@@ -60,5 +60,5 @@ get_all_containers() {
 # Generate cryptic name
 generate_cryptic_name() {
 	local prefix=${1:-"sandbox"}
-	echo "${prefix}-$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)"
+	echo "${prefix}-$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 24 | head -n 1)"
 }
