@@ -45,8 +45,7 @@ apt-get install -y \
 	git \
 	python3 \
 	python3-pip \
-	net-tools \
-	dos2unix
+	net-tools
 
 # Docker installation
 echo -e "${YELLOW}Installing Docker...${NC}"
@@ -73,12 +72,6 @@ cp -r ${SCRIPT_DIR}/docker/* ${INSTALL_DIR}/docker/ 2>/dev/null || {
 	echo -e "${YELLOW}Docker directory not found, skipping...${NC}"
 }
 cp -r ${SCRIPT_DIR}/config/* ${INSTALL_DIR}/config/ 2>/dev/null || true
-
-# Convert all copied shell scripts to Unix line endings again
-echo -e "${YELLOW}Converting line endings of installed scripts...${NC}"
-find "${INSTALL_DIR}" -type f -name "*.sh" -exec dos2unix {} \; 2>/dev/null || {
-	find "${INSTALL_DIR}" -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
-}
 
 # Set permissions
 echo -e "${YELLOW}Setting permissions...${NC}"
