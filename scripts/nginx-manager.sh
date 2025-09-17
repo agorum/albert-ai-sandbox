@@ -6,6 +6,7 @@ source /opt/albert-ai-sandbox-manager/scripts/common.sh
 create_nginx_config() {
 	local container_name=$1
 	local novnc_port=$2
+	local mcphub_port=$3
     
 	cat > "${NGINX_CONF_DIR}/albert-${container_name}.conf" << EOCONF
 
@@ -40,6 +41,52 @@ location /${container_name}/websockify {
 	proxy_set_header X-Forwarded-Proto \$scheme;
 	proxy_read_timeout 86400;
 	proxy_buffering off;
+}
+
+# MCP Hub proxy
+location /${container_name}/mcphub/ {
+	proxy_pass http://localhost:${mcphub_port}/;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+}
+
+# MCP Hub API endpoints (including SSE/streaming)
+location /${container_name}/mcphub/mcp {
+	proxy_pass http://localhost:${mcphub_port}/mcp;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+	proxy_cache off;
+}
+
+location /${container_name}/mcphub/sse {
+	proxy_pass http://localhost:${mcphub_port}/sse;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+	proxy_cache off;
 }
 EOCONF
 
@@ -86,4 +133,70 @@ cleanup_nginx_includes() {
 		
 		echo -e "${GREEN}✓ Nginx includes cleaned up${NC}"
 	fi
+}
+
+# Create global MCP Hub configuration
+create_global_mcphub_config() {
+	local mcphub_port=$1
+	
+	cat > "${NGINX_CONF_DIR}/albert-mcphub-global.conf" << EOCONF
+
+# Global MCP Hub proxy
+location /mcphub/ {
+	proxy_pass http://localhost:${mcphub_port}/;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+}
+
+# Global MCP Hub API endpoints (including SSE/streaming)
+location /mcphub/mcp {
+	proxy_pass http://localhost:${mcphub_port}/mcp;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+	proxy_cache off;
+}
+
+location /mcphub/sse {
+	proxy_pass http://localhost:${mcphub_port}/sse;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade \$http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host \$host;
+	proxy_set_header X-Real-IP \$remote_addr;
+	proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto \$scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+	proxy_cache off;
+}
+EOCONF
+
+	# Add include to main configuration - BUT ONLY IF NOT ALREADY PRESENT
+	if ! grep -q "include ${NGINX_CONF_DIR}/albert-\*.conf;" /etc/nginx/sites-enabled/default; then
+		# Add include after server_name
+		sed -i '/server_name _;/a\\n\t# Albert Sandbox Configs\n\tinclude /etc/nginx/sites-available/albert-*.conf;' /etc/nginx/sites-enabled/default
+		echo -e "${GREEN}✓ Nginx include added${NC}"
+	else
+		echo -e "${YELLOW}ℹ Nginx include already present${NC}"
+	fi
+	
+	# Reload nginx
+	nginx -t && systemctl reload nginx
 }

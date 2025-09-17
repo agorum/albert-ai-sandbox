@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:1
 ENV VNC_PORT=5901
 ENV NO_VNC_PORT=6081
+ENV MCP_HUB_PORT=3000
 
 # System updates and desktop with classic browser packages
 RUN apt-get update && apt-get upgrade -y && \
@@ -30,6 +31,18 @@ RUN apt-get update && apt-get upgrade -y && \
 	lsb-release \
 	ca-certificates \
 	&& apt-get clean
+
+# Install Node.js (Latest LTS) and npm for MCP Hub
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && \
+	apt-get install -y nodejs && \
+	npm install -g npm@latest
+
+# Install MCP Hub and MCP Servers
+RUN npm install -g @samanhappy/mcphub@latest && \
+	npm install -g @playwright/mcp@latest
+
+# Install additional dependencies for Playwright MCP
+RUN npx playwright install --with-deps chromium
 
 # Install Firefox via Mozilla PPA (not Snap)
 RUN add-apt-repository -y ppa:mozillateam/ppa && \
@@ -133,6 +146,11 @@ RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml && \
 # Copy and configure desktop background
 COPY desktop-background.jpg /usr/share/pixmaps/desktop-background.jpg
 RUN chmod 644 /usr/share/pixmaps/desktop-background.jpg && \
+
+# Copy MCP Hub configuration
+COPY mcp_settings.json /app/mcp_settings.json
+RUN mkdir -p /app && \
+	chown -R ubuntu:ubuntu /app && \
 	mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml && \
 	echo '<?xml version="1.0" encoding="UTF-8"?>' > /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
 	echo '<channel name="xfce4-desktop" version="1.0">' >> /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml && \
@@ -213,6 +231,7 @@ RUN chmod +x /startup.sh
 
 EXPOSE ${VNC_PORT}
 EXPOSE ${NO_VNC_PORT}
+EXPOSE ${MCP_HUB_PORT}
 
 USER root
 WORKDIR /home/ubuntu

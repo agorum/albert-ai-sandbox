@@ -1,0 +1,47 @@
+{
+  "mcpServers": {
+    "mcp-shell": {
+      "command": "npx",
+      "args": ["-y", "mcp-shell"],
+      "env": {
+      },
+      "timeout": 120000
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--headless"],
+      "timeout": 60000,
+      "env": {
+        "PLAYWRIGHT_BROWSERS_PATH": "/tmp/browsers"
+      }
+    }
+  },
+  "users": [
+    {
+      "username": "admin",
+      "password": "$2b$10$N9qo8uLOickgx2ZMRZoMye/92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi",
+      "admin": true
+    }
+  ],
+  "groups": [],
+  "systemConfig": {
+    "port": 3000,
+    "authentication": {
+      "enabled": true,
+      "defaultAdmin": {
+        "username": "admin",
+        "password": "albert"
+      }
+    }
+  },
+  "userConfigs": {
+    "admin": {
+      "routing": {
+        "enableGlobalRoute": true,
+        "enableGroupNameRoute": true,
+        "enableBearerAuth": true,
+        "bearerAuthKey": "albert"
+      }
+    }
+  }
+}

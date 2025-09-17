@@ -17,6 +17,9 @@ sleep 5
 echo "Starting noVNC..."
 websockify --web=/usr/share/novnc/ 6081 localhost:5901 &
 
+echo "Starting MCP Hub..."
+cd /app && MCP_HUB_ADMIN_PASSWORD=albert PORT=3000 mcphub &
+
 echo "Waiting for XFCE to initialize..."
 sleep 5
 
