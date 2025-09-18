@@ -61,8 +61,9 @@ create_container() {
 	local novnc_port=$(find_free_novnc_port)
 	local vnc_port=$(find_free_vnc_port)
 	local mcphub_port=$(find_free_mcphub_port)
+	local filesvc_port=$(find_free_filesvc_port)
 	
-	if [ -z "$novnc_port" ] || [ -z "$vnc_port" ] || [ -z "$mcphub_port" ]; then
+	if [ -z "$novnc_port" ] || [ -z "$vnc_port" ] || [ -z "$mcphub_port" ] || [ -z "$filesvc_port" ]; then
 		echo -e "${RED}Error: No free ports available${NC}"
 		return 1
 	fi
@@ -71,6 +72,7 @@ create_container() {
 	echo -e "${BLUE}  noVNC Port: $novnc_port${NC}"
 	echo -e "${BLUE}  VNC Port: $vnc_port${NC}"
 	echo -e "${BLUE}  MCP Hub Port: $mcphub_port${NC}"
+	echo -e "${BLUE}  File Service Port: $filesvc_port${NC}"
 	
 	# Create Docker container
 	docker run -d \
@@ -81,19 +83,21 @@ create_container() {
 		-p ${novnc_port}:6081 \
 		-p ${vnc_port}:5901 \
 		-p ${mcphub_port}:3000 \
+		-p ${filesvc_port}:4000 \
 		-e VNC_PORT=5901 \
 		-e NO_VNC_PORT=6081 \
 		-e MCP_HUB_PORT=3000 \
+		-e FILE_SERVICE_PORT=4000 \
 		-v ${name}_data:/home/ubuntu \
 		--shm-size=2g \
 		$DOCKER_IMAGE
 	
 	if [ $? -eq 0 ]; then
 		# Register in registry
-		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port"
+		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port"
 		
-		# Configure nginx
-		create_nginx_config "$name" "$novnc_port" "$mcphub_port"
+		# Configure nginx (includes file service)
+		create_nginx_config "$name" "$novnc_port" "$mcphub_port" "$filesvc_port"
 		
 		# Create global MCP Hub configuration (only once)
 		if [ ! -f "${NGINX_CONF_DIR}/albert-mcphub-global.conf" ]; then
@@ -106,6 +110,8 @@ create_container() {
 		echo -e "${GREEN}Name: ${name}${NC}"
 		echo -e "${GREEN}DESKTOP: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
 		echo -e "${GREEN}MCP URL: http://$(hostname -I | awk '{print $1}')/${name}/mcphub/mcp${NC}"
+		echo -e "${GREEN}File Service Upload: http://$(hostname -I | awk '{print $1}')/${name}/files/upload${NC}"
+		echo -e "${GREEN}File Service Download: http://$(hostname -I | awk '{print $1}')/${name}/files/download?path=/tmp/albert-files/<uuid.ext>${NC}"
 		echo -e "${YELLOW}MCP Hub Bearer token: albert${NC}"
 		echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
 	else

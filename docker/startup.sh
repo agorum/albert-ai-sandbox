@@ -17,6 +17,10 @@ sleep 5
 echo "Starting noVNC..."
 websockify --web=/usr/share/novnc/ 6081 localhost:5901 &
 
+echo init upload directory
+mkdir /tmp/albert-files
+chmod 777 /tmp/albert-files
+
 echo "Starting MCP Hub..."
 mkdir /tmp/playwright-mcp-output
 chmod 777 /tmp/playwright-mcp-output
@@ -64,6 +68,10 @@ EOF'
 
 su - ubuntu -c 'chmod +x /tmp/set_background.sh'
 su - ubuntu -c '/tmp/set_background.sh' &
+
+echo "Starting File Service..."
+export FILE_SERVICE_PORT=${FILE_SERVICE_PORT:-4000}
+python3 /app/file_service.py &
 
 echo "Services started. Keeping container alive..."
 tail -f /dev/null

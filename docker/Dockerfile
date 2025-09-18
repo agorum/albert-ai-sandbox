@@ -5,6 +5,7 @@ ENV DISPLAY=:1
 ENV VNC_PORT=5901
 ENV NO_VNC_PORT=6081
 ENV MCP_HUB_PORT=3000
+ENV FILE_SERVICE_PORT=4000
 
 # System updates and desktop with classic browser packages
 RUN apt-get update && apt-get upgrade -y && \
@@ -32,6 +33,9 @@ RUN apt-get update && apt-get upgrade -y && \
 	ca-certificates \
 	python3-pip \
 	&& apt-get clean
+
+# Python dependencies for the file service
+RUN pip3 install --no-cache-dir flask
 
 # Install Node.js (Latest LTS) and npm for MCP Hub
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && \
@@ -236,6 +240,9 @@ RUN mkdir -p /home/ubuntu/Desktop && \
 # noVNC Setup
 RUN ln -s /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
+# Copy file upload/download service
+COPY file_service.py /app/file_service.py
+
 # Copy startup script
 COPY startup.sh /startup.sh
 RUN chmod +x /startup.sh
@@ -243,6 +250,7 @@ RUN chmod +x /startup.sh
 EXPOSE ${VNC_PORT}
 EXPOSE ${NO_VNC_PORT}
 EXPOSE ${MCP_HUB_PORT}
+EXPOSE ${FILE_SERVICE_PORT}
 
 USER root
 WORKDIR /home/ubuntu

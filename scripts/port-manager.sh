@@ -48,3 +48,23 @@ find_free_mcphub_port() {
 	done
 	return 1
 }
+
+# Find a free port for File service
+find_free_filesvc_port() {
+	local port=$((BASE_PORT + 1200))  # Start 1200 ports higher than BASE_PORT
+	while [ $port -le $MAX_PORT ]; do
+		if ! netstat -tuln | grep -q ":$port "; then
+			# ensure not used by any sandbox as generic .port either
+			if ! jq -e ".[] | select(.filesvc_port == \"$port\")" "$REGISTRY_FILE" > /dev/null 2>&1; then
+				if ! jq -e ".[] | select(.port == \"$port\")" "$REGISTRY_FILE" > /dev/null 2>&1; then
+					if ! jq -e ".[] | select(.mcphub_port == \"$port\")" "$REGISTRY_FILE" > /dev/null 2>&1; then
+						echo $port
+						return 0
+					fi
+				fi
+			fi
+		fi
+		((port++))
+	done
+	return 1
+}

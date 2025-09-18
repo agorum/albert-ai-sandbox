@@ -10,6 +10,7 @@ create_nginx_config() {
     local container_name="$1"
     local novnc_port="$2"
     local mcphub_port="${3:-}"
+    local filesvc_port="${4:-}"
 
     local cfg="${NGINX_CONF_DIR}/albert-${container_name}.conf"
 
@@ -69,6 +70,27 @@ location /${container_name}/mcphub/mcp {
 
 location /${container_name}/mcphub/sse {
     proxy_pass http://localhost:${mcphub_port}/sse;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 86400;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+}
+EOF
+    fi
+
+    if [ -n "${filesvc_port}" ]; then
+        cat >> "$cfg" <<EOF
+
+# File service (upload/download)
+location /${container_name}/files/ {
+    proxy_pass http://localhost:${filesvc_port}/;
     proxy_http_version 1.1;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection "upgrade";
