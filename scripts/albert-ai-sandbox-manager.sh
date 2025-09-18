@@ -284,7 +284,8 @@ list_containers() {
 }
 
 # Main program
-case "$1" in
+# Use a safe default for $1 to avoid "unbound variable" errors when no argument is provided
+case "${1:-}" in
 	create)
 		create_container "${2:-}"
 		;;
@@ -313,7 +314,7 @@ case "$1" in
 		show_help
 		;;
 	*)
-		echo -e "${RED}Unknown command: $1${NC}"
+		echo -e "${RED}Unknown command: ${1:-}(none)${NC}"
 		show_help
 		exit 1
 		;;
