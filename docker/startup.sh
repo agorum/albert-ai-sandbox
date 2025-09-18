@@ -18,7 +18,10 @@ echo "Starting noVNC..."
 websockify --web=/usr/share/novnc/ 6081 localhost:5901 &
 
 echo "Starting MCP Hub..."
-cd /app && MCP_HUB_ADMIN_PASSWORD=albert PORT=3000 mcphub &
+mkdir /tmp/playwright-mcp-output
+chmod 777 /tmp/playwright-mcp-output
+su - ubuntu -c 'export DISPLAY=:1.0 && cd /app && MCP_HUB_ADMIN_PASSWORD=albert PORT=3000 mcphub &'
+#cd /app && MCP_HUB_ADMIN_PASSWORD=albert PORT=3000 mcphub &
 
 echo "Waiting for XFCE to initialize..."
 sleep 5

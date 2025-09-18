@@ -1,16 +1,16 @@
 {
   "mcpServers": {
-    "mcp-shell": {
+    "bash-mcp": {
       "command": "npx",
-      "args": ["-y", "mcp-shell"],
+      "args": ["-y", "bash-mcp"],
       "env": {
       },
-      "timeout": 120000
+      "timeout": 180000
     },
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@latest", "--headless"],
-      "timeout": 60000,
+      "args": ["@playwright/mcp@latest", "--no-sandbox", "--isolated", "--browser firefox"],
+      "timeout": 180000,
       "env": {
         "PLAYWRIGHT_BROWSERS_PATH": "/tmp/browsers"
       }

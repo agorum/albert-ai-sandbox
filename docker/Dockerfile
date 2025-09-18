@@ -30,6 +30,7 @@ RUN apt-get update && apt-get upgrade -y && \
 	gnupg \
 	lsb-release \
 	ca-certificates \
+	python3-pip \
 	&& apt-get clean
 
 # Install Node.js (Latest LTS) and npm for MCP Hub
@@ -46,7 +47,6 @@ RUN npm install -g @samanhappy/mcphub@latest && \
 	cd /app && \
 	git clone https://github.com/samanhappy/mcphub.git && \
 	cp mcphub/package.json . && \
-	npm install -g mcp-shell@latest && \
 	npm install -g @playwright/mcp@latest
 
 # Fallback: extend Node module resolution to global path
