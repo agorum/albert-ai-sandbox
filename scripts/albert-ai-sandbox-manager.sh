@@ -104,9 +104,8 @@ create_container() {
 		echo -e "${GREEN}Sandbox container created successfully!${NC}"
 		echo -e "${GREEN}========================================${NC}"
 		echo -e "${GREEN}Name: ${name}${NC}"
-		echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
-		echo -e "${GREEN}MCP Hub: http://$(hostname -I | awk '{print $1}')/${name}/mcphub/${NC}"
-		echo -e "${YELLOW}MCP Hub Login: admin / albert${NC}"
+		echo -e "${GREEN}DESKTOP: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
+		echo -e "${GREEN}MCP URL: http://$(hostname -I | awk '{print $1}')/${name}/mcphub/mcp${NC}"
 		echo -e "${YELLOW}MCP Hub Bearer token: albert${NC}"
 		echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
 	else
