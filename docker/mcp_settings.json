@@ -5,12 +5,16 @@
       "args": ["-y", "bash-mcp"],
       "env": {
       },
-      "timeout": 180000
+      "options": {
+        "timeout": 300000
+      }
     },
     "playwright": {
       "command": "npx",
       "args": ["@playwright/mcp@latest", "--no-sandbox", "--isolated"],
-      "timeout": 180000,
+      "options": {
+        "timeout": 300000
+      },
       "env": {
         "PLAYWRIGHT_BROWSERS_PATH": "/tmp/browsers"
       }
