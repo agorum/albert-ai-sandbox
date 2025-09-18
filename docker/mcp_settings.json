@@ -9,7 +9,7 @@
     },
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@latest", "--no-sandbox", "--isolated", "--browser firefox"],
+      "args": ["@playwright/mcp@latest", "--no-sandbox", "--isolated"],
       "timeout": 180000,
       "env": {
         "PLAYWRIGHT_BROWSERS_PATH": "/tmp/browsers"
