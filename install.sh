@@ -45,13 +45,18 @@ apt-get install -y \
 	git \
 	python3 \
 	python3-pip \
+	python3-venv \
 	net-tools
 
 # Python dependencies for manager service (use dedicated venv to avoid PEP 668 issues)
 echo -e "${YELLOW}Setting up Python virtual environment...${NC}"
 VENV_DIR="${INSTALL_DIR}/venv"
 if [ ! -d "${VENV_DIR}" ]; then
-	python3 -m venv "${VENV_DIR}" || { echo -e "${RED}Failed to create virtualenv${NC}"; exit 1; }
+	python3 -m venv "${VENV_DIR}" || {
+		echo -e "${YELLOW}First venv attempt failed, installing python3-venv and retrying...${NC}";
+		apt-get install -y python3-venv >/dev/null 2>&1 || true
+		python3 -m venv "${VENV_DIR}" || { echo -e "${RED}Failed to create virtualenv after retry${NC}"; exit 1; };
+	}
 fi
 "${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel --quiet || true
 echo -e "${YELLOW}Installing Python requirements in venv...${NC}"
