@@ -31,8 +31,12 @@ PY
 			shift 2 ;;
 		--non-interactive) NON_INTERACTIVE=1; shift ;;
 		--) shift; GLOBAL_PARSED+=("$@"); break ;;
-		create|remove|delete|start|stop|restart|status|list|build|help|--help|-h|"" )
-			GLOBAL_PARSED+=("$1" "$2" "$3" "$4") # push remaining (roughly); exact command parsing later
+		create|remove|delete|start|stop|restart|status|list|build|help|--help|-h)
+			# Push the command and the rest of the arguments safely without referencing unset $2/$3...
+			GLOBAL_PARSED+=("$@")
+			break ;;
+		"")
+			# No command provided; break and let main case show help
 			break ;;
 		*) GLOBAL_PARSED+=("$1"); shift ;;
 	esac
