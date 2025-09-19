@@ -47,6 +47,15 @@ apt-get install -y \
 	python3-pip \
 	net-tools
 
+# Python dependencies for manager service
+echo -e "${YELLOW}Installing Python requirements...${NC}"
+if [ -f "${SCRIPT_DIR}/requirements.txt" ]; then
+    pip3 install --no-cache-dir -r "${SCRIPT_DIR}/requirements.txt" || {
+        echo -e "${RED}Failed to install Python requirements${NC}"; exit 1; }
+else
+    echo -e "${YELLOW}requirements.txt not found, skipping Python deps (manager service may fail)${NC}"
+fi
+
 # Docker installation
 echo -e "${YELLOW}Installing Docker...${NC}"
 if ! command -v docker &> /dev/null; then
@@ -72,6 +81,7 @@ cp -r ${SCRIPT_DIR}/docker/* ${INSTALL_DIR}/docker/ 2>/dev/null || {
 	echo -e "${YELLOW}Docker directory not found, skipping...${NC}"
 }
 cp -r ${SCRIPT_DIR}/config/* ${INSTALL_DIR}/config/ 2>/dev/null || true
+cp -r ${SCRIPT_DIR}/requirements.txt ${INSTALL_DIR}/ 2>/dev/null || true
 
 # Set permissions
 echo -e "${YELLOW}Setting permissions...${NC}"
@@ -155,6 +165,76 @@ nginx -t && systemctl reload nginx || {
 # Create symlink for easy access
 echo -e "${YELLOW}Creating symlink for global access...${NC}"
 ln -sf ${INSTALL_DIR}/scripts/albert-ai-sandbox-manager.sh /usr/local/bin/albert-ai-sandbox-manager
+ln -sf ${INSTALL_DIR}/scripts/api-key-manager.sh /usr/local/bin/albert-api-key-manager 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Container Manager Service (systemd setup)
+# ---------------------------------------------------------------------------
+MANAGER_SERVICE_FILE="/etc/systemd/system/albert-container-manager.service"
+if [ ! -f "$MANAGER_SERVICE_FILE" ]; then
+cat > "$MANAGER_SERVICE_FILE" <<'EOF'
+[Unit]
+Description=ALBERT Container Manager REST Service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/albert-ai-sandbox-manager
+ExecStart=/usr/bin/env python3 /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py
+Restart=on-failure
+RestartSec=5
+Environment=MANAGER_PORT=5001
+# Optional: restrict privileges a bit (comment out if causing issues)
+# NoNewPrivileges=true
+# ProtectSystem=full
+# ProtectHome=true
+# PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	systemctl daemon-reload
+	systemctl enable albert-container-manager.service
+	systemctl start albert-container-manager.service || echo -e "${YELLOW}Warning: Manager service failed to start; check logs with: journalctl -u albert-container-manager -e${NC}"
+else
+	echo -e "${YELLOW}Manager service unit already exists, skipping creation${NC}"
+	systemctl daemon-reload
+	systemctl enable albert-container-manager.service
+	systemctl restart albert-container-manager.service || true
+fi
+
+# ---------------------------------------------------------------------------
+# Nginx routing for manager service under /manager/
+# ---------------------------------------------------------------------------
+MANAGER_NGX_CONF="${NGINX_CONF_DIR}/albert-manager.conf"
+if [ ! -f "$MANAGER_NGX_CONF" ]; then
+cat > "$MANAGER_NGX_CONF" <<'EOF'
+# Reverse proxy for ALBERT Container Manager REST API
+location /manager/ {
+	proxy_pass http://localhost:5001/;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade $http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host $host;
+	proxy_set_header X-Real-IP $remote_addr;
+	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto $scheme;
+	proxy_read_timeout 86400;
+	proxy_buffering off;
+	proxy_request_buffering off;
+	proxy_cache off;
+}
+EOF
+	echo -e "${GREEN}✓ Nginx manager route installed (/manager/)${NC}"
+else
+	echo -e "${YELLOW}Nginx manager route already exists, skipping${NC}"
+fi
+
+# Ensure include line exists (reuse logic already applied earlier)
+if systemctl is-active --quiet nginx; then
+	nginx -t && systemctl reload nginx || systemctl restart nginx || true
+fi
 
 # Verify installation
 echo -e "${YELLOW}Verifying installation...${NC}"
@@ -201,6 +281,9 @@ echo "  albert-ai-sandbox-manager create <name> - New sandbox with custom name"
 echo "  albert-ai-sandbox-manager list          - List containers"
 echo "  albert-ai-sandbox-manager status        - Show status"
 echo "  albert-ai-sandbox-manager help          - Show help"
+echo "  albert-api-key-manager create --label <lbl>  - Create API key"
+echo "  albert-api-key-manager list                 - List API keys"
+echo "  albert-api-key-manager revoke --key <key>   - Revoke API key"
 echo ""
 echo -e "${YELLOW}Info: VNC password for all containers: albert${NC}"
 echo ""
