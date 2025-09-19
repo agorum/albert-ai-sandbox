@@ -147,20 +147,105 @@ build_image() {
 	echo -e "${GREEN}Image built successfully${NC}"
 }
 
-# --- API Key validation ----------------------------------------------------
+# --- Schema + API Key validation ----------------------------------------------------
 API_KEY_DB_ID=""
+
+ensure_schema() {
+	# Use python for reliable schema creation if available
+	if command -v python3 >/dev/null 2>&1; then
+		python3 - <<'PY'
+import os, sqlite3, sys
+db_path = os.environ.get('DB_PATH') or sys.argv[1] if len(sys.argv)>1 else None
+if not db_path:
+		sys.exit(0)
+os.makedirs(os.path.dirname(db_path), exist_ok=True)
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+cur.executescript("""
+CREATE TABLE IF NOT EXISTS api_keys (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	key_hash TEXT UNIQUE NOT NULL,
+	label TEXT,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS containers (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	api_key_id INTEGER NOT NULL,
+	container_id TEXT UNIQUE NOT NULL,
+	name TEXT,
+	image TEXT,
+	created_at INTEGER NOT NULL,
+	FOREIGN KEY(api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE
+);
+""")
+conn.commit(); conn.close()
+PY
+	else
+		# Fallback: try creating via sqlite3 CLI
+		sqlite3 "$DB_PATH" "CREATE TABLE IF NOT EXISTS api_keys(id INTEGER PRIMARY KEY AUTOINCREMENT,key_hash TEXT UNIQUE NOT NULL,label TEXT,created_at INTEGER NOT NULL);" 2>/dev/null || true
+	fi
+}
+
+lookup_api_key_id_python() {
+	local hash="$1"
+	python3 - <<PY 2>/dev/null || true
+import sqlite3, os
+db=os.environ.get('DB_PATH')
+if not db or not os.path.exists(db):
+		print("")
+		raise SystemExit
+con=sqlite3.connect(db)
+cur=con.cursor()
+cur.execute("SELECT id FROM api_keys WHERE key_hash=? LIMIT 1", ("$hash",))
+r=cur.fetchone()
+print(r[0] if r else "")
+con.close()
+PY
+}
+
 require_api_key() {
 	if [ -z "$OWNER_KEY_HASH_ENV" ]; then
 		json_error 2 "API key required" "This operation requires an API key. Use --api-key <PLAINTEXT> or --api-key-hash <HASH>."
 	fi
+	ensure_schema
 	if [ ! -f "$DB_PATH" ]; then
 		json_error 2 "DB missing" "Manager DB not found at $DB_PATH – cannot validate API key. Install or create key first."
 	fi
-	# Look up api key row id
-	API_KEY_DB_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$OWNER_KEY_HASH_ENV' LIMIT 1;" 2>/dev/null || true)
-	if [ -z "$API_KEY_DB_ID" ]; then
-		json_error 2 "Unknown API key" "Provided API key hash not registered. Register the key first."
+	# Accept either plaintext (token) or already hashed 64-char hex
+	local candidate="$OWNER_KEY_HASH_ENV"
+	if [[ ! $candidate =~ ^[0-9a-fA-F]{64}$ ]]; then
+		debug_log "Interpreting provided key as PLAINTEXT; hashing it"
+		candidate=$(hash_plaintext_key "$candidate")
+		debug_log "Derived hash=$candidate"
 	fi
+	if command -v python3 >/dev/null 2>&1; then
+		API_KEY_DB_ID=$(DB_PATH="$DB_PATH" lookup_api_key_id_python "$candidate")
+	else
+		API_KEY_DB_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$candidate' LIMIT 1;" 2>/dev/null || true)
+	fi
+	if [ -z "$API_KEY_DB_ID" ]; then
+		if [ -n "$DEBUG" ]; then
+			echo -e "${YELLOW}[DEBUG] Key not found. Existing key_hash prefixes:${NC}" >&2
+			if command -v python3 >/dev/null 2>&1; then
+				python3 - <<PY 2>/dev/null || true
+import sqlite3, os
+db=os.environ.get('DB_PATH')
+if db and os.path.exists(db):
+		con=sqlite3.connect(db); cur=con.cursor()
+		try:
+				for (h,) in cur.execute("SELECT substr(key_hash,1,12) FROM api_keys"): print('[DEBUG]   '+h)
+		except Exception as e: print('[DEBUG]   (error listing keys)', e)
+		con.close()
+PY
+			else
+				sqlite3 "$DB_PATH" "SELECT substr(key_hash,1,12) FROM api_keys;" 2>/dev/null | sed 's/^/[DEBUG]   /' >&2 || true
+			fi
+			echo -e "${YELLOW}[DEBUG] Searched for hash: $candidate${NC}" >&2
+		fi
+		json_error 2 "Unknown API key" "Provided API key not registered."
+	fi
+	OWNER_KEY_HASH_ENV="$candidate"
+	debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID using hash=$OWNER_KEY_HASH_ENV"
 }
 
 verify_container_ownership() {
@@ -203,41 +288,13 @@ hash_plaintext_key() {
 create_container() {
 	local name=$1
 
-	# Require valid API key (must exist in DB)
-	require_api_key() {
-		if [ -z "$OWNER_KEY_HASH_ENV" ]; then
-			json_error 2 "API key required" "This operation requires an API key. Use --api-key <PLAINTEXT> or --api-key-hash <HASH>."
-		fi
-		if [ ! -f "$DB_PATH" ]; then
-			json_error 2 "DB missing" "Manager DB not found at $DB_PATH – cannot validate API key. Install or create key first."
-		fi
-		# Accept either plaintext (token) or already hashed 64-char hex
-		local candidate="$OWNER_KEY_HASH_ENV"
-		if [[ ! $candidate =~ ^[0-9a-fA-F]{64}$ ]]; then
-			debug_log "Interpreting provided key as PLAINTEXT; hashing it"
-			candidate=$(hash_plaintext_key "$candidate")
-			debug_log "Derived hash=$candidate"
-		fi
-		# Look up api key row id
-		API_KEY_DB_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$candidate' LIMIT 1;" 2>/dev/null || true)
-		if [ -z "$API_KEY_DB_ID" ]; then
-			if [ -n "$DEBUG" ]; then
-				echo -e "${YELLOW}[DEBUG] Key not found. Existing key_hash prefixes:${NC}" >&2
-				sqlite3 "$DB_PATH" "SELECT substr(key_hash,1,12) FROM api_keys;" 2>/dev/null | sed 's/^/[DEBUG]   /' >&2 || true
-				echo -e "${YELLOW}[DEBUG] Searched for hash: $candidate${NC}" >&2
-			fi
-			json_error 2 "Unknown API key" "Provided API key not registered."
-		fi
-		# Persist normalized hash for downstream label usage
-		OWNER_KEY_HASH_ENV="$candidate"
-		debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID using hash=$OWNER_KEY_HASH_ENV"
-	}
-		debug_log "OWNER_KEY_HASH_ENV=$maybe_hash"
+	# Ensure API key valid (uses global require_api_key)
+	require_api_key
 	# Check if container already exists
 	if docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
 		json_error 1 "Exists" "Container '$name' already exists"
 	fi
-		debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID"
+	debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID"
 	
 	# Find free ports
 	local novnc_port=$(find_free_novnc_port)
