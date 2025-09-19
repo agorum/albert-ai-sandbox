@@ -305,11 +305,19 @@ json_error() {
     local code="$1"; shift
     local short="$1"; shift
     local msg="$1"; shift || true
-    if [ -n "$JSON_MODE" ]; then
-        jq -n --arg error "$short" --arg message "$msg" --arg code "$code" '{error:$error,message:$message,exitCode:($code|tonumber)}'
-    else
-        echo -e "${RED}Error: $msg${NC}" >&2
-    fi
+	if [ -n "$JSON_MODE" ]; then
+		if command -v jq >/dev/null 2>&1; then
+			jq -n --arg error "$short" --arg message "$msg" --arg code "$code" '{error:$error,message:$message,exitCode:($code|tonumber)}'
+		else
+			# Minimal manual JSON fallback when jq is unavailable
+			# Escape double quotes in strings (basic)
+			local esc_short=${short//"/\"}
+			local esc_msg=${msg//"/\"}
+			printf '{"error":"%s","message":"%s","exitCode":%s}\n' "$esc_short" "$esc_msg" "$code"
+		fi
+	else
+		echo -e "${RED}Error: $msg${NC}" >&2
+	fi
     exit "$code"
 }
 
@@ -358,6 +366,11 @@ create_container() {
 	local vnc_port=$(find_free_vnc_port)
 	local mcphub_port=$(find_free_mcphub_port)
 	local filesvc_port=$(find_free_filesvc_port)
+
+	# Ensure image exists before attempting run
+	if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
+		json_error 1 "Image missing" "Docker image '$DOCKER_IMAGE' not found. Run 'build' first."
+	fi
 	
 	if [ -z "$novnc_port" ] || [ -z "$vnc_port" ] || [ -z "$mcphub_port" ] || [ -z "$filesvc_port" ]; then
 		json_error 1 "No ports" "No free ports available"
