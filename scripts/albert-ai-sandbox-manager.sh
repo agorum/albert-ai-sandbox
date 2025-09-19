@@ -90,6 +90,13 @@ else
 	set -- "${FIRST_PASS[@]}"
 fi
 
+# Fallback detection: if --json present in original args but JSON_MODE not set (parsing edge case)
+if [ -z "$JSON_MODE" ]; then
+	for arg in "${ORIG_ARGS[@]}"; do
+		if [ "$arg" = "--json" ]; then JSON_MODE=1; break; fi
+	done
+fi
+
 # Second pass: if command present, allow flags after it
 if [[ -n "$COMMAND_SEEN" ]]; then
   CMD="$1"; shift || true
@@ -126,35 +133,44 @@ fi
 
 # Show help
 show_help() {
-	echo -e "${GREEN}ALBERT | AI Sandbox Manager${NC}"
-	echo -e "${GREEN}=======================${NC}"
-	echo "Usage: $0 [COMMAND] [OPTIONS]"
-	echo ""
-	echo "Commands:"
-	echo "  create [name]     - Creates a new sandbox container"
-	echo "                      (without name, cryptic name will be generated)"
-	echo "  remove <name>     - Removes a container"
-	echo "  start <name>      - Starts a container"
-	echo "  stop <name>       - Stops a container"
-	echo "  restart <name>    - Restarts a container"
-	echo "  status [name]     - Shows status of (a) container(s)"
-	echo "  list              - Lists all containers"
-	echo "  build             - Rebuilds the Docker image"
-	echo "  help              - Shows this help"
-	echo ""
-	echo "Global Options:"
-	echo "  --json                 JSON output (machine readable)"
-	echo "  --api-key <PLAINTEXT>  Associate containers with API key (hashed)"
-	echo "  --api-key-hash <HASH>  Provide pre-hashed key (sha256)"
-	echo "  --non-interactive      Disable interactive prompts"
-	echo ""
-	echo "VNC Password: albert"
-	echo ""
-	echo "Examples:"
-	echo "  $0 create                  # Creates container with cryptic name"
-	echo "  $0 create mysandbox        # Creates container with custom name"
-	echo "  $0 status"
-	echo "  $0 list"
+	if [ -n "$JSON_MODE" ]; then
+		json_emit '{result:"help", commands:$cmds, globalOptions:$opts, example:$ex}' \
+		  --argjson cmds '["create","remove","start","stop","restart","status","list","build","help"]' \
+		  --argjson opts '["--json","--api-key","--api-key-hash","--non-interactive","--quiet","--debug"]' \
+		  --arg ex "$0 create --api-key <KEY> --json"
+	else
+		echo -e "${GREEN}ALBERT | AI Sandbox Manager${NC}"
+		echo -e "${GREEN}=======================${NC}"
+		echo "Usage: $0 [COMMAND] [OPTIONS]"
+		echo ""
+		echo "Commands:"
+		echo "  create [name]     - Creates a new sandbox container"
+		echo "                      (without name, cryptic name will be generated)"
+		echo "  remove <name>     - Removes a container"
+		echo "  start <name>      - Starts a container"
+		echo "  stop <name>       - Stops a container"
+		echo "  restart <name>    - Restarts a container"
+		echo "  status [name]     - Shows status of (a) container(s)"
+		echo "  list              - Lists all containers"
+		echo "  build             - Rebuilds the Docker image"
+		echo "  help              - Shows this help"
+		echo ""
+		echo "Global Options:"
+		echo "  --json                 JSON output (machine readable)"
+		echo "  --api-key <PLAINTEXT>  Associate containers with API key (hashed)"
+		echo "  --api-key-hash <HASH>  Provide pre-hashed key (sha256)"
+		echo "  --non-interactive      Disable interactive prompts"
+		echo "  --quiet                Suppress normal output"
+		echo "  --debug                Debug diagnostics"
+		echo ""
+		echo "VNC Password: albert"
+		echo ""
+		echo "Examples:"
+		echo "  $0 create                  # Creates container with cryptic name"
+		echo "  $0 create mysandbox        # Creates container with custom name"
+		echo "  $0 status"
+		echo "  $0 list"
+	fi
 }
 
 # Build Docker image
