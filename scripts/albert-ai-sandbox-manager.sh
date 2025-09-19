@@ -14,15 +14,18 @@ JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output
 OWNER_KEY_HASH_ENV="${ALBERT_OWNER_KEY_HASH:-}"  # passed in by REST service
 NON_INTERACTIVE="${ALBERT_NONINTERACTIVE:-}"     # suppress prompts
 
-# Parse optional global flags (before command) for CLI usage
+# Parse optional global flags (support both before and after command)
 ORIG_ARGS=("$@")
-GLOBAL_PARSED=()
+FIRST_PASS=()
+COMMAND_SEEN=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--json) JSON_MODE=1; shift ;;
-		--api-key-hash) OWNER_KEY_HASH_ENV="$2"; shift 2 ;;
+		--api-key-hash)
+			[ -z "$2" ] && { echo "Missing value for --api-key-hash" >&2; exit 2; }
+			OWNER_KEY_HASH_ENV="$2"; shift 2 ;;
 		--api-key)
-			# Derive hash from plaintext key
+			[ -z "$2" ] && { echo "Missing value for --api-key" >&2; exit 2; }
 			if command -v python3 >/dev/null 2>&1; then
 				OWNER_KEY_HASH_ENV=$(python3 - <<'PY'
 import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
@@ -33,21 +36,51 @@ PY
 			fi
 			shift 2 ;;
 		--non-interactive) NON_INTERACTIVE=1; shift ;;
-		--) shift; GLOBAL_PARSED+=("$@"); break ;;
+		--)
+			shift; while [[ $# -gt 0 ]]; do FIRST_PASS+=("$1"); shift; done; break ;;
 		create|remove|delete|start|stop|restart|status|list|build|help|--help|-h)
-			# Push the command and the rest of the arguments safely without referencing unset $2/$3...
-			GLOBAL_PARSED+=("$@")
+			COMMAND_SEEN="$1"
+			FIRST_PASS+=("$1")
+			shift
+			# Collect rest for second pass (may contain flags)
+			while [[ $# -gt 0 ]]; do FIRST_PASS+=("$1"); shift; done
 			break ;;
-		"")
-			# No command provided; break and let main case show help
-			break ;;
-		*) GLOBAL_PARSED+=("$1"); shift ;;
+		"") break ;;
+		*) FIRST_PASS+=("$1"); shift ;;
 	esac
 done
-if [ ${#GLOBAL_PARSED[@]} -gt 0 ]; then
-	set -- "${GLOBAL_PARSED[@]}"
-else
+if [ ${#FIRST_PASS[@]} -eq 0 ]; then
 	set -- "${ORIG_ARGS[@]}"
+else
+	set -- "${FIRST_PASS[@]}"
+fi
+
+# Second pass: if command present, allow flags after it
+if [[ -n "$COMMAND_SEEN" ]]; then
+	CMD="$1"; shift
+	POST_FLAGS=()
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--json) JSON_MODE=1; shift ;;
+			--api-key-hash)
+				[ -z "$2" ] && { echo "Missing value for --api-key-hash" >&2; exit 2; }
+				OWNER_KEY_HASH_ENV="$2"; shift 2 ;;
+			--api-key)
+				[ -z "$2" ] && { echo "Missing value for --api-key" >&2; exit 2; }
+				if command -v python3 >/dev/null 2>&1; then
+					OWNER_KEY_HASH_ENV=$(python3 - <<'PY'
+import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
+PY
+"$2")
+				else
+					OWNER_KEY_HASH_ENV=$(printf "%s" "$2" | openssl dgst -sha256 | awk '{print $2}')
+				fi
+				shift 2 ;;
+			--non-interactive) NON_INTERACTIVE=1; shift ;;
+			*) POST_FLAGS+=("$1"); shift ;;
+		esac
+	done
+	set -- "$CMD" "${POST_FLAGS[@]}"
 fi
 
 # Show help
