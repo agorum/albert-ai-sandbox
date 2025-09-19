@@ -623,15 +623,58 @@ case "${1:-}" in
 		# Lightweight diagnostics: DB, schema, keys
 		echo "=== selfcheck ==="
 		echo "DB_PATH: $DB_PATH"
+			# Ensure schema before inspection
+			ensure_schema
 		if [ -f "$DB_PATH" ]; then
 			if stat -c%s "$DB_PATH" >/dev/null 2>&1; then sz=$(stat -c%s "$DB_PATH"); else sz=$(stat -f%z "$DB_PATH" 2>/dev/null || echo ?); fi
 			echo "DB exists: yes (size ${sz} bytes)"
 		else
 			echo "DB exists: no"; exit 2
 		fi
-		echo "Tables:"; sqlite3 "$DB_PATH" ".tables" 2>/dev/null | sed 's/^/  /'
-		echo "API keys:"; sqlite3 "$DB_PATH" "SELECT id, substr(key_hash,1,12), label, datetime(created_at,'unixepoch') FROM api_keys ORDER BY created_at DESC;" 2>/dev/null \
-			| awk 'BEGIN{FS="|"}{printf "  id=%s prefix=%s label=%s created=%s\n", $1,$2,$3,$4}'
+			# Validate header signature
+			head_sig=$(head -c 16 "$DB_PATH" 2>/dev/null || true)
+			if echo "$head_sig" | grep -q "SQLite format 3"; then
+				echo "Header: OK (SQLite format 3)"
+			else
+				echo "Header: WARNING (unexpected first 16 bytes)"
+			fi
+			echo "Tables (sqlite3 .tables):"; tbls=$(sqlite3 "$DB_PATH" ".tables" 2>/dev/null || true); if [ -n "$tbls" ]; then printf '%s\n' "$tbls" | sed 's/^/  /'; else echo "  (none)"; fi
+			# Python view of tables & counts
+			if command -v python3 >/dev/null 2>&1; then
+				python3 - <<PY 2>/dev/null || true
+	import os, sqlite3, time
+	db=os.environ.get('DB_PATH')
+	print('Tables (python query):')
+	if not db or not os.path.exists(db):
+	    print('  (db missing)')
+	else:
+	    con=sqlite3.connect(db)
+	    cur=con.cursor()
+	    try:
+	        cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+	        rows=cur.fetchall()
+	        if not rows:
+	            print('  (none)')
+	        else:
+	            for (n,) in rows: print('  '+n)
+	        # List API keys if table exists
+	        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'")
+	        if cur.fetchone():
+	            print('API keys:')
+	            for r in cur.execute("SELECT id, substr(key_hash,1,12), label, datetime(created_at,'unixepoch') FROM api_keys ORDER BY created_at DESC"):
+	                print(f'  id={r[0]} prefix={r[1]} label={r[2] or ''} created={r[3]}')
+	        else:
+	            print('API keys: (table missing)')
+	    except Exception as e:
+	        print('  (error reading)', e)
+	    finally:
+	        con.close()
+	PY
+			else
+				echo "(python3 not available for deep inspection)"
+			fi
+			# Legacy sqlite listing (kept for comparison)
+			echo "API keys (.sqlite3 direct):"; sqlite3 "$DB_PATH" "SELECT id, substr(key_hash,1,12), label, datetime(created_at,'unixepoch') FROM api_keys ORDER BY created_at DESC;" 2>/dev/null | awk 'BEGIN{FS="|"}{printf "  id=%s prefix=%s label=%s created=%s\n", $1,$2,$3,$4}' || echo "  (query failed)"
 		if [ -n "$OWNER_KEY_HASH_ENV" ]; then
 			inp="$OWNER_KEY_HASH_ENV"
 			if [[ $inp =~ ^[0-9a-fA-F]{64}$ ]]; then
