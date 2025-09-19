@@ -49,14 +49,26 @@ from flask import Flask, request, jsonify
 import docker
 from docker.errors import DockerException, NotFound, APIError
 
+THIS_FILE = Path(__file__).resolve()
+BASE_DIR = THIS_FILE.parent.parent
+DEFAULT_DB_PATH = BASE_DIR / "data" / "manager.db"
+DEFAULT_DATA_DIR = BASE_DIR / "data" / "containers"
+
 # Configuration
 PORT = int(os.environ.get("MANAGER_PORT", "5001"))
-DB_PATH = os.environ.get("MANAGER_DB_PATH", "./data/manager.db")
-DATA_DIR = os.environ.get("MANAGER_DATA_DIR", "./data/containers")
+DB_PATH = os.environ.get("MANAGER_DB_PATH", str(DEFAULT_DB_PATH))
+DATA_DIR = os.environ.get("MANAGER_DATA_DIR", str(DEFAULT_DATA_DIR))
 ALLOWED_IMAGES = [i.strip() for i in os.environ.get("MANAGER_ALLOWED_IMAGES", "").split(",") if i.strip()] or None
 
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 Path(os.path.dirname(DB_PATH)).mkdir(parents=True, exist_ok=True)
+# Migrate legacy scripts/data/manager.db if present
+legacy_db = THIS_FILE.parent / "data" / "manager.db"
+if not Path(DB_PATH).exists() and legacy_db.exists():
+    try:
+        os.replace(legacy_db, DB_PATH)
+    except Exception:
+        pass
 
 app = Flask(__name__)
 

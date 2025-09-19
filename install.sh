@@ -213,6 +213,8 @@ ExecStart=/usr/bin/env bash -c '[ -x /opt/albert-ai-sandbox-manager/venv/bin/pyt
 Restart=on-failure
 RestartSec=5
 Environment=MANAGER_PORT=5001
+Environment=MANAGER_DB_PATH=/opt/albert-ai-sandbox-manager/data/manager.db
+Environment=MANAGER_DATA_DIR=/opt/albert-ai-sandbox-manager/data/containers
 # Optional: restrict privileges a bit (comment out if causing issues)
 # NoNewPrivileges=true
 # ProtectSystem=full

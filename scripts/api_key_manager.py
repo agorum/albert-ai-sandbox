@@ -23,8 +23,12 @@ import secrets
 import shutil
 from pathlib import Path
 
-DB_PATH = os.environ.get("MANAGER_DB_PATH", "./data/manager.db")
-DATA_DIR = os.environ.get("MANAGER_DATA_DIR", "./data/containers")
+THIS_FILE = Path(__file__).resolve()
+BASE_DIR = THIS_FILE.parent.parent  # project root
+DEFAULT_DB_PATH = BASE_DIR / "data" / "manager.db"
+DEFAULT_DATA_DIR = BASE_DIR / "data" / "containers"
+DB_PATH = os.environ.get("MANAGER_DB_PATH", str(DEFAULT_DB_PATH))
+DATA_DIR = os.environ.get("MANAGER_DATA_DIR", str(DEFAULT_DATA_DIR))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -50,6 +54,14 @@ def hash_key(k: str) -> str:
 
 def get_db():
     Path(os.path.dirname(DB_PATH)).mkdir(parents=True, exist_ok=True)
+    # Migrate legacy scripts/data/manager.db if present
+    legacy_db = THIS_FILE.parent / "data" / "manager.db"
+    if not Path(DB_PATH).exists() and legacy_db.exists():
+        try:
+            os.replace(legacy_db, DB_PATH)
+            print(f"Migrated legacy DB from {legacy_db} to {DB_PATH}")
+        except Exception:
+            pass
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -109,7 +121,11 @@ def _docker_client():
 
 
 def cmd_revoke(args):
-    raw_key = args.key
+    # Accept either --key or positional key (args.key_pos) to handle keys beginning with '-'
+    raw_key = args.key or args.key_pos
+    if not raw_key:
+        print("Provide --key <PLAINTEXT_KEY> or positional key", file=sys.stderr)
+        sys.exit(2)
     key_hash = hash_key(raw_key)
     conn = get_db()
     try:
@@ -178,7 +194,8 @@ def build_parser():
     l.set_defaults(func=cmd_list)
 
     r = sub.add_parser("revoke", help="Revoke an API key (and remove owned containers)")
-    r.add_argument("--key", required=True, help="Plaintext API key to revoke")
+    r.add_argument("--key", help="Plaintext API key to revoke")
+    r.add_argument("key_pos", nargs="?", help="Positional plaintext key (use: revoke -- <KEY> for keys starting with '-')")
     r.set_defaults(func=cmd_revoke)
 
     return p
