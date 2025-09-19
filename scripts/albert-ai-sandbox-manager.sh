@@ -562,6 +562,32 @@ case "${1:-}" in
 	create)
 		create_container "${2:-}"
 		;;
+	selfcheck)
+		# Lightweight diagnostics: DB, schema, keys
+		echo "=== selfcheck ==="
+		echo "DB_PATH: $DB_PATH"
+		if [ -f "$DB_PATH" ]; then
+			if stat -c%s "$DB_PATH" >/dev/null 2>&1; then sz=$(stat -c%s "$DB_PATH"); else sz=$(stat -f%z "$DB_PATH" 2>/dev/null || echo ?); fi
+			echo "DB exists: yes (size ${sz} bytes)"
+		else
+			echo "DB exists: no"; exit 2
+		fi
+		echo "Tables:"; sqlite3 "$DB_PATH" ".tables" 2>/dev/null | sed 's/^/  /'
+		echo "API keys:"; sqlite3 "$DB_PATH" "SELECT id, substr(key_hash,1,12), label, datetime(created_at,'unixepoch') FROM api_keys ORDER BY created_at DESC;" 2>/dev/null \
+			| awk 'BEGIN{FS="|"}{printf "  id=%s prefix=%s label=%s created=%s\n", $1,$2,$3,$4}'
+		if [ -n "$OWNER_KEY_HASH_ENV" ]; then
+			inp="$OWNER_KEY_HASH_ENV"
+			if [[ $inp =~ ^[0-9a-fA-F]{64}$ ]]; then
+				candidate="$inp"
+			else
+				candidate=$(hash_plaintext_key "$inp")
+				echo "Hashed provided plaintext -> $candidate"
+			fi
+			m=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$candidate' LIMIT 1;" 2>/dev/null || true)
+			if [ -n "$m" ]; then echo "Lookup: MATCH (id=$m)"; else echo "Lookup: NO MATCH for $candidate"; fi
+		fi
+		exit 0
+		;;
 	remove|delete)
 		remove_container "${2:-}"
 		;;
