@@ -63,6 +63,9 @@ while [[ $# -gt 0 ]]; do
 		*) FIRST_PASS+=("$1"); shift ;;
 	esac
 done
+# Expose early debug after first pass
+debug_log() { [ -n "$DEBUG" ] && echo -e "${YELLOW}[DEBUG] $*${NC}" >&2; }
+
 if [ ${#FIRST_PASS[@]} -eq 0 ]; then
 	set -- "${ORIG_ARGS[@]}"
 else
@@ -94,6 +97,13 @@ if [[ -n "$COMMAND_SEEN" ]]; then
 		esac
 	done
 	set -- "$CMD" "${POST_FLAGS[@]}"
+	fi
+
+	# Early debug snapshot
+	if [ -n "$DEBUG" ]; then
+		echo -e "${YELLOW}[DEBUG] Effective command: $*${NC}" >&2
+		echo -e "${YELLOW}[DEBUG] DB_PATH(initial)=${DB_PATH}${NC}" >&2
+		echo -e "${YELLOW}[DEBUG] OWNER_KEY_HASH_ENV(initial)=${OWNER_KEY_HASH_ENV}${NC}" >&2
 fi
 
 # Show help
@@ -180,26 +190,48 @@ json_error() {
     exit "$code"
 }
 
-debug_log() { [ -n "$DEBUG" ] && echo -e "${YELLOW}[DEBUG] $*${NC}" >&2; }
+hash_plaintext_key() {
+	# Hash a plaintext key (URL-safe base64 like token_urlsafe) deterministically
+	if command -v python3 >/dev/null 2>&1; then
+		python3 -c 'import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$1"
+	else
+		printf "%s" "$1" | openssl dgst -sha256 | awk '{print $2}'
+	fi
+}
 
 # Create container
 create_container() {
 	local name=$1
 
 	# Require valid API key (must exist in DB)
-	require_api_key
-	
-	# If no name provided, generate cryptic name
-	if [ -z "$name" ]; then
-		name=$(generate_cryptic_name)
-		echo -e "${BLUE}Generating cryptic container name: ${name}${NC}"
-	fi
-		if ! command -v sqlite3 >/dev/null 2>&1; then
-			json_error 2 "sqlite3 missing" "sqlite3 binary not found in PATH"
+	require_api_key() {
+		if [ -z "$OWNER_KEY_HASH_ENV" ]; then
+			json_error 2 "API key required" "This operation requires an API key. Use --api-key <PLAINTEXT> or --api-key-hash <HASH>."
 		fi
-	
-		debug_log "DB_PATH=$DB_PATH"
-		local maybe_hash="$OWNER_KEY_HASH_ENV"
+		if [ ! -f "$DB_PATH" ]; then
+			json_error 2 "DB missing" "Manager DB not found at $DB_PATH – cannot validate API key. Install or create key first."
+		fi
+		# Accept either plaintext (token) or already hashed 64-char hex
+		local candidate="$OWNER_KEY_HASH_ENV"
+		if [[ ! $candidate =~ ^[0-9a-fA-F]{64}$ ]]; then
+			debug_log "Interpreting provided key as PLAINTEXT; hashing it"
+			candidate=$(hash_plaintext_key "$candidate")
+			debug_log "Derived hash=$candidate"
+		fi
+		# Look up api key row id
+		API_KEY_DB_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$candidate' LIMIT 1;" 2>/dev/null || true)
+		if [ -z "$API_KEY_DB_ID" ]; then
+			if [ -n "$DEBUG" ]; then
+				echo -e "${YELLOW}[DEBUG] Key not found. Existing key_hash prefixes:${NC}" >&2
+				sqlite3 "$DB_PATH" "SELECT substr(key_hash,1,12) FROM api_keys;" 2>/dev/null | sed 's/^/[DEBUG]   /' >&2 || true
+				echo -e "${YELLOW}[DEBUG] Searched for hash: $candidate${NC}" >&2
+			fi
+			json_error 2 "Unknown API key" "Provided API key not registered."
+		fi
+		# Persist normalized hash for downstream label usage
+		OWNER_KEY_HASH_ENV="$candidate"
+		debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID using hash=$OWNER_KEY_HASH_ENV"
+	}
 		debug_log "OWNER_KEY_HASH_ENV=$maybe_hash"
 	# Check if container already exists
 	if docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
