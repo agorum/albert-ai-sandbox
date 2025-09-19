@@ -27,10 +27,7 @@ while [[ $# -gt 0 ]]; do
 		--api-key)
 			[ -z "$2" ] && { echo "Missing value for --api-key" >&2; exit 2; }
 			if command -v python3 >/dev/null 2>&1; then
-				OWNER_KEY_HASH_ENV=$(python3 - <<'PY'
-import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
-PY
-"$2")
+				OWNER_KEY_HASH_ENV=$(python3 -c 'import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$2")
 			else
 				OWNER_KEY_HASH_ENV=$(printf "%s" "$2" | openssl dgst -sha256 | awk '{print $2}')
 			fi
@@ -68,10 +65,7 @@ if [[ -n "$COMMAND_SEEN" ]]; then
 			--api-key)
 				[ -z "$2" ] && { echo "Missing value for --api-key" >&2; exit 2; }
 				if command -v python3 >/dev/null 2>&1; then
-					OWNER_KEY_HASH_ENV=$(python3 - <<'PY'
-import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
-PY
-"$2")
+					OWNER_KEY_HASH_ENV=$(python3 -c 'import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$2")
 				else
 					OWNER_KEY_HASH_ENV=$(printf "%s" "$2" | openssl dgst -sha256 | awk '{print $2}')
 				fi
