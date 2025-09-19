@@ -28,6 +28,7 @@ resolve_db_path
 JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output
 OWNER_KEY_HASH_ENV="${ALBERT_OWNER_KEY_HASH:-}"  # passed in by REST service
 NON_INTERACTIVE="${ALBERT_NONINTERACTIVE:-}"     # suppress prompts
+DEBUG=""
 
 # Parse optional global flags (support both before and after command)
 ORIG_ARGS=("$@")
@@ -48,6 +49,7 @@ while [[ $# -gt 0 ]]; do
 			fi
 			shift 2 ;;
 		--non-interactive) NON_INTERACTIVE=1; shift ;;
+		--debug) DEBUG=1; shift ;;
 		--)
 			shift; while [[ $# -gt 0 ]]; do FIRST_PASS+=("$1"); shift; done; break ;;
 		create|remove|delete|start|stop|restart|status|list|build|help|--help|-h)
@@ -86,6 +88,8 @@ if [[ -n "$COMMAND_SEEN" ]]; then
 				fi
 				shift 2 ;;
 			--non-interactive) NON_INTERACTIVE=1; shift ;;
+			--debug) DEBUG=1; shift ;;
+			--debug) DEBUG=1; shift ;;
 			*) POST_FLAGS+=("$1"); shift ;;
 		esac
 	done
@@ -176,6 +180,8 @@ json_error() {
     exit "$code"
 }
 
+debug_log() { [ -n "$DEBUG" ] && echo -e "${YELLOW}[DEBUG] $*${NC}" >&2; }
+
 # Create container
 create_container() {
 	local name=$1
@@ -188,11 +194,18 @@ create_container() {
 		name=$(generate_cryptic_name)
 		echo -e "${BLUE}Generating cryptic container name: ${name}${NC}"
 	fi
+		if ! command -v sqlite3 >/dev/null 2>&1; then
+			json_error 2 "sqlite3 missing" "sqlite3 binary not found in PATH"
+		fi
 	
+		debug_log "DB_PATH=$DB_PATH"
+		local maybe_hash="$OWNER_KEY_HASH_ENV"
+		debug_log "OWNER_KEY_HASH_ENV=$maybe_hash"
 	# Check if container already exists
 	if docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
 		json_error 1 "Exists" "Container '$name' already exists"
 	fi
+		debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID"
 	
 	# Find free ports
 	local novnc_port=$(find_free_novnc_port)
@@ -456,6 +469,7 @@ show_single_status() {
 # List containers
 list_containers() {
 	require_api_key
+	debug_log "Listing containers for key_hash=$OWNER_KEY_HASH_ENV"
 	echo -e "${GREEN}ALBERT Sandbox Containers:${NC}"
 	echo -e "${GREEN}========================================${NC}"
 	
