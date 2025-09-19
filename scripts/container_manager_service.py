@@ -42,8 +42,9 @@ import hashlib
 import time
 import json
 import uuid
+import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from flask import Flask, request, jsonify
 import docker
@@ -198,26 +199,79 @@ def serialize_container(c, api_key_id: int) -> Dict[str, Any]:
 LABEL_MANAGER = "albert.manager"
 LABEL_APIKEY_HASH = "albert.apikey_hash"
 
+# --- External sandbox manager script integration ---------------------------
+
+SANDBOX_SCRIPT = "/opt/albert-ai-sandbox-manager/scripts/albert-ai-sandbox-manager.sh"
+
+def _script_env(api_key_hash: str) -> dict:
+    env = os.environ.copy()
+    env["ALBERT_JSON"] = "1"  # request JSON output mode
+    env["ALBERT_OWNER_KEY_HASH"] = api_key_hash  # for filtering / labeling
+    env["ALBERT_NONINTERACTIVE"] = "1"  # avoid interactive prompts (remove)
+    return env
+
+def _run_script(args: List[str], api_key_hash: str, expect_json: bool = True) -> Tuple[int, str, Optional[Any]]:
+    """Run the external sandbox manager script.
+
+    Returns (exit_code, raw_stdout, parsed_json or None).
+    """
+    if not os.path.isfile(SANDBOX_SCRIPT):
+        return 127, f"Sandbox script not found at {SANDBOX_SCRIPT}", None
+    try:
+        proc = subprocess.run([SANDBOX_SCRIPT] + args, capture_output=True, text=True, env=_script_env(api_key_hash), timeout=300)
+    except subprocess.TimeoutExpired:
+        return 124, "Script timeout", None
+    out = proc.stdout.strip()
+    if expect_json:
+        # Try to locate JSON (strip color codes if any leaked)
+        try:
+            # Find first '{' or '[' substring
+            start = min([p for p in [out.find('{'), out.find('[')] if p >= 0]) if ('{' in out or '[' in out) else 0
+            jtxt = out[start:]
+            data = json.loads(jtxt)
+            return proc.returncode, out, data
+        except Exception:
+            return proc.returncode, out, None
+    return proc.returncode, out, None
+
+def _ensure_registry_mapping(api_key_info: dict, name: str):
+    """Ensure the DB has an entry mapping this API key to the Docker container id (by name)."""
+    # Resolve container id via docker (lazy client)
+    try:
+        client = get_docker_client()
+        c = client.containers.get(name)
+    except Exception:
+        return
+    conn = get_db()
+    try:
+        # Upsert-like: ignore if exists
+        existing = conn.execute("SELECT 1 FROM containers WHERE container_id=?", (c.id,)).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO containers(api_key_id, container_id, name, image, created_at) VALUES(?,?,?,?,?)",
+                (api_key_info["id"], c.id, name, c.image.tags[0] if c.image.tags else c.image.short_id, int(time.time())),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
 # --- Error handlers --------------------------------------------------------
 
 @app.errorhandler(404)
 def not_found(e):  # pragma: no cover (simple wrapper)
     return jsonify({"error": "Not found"}), 404
 
-# --- Health ----------------------------------------------------------------
+# --- Health & Create -------------------------------------------------------
 
 @app.get("/health")
 def health():
-    # Provide docker readiness info (non-fatal if unreachable)
     docker_status = "down"
     try:
         get_docker_client(retries=1, delay=0)
         docker_status = "up"
     except Exception:
-        pass
+        docker_status = "down"
     return jsonify({"status": "ok", "docker": docker_status})
-
-# --- Container operations --------------------------------------------------
 
 @app.post("/containers")
 def create_container():
@@ -225,215 +279,131 @@ def create_container():
     if err:
         return err
     body = request.get_json(silent=True) or {}
-    image = body.get("image")
-    if not image:
-        return jsonify({"error": "Field 'image' is required"}), 400
-    if not allowed_image(image):
-        return jsonify({"error": "Image not allowed"}), 403
-    name = body.get("name") or f"ct-{uuid.uuid4().hex[:8]}"
-    env = body.get("env") or {}
-    if not isinstance(env, dict):
-        return jsonify({"error": "Field 'env' must be an object"}), 400
-    cmd = body.get("cmd")
-    auto_start = body.get("autoStart", True)
-
-    # Ensure docker client
+    requested_name = body.get("name")
+    # Delegate to external script (image/env not yet parameterized here)
+    args = ["create"]
+    if requested_name:
+        args.append(requested_name)
+    rc, raw, data = _run_script(args, auth_info["key_hash"], expect_json=True)
+    if rc != 0 or not isinstance(data, dict):
+        return jsonify({"error": "Sandbox create failed", "details": raw, "exitCode": rc}), 500
+    sandbox_name = data.get("name") or requested_name
+    if not sandbox_name:
+        return jsonify({"error": "Sandbox create returned no name", "details": raw}), 500
+    _ensure_registry_mapping(auth_info, sandbox_name)
     try:
         client = get_docker_client()
+        c = client.containers.get(sandbox_name)
+        ser = serialize_container(c, auth_info["id"])
     except Exception as ex:
-        return docker_unavailable_response(ex)
-
-    # Pull image lazily
-    try:
-        client.images.pull(image)
-    except DockerException as ex:
-        return jsonify({"error": f"Failed to pull image: {ex}"}), 400
-
-    key_hash = auth_info["key_hash"]
-    labels = {LABEL_MANAGER: "1", LABEL_APIKEY_HASH: key_hash}
-
-    # Create container
-    try:
-        c = client.containers.create(
-            image=image,
-            name=name,
-            command=cmd,
-            environment=env,
-            labels=labels,
-            detach=True,
-        )
-    except APIError as ex:
-        return jsonify({"error": f"Docker API error: {ex.explanation}"}), 400
-    except DockerException as ex:
-        return jsonify({"error": f"Failed to create container: {ex}"}), 500
-
-    # Persist mapping
-    conn = get_db()
-    try:
-        conn.execute(
-            "INSERT INTO containers(api_key_id, container_id, name, image, created_at) VALUES(?,?,?,?,?)",
-            (auth_info["id"], c.id, name, image, int(time.time())),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    # Data directory
-    container_data_dir(key_hash, name)
-
-    if auto_start:
-        try:
-            c.start()
-        except DockerException as ex:
-            return jsonify({"error": f"Container created but failed to start: {ex}", "id": c.id}), 500
-
-    return jsonify({"container": serialize_container(c, auth_info["id"])}) , 201
+        ser = {"name": sandbox_name, "error": f"Could not inspect container: {ex}"}
+    ser["sandboxName"] = sandbox_name
+    ser["script"] = data
+    return jsonify({"container": ser}), 201
 
 
-def _get_owned_container(api_key_hash: str, api_key_id: int, cid: str):
-    # Accept either DB numeric id or docker id/name
-    conn = get_db()
-    try:
-        row = conn.execute(
-            "SELECT container_id, name FROM containers WHERE api_key_id=? AND (container_id=? OR name=?)",
-            (api_key_id, cid, cid),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None, (jsonify({"error": "Container not found"}), 404)
-    docker_id = row["container_id"]
-    try:
-        client = get_docker_client()
-    except Exception as ex:
-        return None, docker_unavailable_response(ex)
-    try:
-        c = client.containers.get(docker_id)
-    except NotFound:
-        return None, (jsonify({"error": "Container missing (stale entry)"}), 404)
-    # Verify label ownership
-    if c.labels.get(LABEL_APIKEY_HASH) != api_key_hash:
-        return None, (jsonify({"error": "Ownership mismatch"}), 403)
-    return c, None
+# (Legacy _get_owned_container helper removed after script delegation refactor)
 
 @app.get("/containers")
 def list_containers():
     auth_info, err = require_api_key()
     if err:
         return err
+    rc, raw, data = _run_script(["list"], auth_info["key_hash"], expect_json=True)
+    if rc != 0 or not isinstance(data, list):
+        return jsonify({"error": "List failed", "details": raw, "exitCode": rc}), 500
+    # Attach docker IDs where possible
+    enriched = []
     try:
         client = get_docker_client()
-    except Exception as ex:
-        return docker_unavailable_response(ex)
-
-    conn = get_db()
-    try:
-        rows = conn.execute(
-            "SELECT container_id FROM containers WHERE api_key_id=?",
-            (auth_info["id"],)
-        ).fetchall()
-    finally:
-        conn.close()
-    result = []
-    for r in rows:
-        try:
-            c = client.containers.get(r["container_id"])  # may raise
-            result.append(serialize_container(c, auth_info["id"]))
-        except NotFound:
-            # stale entry; skip (could also clean DB lazily)
-            pass
-    return jsonify({"containers": result})
+    except Exception:
+        client = None
+    for entry in data:
+        name = entry.get("name")
+        obj = {"sandboxName": name, **entry}
+        if client and name:
+            try:
+                c = client.containers.get(name)
+                obj["id"] = c.id
+                obj.update({"status": c.status})
+            except Exception:
+                pass
+        enriched.append(obj)
+    return jsonify({"containers": enriched})
 
 @app.get("/containers/<cid>")
 def get_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    c, err = _get_owned_container(auth_info["key_hash"], auth_info["id"], cid)
-    if err:
-        return err
-    return jsonify({"container": serialize_container(c, auth_info["id"])})
+    # Use script status (single) to reflect registry & ports
+    rc, raw, data = _run_script(["status", cid], auth_info["key_hash"], expect_json=True)
+    if rc != 0 or not isinstance(data, (dict, list)):
+        return jsonify({"error": "Status failed", "details": raw, "exitCode": rc}), 404
+    if isinstance(data, list):
+        # script may return list when filtering; pick matching name
+        match = next((d for d in data if d.get("name") == cid), None)
+    else:
+        match = data
+    if not match:
+        return jsonify({"error": "Container not found"}), 404
+    # Enrich with docker info
+    try:
+        client = get_docker_client()
+        c = client.containers.get(cid)
+        ser = serialize_container(c, auth_info["id"])
+    except Exception as ex:
+        ser = {"name": cid, "error": f"Could not inspect: {ex}"}
+    ser["sandboxName"] = cid
+    ser["script"] = match
+    return jsonify({"container": ser})
 
 @app.post("/containers/<cid>/start")
 def start_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    c, err = _get_owned_container(auth_info["key_hash"], auth_info["id"], cid)
-    if err:
-        return err
-    try:
-        c.start()
-    except DockerException as ex:
-        return jsonify({"error": f"Failed to start: {ex}"}), 500
-    return jsonify({"container": serialize_container(c, auth_info["id"])})
+    rc, raw, data = _run_script(["start", cid], auth_info["key_hash"], expect_json=True)
+    if rc != 0:
+        return jsonify({"error": "Start failed", "details": raw, "exitCode": rc}), 500
+    return get_container(cid)
 
 @app.post("/containers/<cid>/stop")
 def stop_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    c, err = _get_owned_container(auth_info["key_hash"], auth_info["id"], cid)
-    if err:
-        return err
-    timeout = int(request.args.get("timeout", "10"))
-    try:
-        c.stop(timeout=timeout)
-    except DockerException as ex:
-        return jsonify({"error": f"Failed to stop: {ex}"}), 500
-    return jsonify({"container": serialize_container(c, auth_info["id"])})
+    rc, raw, data = _run_script(["stop", cid], auth_info["key_hash"], expect_json=False)
+    if rc != 0:
+        return jsonify({"error": "Stop failed", "details": raw, "exitCode": rc}), 500
+    return get_container(cid)
 
 @app.post("/containers/<cid>/restart")
 def restart_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    c, err = _get_owned_container(auth_info["key_hash"], auth_info["id"], cid)
-    if err:
-        return err
-    try:
-        c.restart()
-    except DockerException as ex:
-        return jsonify({"error": f"Failed to restart: {ex}"}), 500
-    return jsonify({"container": serialize_container(c, auth_info["id"])})
+    rc, raw, data = _run_script(["restart", cid], auth_info["key_hash"], expect_json=False)
+    if rc != 0:
+        return jsonify({"error": "Restart failed", "details": raw, "exitCode": rc}), 500
+    return get_container(cid)
 
 @app.delete("/containers/<cid>")
 def delete_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    c, err = _get_owned_container(auth_info["key_hash"], auth_info["id"], cid)
-    if err:
-        return err
-    name = c.name
-    try:
-        if c.status == "running":
-            c.stop(timeout=10)
-        c.remove(v=True, force=True)
-    except DockerException as ex:
-        return jsonify({"error": f"Failed to remove: {ex}"}), 500
-
-    # DB cleanup
+    rc, raw, _ = _run_script(["remove", cid], auth_info["key_hash"], expect_json=False)
+    if rc != 0:
+        return jsonify({"error": "Remove failed", "details": raw, "exitCode": rc}), 500
+    # DB cleanup (best-effort)
     conn = get_db()
     try:
-        conn.execute(
-            "DELETE FROM containers WHERE api_key_id=? AND (container_id=? OR name=?)",
-            (auth_info["id"], c.id, cid),
-        )
+        conn.execute("DELETE FROM containers WHERE api_key_id=? AND name=?", (auth_info["id"], cid))
         conn.commit()
     finally:
         conn.close()
-
-    # Data dir cleanup
-    ddir = os.path.join(DATA_DIR, auth_info["key_hash"][:12], name)
-    if os.path.isdir(ddir):
-        try:
-            import shutil
-            shutil.rmtree(ddir)
-        except Exception:
-            pass
-
-    return jsonify({"deleted": c.id})
+    return jsonify({"deleted": cid})
 
 # --- Main ------------------------------------------------------------------
 

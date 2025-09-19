@@ -6,6 +6,43 @@ source /opt/albert-ai-sandbox-manager/scripts/nginx-manager.sh
 
 DOCKER_IMAGE="albert-ai-sandbox:latest"
 
+# Extended modes
+JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output
+OWNER_KEY_HASH_ENV="${ALBERT_OWNER_KEY_HASH:-}"  # passed in by REST service
+NON_INTERACTIVE="${ALBERT_NONINTERACTIVE:-}"     # suppress prompts
+
+# Parse optional global flags (before command) for CLI usage
+ORIG_ARGS=("$@")
+GLOBAL_PARSED=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--json) JSON_MODE=1; shift ;;
+		--api-key-hash) OWNER_KEY_HASH_ENV="$2"; shift 2 ;;
+		--api-key)
+			# Derive hash from plaintext key
+			if command -v python3 >/dev/null 2>&1; then
+				OWNER_KEY_HASH_ENV=$(python3 - <<'PY'
+import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
+PY
+"$2")
+			else
+				OWNER_KEY_HASH_ENV=$(printf "%s" "$2" | openssl dgst -sha256 | awk '{print $2}')
+			fi
+			shift 2 ;;
+		--non-interactive) NON_INTERACTIVE=1; shift ;;
+		--) shift; GLOBAL_PARSED+=("$@"); break ;;
+		create|remove|delete|start|stop|restart|status|list|build|help|--help|-h|"" )
+			GLOBAL_PARSED+=("$1" "$2" "$3" "$4") # push remaining (roughly); exact command parsing later
+			break ;;
+		*) GLOBAL_PARSED+=("$1"); shift ;;
+	esac
+done
+if [ ${#GLOBAL_PARSED[@]} -gt 0 ]; then
+	set -- "${GLOBAL_PARSED[@]}"
+else
+	set -- "${ORIG_ARGS[@]}"
+fi
+
 # Show help
 show_help() {
 	echo -e "${GREEN}ALBERT | AI Sandbox Manager${NC}"
@@ -23,6 +60,12 @@ show_help() {
 	echo "  list              - Lists all containers"
 	echo "  build             - Rebuilds the Docker image"
 	echo "  help              - Shows this help"
+	echo ""
+	echo "Global Options:"
+	echo "  --json                 JSON output (machine readable)"
+	echo "  --api-key <PLAINTEXT>  Associate containers with API key (hashed)"
+	echo "  --api-key-hash <HASH>  Provide pre-hashed key (sha256)"
+	echo "  --non-interactive      Disable interactive prompts"
 	echo ""
 	echo "VNC Password: albert"
 	echo ""
@@ -74,8 +117,14 @@ create_container() {
 	echo -e "${BLUE}  MCP Hub Port: $mcphub_port${NC}"
 	echo -e "${BLUE}  File Service Port: $filesvc_port${NC}"
 	
+	LABEL_ARGS=(--label "albert.manager=1")
+	if [ -n "$OWNER_KEY_HASH_ENV" ]; then
+		LABEL_ARGS+=(--label "albert.apikey_hash=$OWNER_KEY_HASH_ENV")
+	fi
+
 	# Create Docker container
 	docker run -d \
+		"${LABEL_ARGS[@]}" \
 		--name "$name" \
 		--restart unless-stopped \
 		--cap-add=SYS_ADMIN \
@@ -104,16 +153,29 @@ create_container() {
 			create_global_mcphub_config "$mcphub_port"
 		fi
 		
-		echo -e "${GREEN}========================================${NC}"
-		echo -e "${GREEN}Sandbox container created successfully!${NC}"
-		echo -e "${GREEN}========================================${NC}"
-		echo -e "${GREEN}Name: ${name}${NC}"
-		echo -e "${GREEN}DESKTOP: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
-		echo -e "${GREEN}MCP URL: http://$(hostname -I | awk '{print $1}')/${name}/mcphub/mcp${NC}"
-		echo -e "${GREEN}File Service Upload: http://$(hostname -I | awk '{print $1}')/${name}/files/upload${NC}"
-		echo -e "${GREEN}File Service Download: http://$(hostname -I | awk '{print $1}')/${name}/files/download?path=/tmp/albert-files/<uuid.ext>${NC}"
-		echo -e "${YELLOW}MCP Hub Bearer token: albert${NC}"
-		echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
+		if [ -n "$JSON_MODE" ]; then
+			HOSTIP=$(hostname -I | awk '{print $1}')
+			jq -n \
+				--arg name "$name" \
+				--arg novnc_port "$novnc_port" \
+				--arg vnc_port "$vnc_port" \
+				--arg mcphub_port "$mcphub_port" \
+				--arg filesvc_port "$filesvc_port" \
+				--arg ownerHash "$OWNER_KEY_HASH_ENV" \
+				--arg host "$HOSTIP" \
+				'{result:"created", name:$name, ownerHash:$ownerHash, ports:{novnc:$novnc_port,vnc:$vnc_port,mcphub:$mcphub_port,filesvc:$filesvc_port}, urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), filesUpload:("http://"+$host+"/"+$name+"/files/upload"), filesDownloadPattern:("http://"+$host+"/"+$name+"/files/download?path=/tmp/albert-files/<uuid.ext>")}}'
+		else
+			echo -e "${GREEN}========================================${NC}"
+			echo -e "${GREEN}Sandbox container created successfully!${NC}"
+			echo -e "${GREEN}========================================${NC}"
+			echo -e "${GREEN}Name: ${name}${NC}"
+			echo -e "${GREEN}DESKTOP: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
+			echo -e "${GREEN}MCP URL: http://$(hostname -I | awk '{print $1}')/${name}/mcphub/mcp${NC}"
+			echo -e "${GREEN}File Service Upload: http://$(hostname -I | awk '{print $1}')/${name}/files/upload${NC}"
+			echo -e "${GREEN}File Service Download: http://$(hostname -I | awk '{print $1}')/${name}/files/download?path=/tmp/albert-files/<uuid.ext>${NC}"
+			echo -e "${YELLOW}MCP Hub Bearer token: albert${NC}"
+			echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
+		fi
 	else
 		echo -e "${RED}Error creating container${NC}"
 		return 1
@@ -135,11 +197,11 @@ remove_container() {
 	docker stop "$name" 2>/dev/null
 	docker rm "$name" 2>/dev/null
 	
-	# Remove volume (optional)
-	read -p "Also delete data volume? (y/n): " -n 1 -r
-	echo
-	if [[ $REPLY =~ ^[Yy]$ ]]; then
+	if [ -z "$NON_INTERACTIVE" ]; then
+		read -p "Also delete data volume? (y/n): " -n 1 -r; echo
+		if [[ $REPLY =~ ^[Yy]$ ]]; then
 			docker volume rm "${name}_data" 2>/dev/null
+		fi
 	fi
 	
 	# Remove nginx config
@@ -209,18 +271,35 @@ restart_container() {
 # Show status
 show_status() {
 	local name=$1
-	
+
 	if [ -z "$name" ]; then
-		# Show all containers
-		echo -e "${GREEN}Status of all sandbox containers:${NC}"
-		echo -e "${GREEN}=================================${NC}"
-		echo -e "${BLUE}Desktop: KDE Plasma${NC}"
-		echo "------------------------------"
-		
-		for container_name in $(get_all_containers); do
-			show_single_status "$container_name"
+		# All containers
+		if [ -n "$JSON_MODE" ]; then
+			local rows=()
+			for container_name in $(get_all_containers); do
+				if [ -n "$OWNER_KEY_HASH_ENV" ]; then
+					local lbl=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash"}}' "$container_name" 2>/dev/null || true)
+					[ "$lbl" != "$OWNER_KEY_HASH_ENV" ] && continue
+				fi
+				local sj=$(show_single_status "$container_name" json)
+				[ -n "$sj" ] && rows+=("$sj")
+			done
+			printf '['
+			for i in "${!rows[@]}"; do
+				printf '%s' "${rows[$i]}"
+				if [ $i -lt $(( ${#rows[@]} - 1 )) ]; then printf ','; fi
+			done
+			printf ']'
+		else
+			echo -e "${GREEN}Status of all sandbox containers:${NC}"
+			echo -e "${GREEN}=================================${NC}"
+			echo -e "${BLUE}Desktop: KDE Plasma${NC}"
 			echo "------------------------------"
-		done
+			for container_name in $(get_all_containers); do
+				show_single_status "$container_name"
+				echo "------------------------------"
+			done
+		fi
 	else
 		show_single_status "$name"
 	fi
@@ -229,33 +308,52 @@ show_status() {
 # Show single container status
 show_single_status() {
 	local name=$1
+	local mode=${2:-text}
 	local info=$(get_container_info "$name")
-	
 	if [ -z "$info" ]; then
-			echo -e "${RED}Container '$name' not found in registry${NC}"
-			return 1
+		[ "$mode" = "json" ] && return 0
+		echo -e "${RED}Container '$name' not found in registry${NC}"
+		return 1
 	fi
-	
 	local port=$(echo "$info" | jq -r '.port')
 	local vnc_port=$(echo "$info" | jq -r '.vnc_port')
+	local mcphub_port=$(echo "$info" | jq -r '.mcphub_port // empty')
+	local filesvc_port=$(echo "$info" | jq -r '.filesvc_port // empty')
 	local created=$(echo "$info" | jq -r '.created')
-	
-	echo -e "${BLUE}Container: ${NC}$name"
-	echo -e "${BLUE}Created: ${NC}$created"
-	echo -e "${BLUE}Desktop: ${NC}KDE Plasma"
-	echo -e "${BLUE}noVNC Port: ${NC}$port"
-	echo -e "${BLUE}VNC Port: ${NC}$vnc_port"
-	
-	# Docker Status
+	local running="stopped"
+	local stats=""
 	if docker ps --format '{{.Names}}' | grep -q "^${name}$"; then
-		echo -e "${BLUE}Docker Status: ${GREEN}Running${NC}"
-		local stats=$(docker stats --no-stream --format "CPU: {{.CPUPerc}} | RAM: {{.MemUsage}}" "$name" 2>/dev/null)
-		echo -e "${BLUE}Resources: ${NC}$stats"
-	else
-		echo -e "${BLUE}Docker Status: ${RED}Stopped${NC}"
+		running="running"
+		stats=$(docker stats --no-stream --format "CPU: {{.CPUPerc}} | RAM: {{.MemUsage}}" "$name" 2>/dev/null || true)
 	fi
-	
-	echo -e "${BLUE}URL: ${NC}http://$(hostname -I | awk '{print $1}')/${name}/"
+	local hostip=$(hostname -I | awk '{print $1}')
+	if [ "$mode" = "json" ] || [ -n "$JSON_MODE" ]; then
+		jq -n \
+			--arg name "$name" \
+			--arg status "$running" \
+			--arg created "$created" \
+			--arg novnc "$port" \
+			--arg vnc "$vnc_port" \
+			--arg mcphub "$mcphub_port" \
+			--arg filesvc "$filesvc_port" \
+			--arg stats "$stats" \
+			--arg ownerHash "$OWNER_KEY_HASH_ENV" \
+			--arg host "$hostip" \
+			'{name:$name,status:$status,created:$created,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc},resources:$stats,urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), files:("http://"+$host+"/"+$name+"/files/")}}'
+	else
+		echo -e "${BLUE}Container: ${NC}$name"
+		echo -e "${BLUE}Created: ${NC}$created"
+		echo -e "${BLUE}Desktop: ${NC}KDE Plasma"
+		echo -e "${BLUE}noVNC Port: ${NC}$port"
+		echo -e "${BLUE}VNC Port: ${NC}$vnc_port"
+		if [ "$running" = "running" ]; then
+			echo -e "${BLUE}Docker Status: ${GREEN}Running${NC}"
+			[ -n "$stats" ] && echo -e "${BLUE}Resources: ${NC}$stats"
+		else
+			echo -e "${BLUE}Docker Status: ${RED}Stopped${NC}"
+		fi
+		echo -e "${BLUE}URL: ${NC}http://${hostip}/${name}/"
+	fi
 }
 
 # List containers
@@ -266,7 +364,17 @@ list_containers() {
 	printf "%-30s %-10s %-10s %-10s\n" "NAME" "STATUS" "NOVNC-PORT" "VNC-PORT"
 	printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
 	
-	for container_name in $(get_all_containers); do
+	FILTERED=( $(get_all_containers) )
+	if [ -n "$OWNER_KEY_HASH_ENV" ]; then
+		TMP=()
+		for nm in "${FILTERED[@]}"; do
+			LBL=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash"}}' "$nm" 2>/dev/null || true)
+			if [ "$LBL" = "$OWNER_KEY_HASH_ENV" ]; then TMP+=("$nm"); fi
+		done
+		FILTERED=("${TMP[@]}")
+	fi
+	JSON_ROWS=()
+	for container_name in "${FILTERED[@]}"; do
 		local info=$(get_container_info "$container_name")
 		local port=$(echo "$info" | jq -r '.port')
 		local vnc_port=$(echo "$info" | jq -r '.vnc_port')
@@ -277,16 +385,31 @@ list_containers() {
 				local status="${RED}Stopped${NC}"
 		fi
 		
-		printf "%-30s %-20b %-10s %-10s\n" "$container_name" "$status" "$port" "$vnc_port"
+		if [ -n "$JSON_MODE" ]; then
+			mcphub_port=$(echo "$info" | jq -r '.mcphub_port // empty')
+			filesvc_port=$(echo "$info" | jq -r '.filesvc_port // empty')
+			plain_status=$(docker ps --format '{{.Names}}' | grep -q "^${container_name}$" && echo running || echo stopped)
+			JSON_ROWS+=( "$(jq -n --arg name "$container_name" --arg status "$plain_status" --arg novnc "$port" --arg vnc "$vnc_port" --arg mcphub "$mcphub_port" --arg filesvc "$filesvc_port" --arg ownerHash "$OWNER_KEY_HASH_ENV" '{name:$name,status:$status,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc}}')" )
+		else
+			printf "%-30s %-20b %-10s %-10s\n" "$container_name" "$status" "$port" "$vnc_port"
+		fi
 	done
-	
-	echo ""
-	echo -e "${BLUE}Desktop: KDE Plasma | VNC Password: albert${NC}"
-	echo ""
-	echo -e "${BLUE}Access URLs:${NC}"
-	for container_name in $(get_all_containers); do
-		echo "  http://$(hostname -I | awk '{print $1}')/${container_name}/"
-	done
+	if [ -n "$JSON_MODE" ]; then
+		printf '['
+		for i in "${!JSON_ROWS[@]}"; do
+			printf '%s' "${JSON_ROWS[$i]}"
+			if [ $i -lt $(( ${#JSON_ROWS[@]} - 1 )) ]; then printf ','; fi
+		done
+		printf ']'
+	else
+		echo ""
+		echo -e "${BLUE}Desktop: KDE Plasma | VNC Password: albert${NC}"
+		echo ""
+		echo -e "${BLUE}Access URLs:${NC}"
+		for container_name in "${FILTERED[@]}"; do
+			echo "  http://$(hostname -I | awk '{print $1}')/${container_name}/"
+		done
+	fi
 }
 
 # Main program
