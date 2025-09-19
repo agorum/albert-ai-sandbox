@@ -6,6 +6,9 @@ source /opt/albert-ai-sandbox-manager/scripts/nginx-manager.sh
 
 DOCKER_IMAGE="albert-ai-sandbox:latest"
 
+# DB path (must match manager service). Allow override via MANAGER_DB_PATH.
+DB_PATH="${MANAGER_DB_PATH:-/opt/albert-ai-sandbox-manager/data/manager.db}"
+
 # Extended modes
 JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output
 OWNER_KEY_HASH_ENV="${ALBERT_OWNER_KEY_HASH:-}"  # passed in by REST service
@@ -88,9 +91,55 @@ build_image() {
 	echo -e "${GREEN}Image built successfully${NC}"
 }
 
+# --- API Key validation ----------------------------------------------------
+API_KEY_DB_ID=""
+require_api_key() {
+	if [ -z "$OWNER_KEY_HASH_ENV" ]; then
+		json_error 2 "API key required" "This operation requires an API key. Use --api-key <PLAINTEXT> or --api-key-hash <HASH>."
+	fi
+	if [ ! -f "$DB_PATH" ]; then
+		json_error 2 "DB missing" "Manager DB not found at $DB_PATH – cannot validate API key. Install or create key first."
+	fi
+	# Look up api key row id
+	API_KEY_DB_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$OWNER_KEY_HASH_ENV' LIMIT 1;" 2>/dev/null || true)
+	if [ -z "$API_KEY_DB_ID" ]; then
+		json_error 2 "Unknown API key" "Provided API key hash not registered. Register the key first."
+	fi
+}
+
+verify_container_ownership() {
+	local name=$1
+	if [ -z "$OWNER_KEY_HASH_ENV" ]; then
+		json_error 2 "API key required" "Use --api-key/--api-key-hash for container-specific operations."
+	fi
+	local lbl=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash" }}' "$name" 2>/dev/null || true)
+	if [ -z "$lbl" ]; then
+		json_error 3 "Ownership label missing" "Container '$name' has no ownership label – access denied."
+	fi
+	if [ "$lbl" != "$OWNER_KEY_HASH_ENV" ]; then
+		json_error 3 "Ownership mismatch" "Container '$name' not owned by supplied API key."
+	fi
+}
+
+# Unified JSON / text error helper
+json_error() {
+    local code="$1"; shift
+    local short="$1"; shift
+    local msg="$1"; shift || true
+    if [ -n "$JSON_MODE" ]; then
+        jq -n --arg error "$short" --arg message "$msg" --arg code "$code" '{error:$error,message:$message,exitCode:($code|tonumber)}'
+    else
+        echo -e "${RED}Error: $msg${NC}" >&2
+    fi
+    exit "$code"
+}
+
 # Create container
 create_container() {
 	local name=$1
+
+	# Require valid API key (must exist in DB)
+	require_api_key
 	
 	# If no name provided, generate cryptic name
 	if [ -z "$name" ]; then
@@ -100,8 +149,7 @@ create_container() {
 	
 	# Check if container already exists
 	if docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
-		echo -e "${RED}Error: Container '$name' already exists${NC}"
-		return 1
+		json_error 1 "Exists" "Container '$name' already exists"
 	fi
 	
 	# Find free ports
@@ -111,8 +159,7 @@ create_container() {
 	local filesvc_port=$(find_free_filesvc_port)
 	
 	if [ -z "$novnc_port" ] || [ -z "$vnc_port" ] || [ -z "$mcphub_port" ] || [ -z "$filesvc_port" ]; then
-		echo -e "${RED}Error: No free ports available${NC}"
-		return 1
+		json_error 1 "No ports" "No free ports available"
 	fi
 	
 	echo -e "${YELLOW}Creating sandbox container '$name'...${NC}"
@@ -148,6 +195,12 @@ create_container() {
 	if [ $? -eq 0 ]; then
 		# Register in registry
 		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port"
+
+		# Insert mapping into containers table (ignore if already exists)
+		CONTAINER_ID=$(docker inspect -f '{{ .Id }}' "$name" 2>/dev/null || true)
+		if [ -n "$CONTAINER_ID" ] && [ -n "$API_KEY_DB_ID" ]; then
+			sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO containers(api_key_id, container_id, name, image, created_at) VALUES($API_KEY_DB_ID,'$CONTAINER_ID','$name','$DOCKER_IMAGE', strftime('%s','now'));" 2>/dev/null || true
+		fi
 		
 		# Configure nginx (includes file service)
 		create_nginx_config "$name" "$novnc_port" "$mcphub_port" "$filesvc_port"
@@ -181,19 +234,17 @@ create_container() {
 			echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
 		fi
 	else
-		echo -e "${RED}Error creating container${NC}"
-		return 1
+		json_error 1 "Create failed" "Error creating container"
 	fi
 }
 
 # Remove container
 remove_container() {
 	local name=$1
+
+	verify_container_ownership "$name"
 	
-	if [ -z "$name" ]; then
-		echo -e "${RED}Error: Container name required${NC}"
-		return 1
-	fi
+	if [ -z "$name" ]; then json_error 1 "Missing name" "Container name required"; fi
 	
 	echo -e "${YELLOW}Removing container '$name'...${NC}"
 	
@@ -220,11 +271,10 @@ remove_container() {
 # Start container
 start_container() {
 	local name=$1
+
+	verify_container_ownership "$name"
 	
-	if [ -z "$name" ]; then
-		echo -e "${RED}Error: Container name required${NC}"
-		return 1
-	fi
+	if [ -z "$name" ]; then json_error 1 "Missing name" "Container name required"; fi
 	
 	echo -e "${YELLOW}Starting container '$name'...${NC}"
 	docker start "$name"
@@ -242,11 +292,10 @@ start_container() {
 # Stop container
 stop_container() {
 	local name=$1
+
+	verify_container_ownership "$name"
 	
-	if [ -z "$name" ]; then
-		echo -e "${RED}Error: Container name required${NC}"
-		return 1
-	fi
+	if [ -z "$name" ]; then json_error 1 "Missing name" "Container name required"; fi
 	
 	echo -e "${YELLOW}Stopping container '$name'...${NC}"
 	docker stop "$name"
@@ -262,11 +311,10 @@ stop_container() {
 # Restart container
 restart_container() {
 	local name=$1
+
+	verify_container_ownership "$name"
 	
-	if [ -z "$name" ]; then
-		echo -e "${RED}Error: Container name required${NC}"
-		return 1
-	fi
+	if [ -z "$name" ]; then json_error 1 "Missing name" "Container name required"; fi
 	
 	stop_container "$name"
 	start_container "$name"
@@ -275,6 +323,9 @@ restart_container() {
 # Show status
 show_status() {
 	local name=$1
+
+	# Enforce API key also for status (list or single) to avoid leaking names
+	require_api_key
 
 	if [ -z "$name" ]; then
 		# All containers
@@ -362,6 +413,7 @@ show_single_status() {
 
 # List containers
 list_containers() {
+	require_api_key
 	echo -e "${GREEN}ALBERT Sandbox Containers:${NC}"
 	echo -e "${GREEN}========================================${NC}"
 	
