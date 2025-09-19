@@ -311,8 +311,8 @@ json_error() {
 		else
 			# Minimal manual JSON fallback when jq is unavailable
 			# Escape double quotes in strings (basic)
-			local esc_short=${short//"/\"}
-			local esc_msg=${msg//"/\"}
+			local esc_short=${short//\\/\\\\}; esc_short=${esc_short//\"/\\\"}
+			local esc_msg=${msg//\\/\\\\}; esc_msg=${esc_msg//\"/\\\"}
 			printf '{"error":"%s","message":"%s","exitCode":%s}\n' "$esc_short" "$esc_msg" "$code"
 		fi
 	else
