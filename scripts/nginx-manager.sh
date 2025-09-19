@@ -1,6 +1,8 @@
 #!/bin/bash
 
-set -euo pipefail
+# NOTE: Do NOT enable global 'set -euo pipefail' here because this script is sourced
+# by the main manager. Strict modes in a sourced context propagate and caused silent
+# exits before JSON error emission. Individual commands are explicitly checked instead.
 
 # Load shared functions/vars
 source /opt/albert-ai-sandbox-manager/scripts/common.sh

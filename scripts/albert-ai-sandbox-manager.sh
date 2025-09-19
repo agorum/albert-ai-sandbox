@@ -4,6 +4,21 @@ source /opt/albert-ai-sandbox-manager/scripts/common.sh
 source /opt/albert-ai-sandbox-manager/scripts/port-manager.sh
 source /opt/albert-ai-sandbox-manager/scripts/nginx-manager.sh
 
+# IMPORTANT: A sourced script (nginx-manager.sh) previously enabled 'set -euo pipefail'.
+# These strict modes were causing silent premature exits before JSON/trace output.
+# We explicitly relax them here and implement our own explicit error handling so that
+# json_error / trace instrumentation always has a chance to run.
+set +e 2>/dev/null || true
+set +u 2>/dev/null || true
+set +o pipefail 2>/dev/null || true
+
+# Early trace (before any heavy logic) – helps confirm script actually starts.
+if [ -n "${ALBERT_TRACE:-}" ]; then
+	echo "[TRACE] manager start pid=$$ PWD=$(pwd) args:$*" >&2
+	# Show current critical shell option states for debugging
+	(set -o | grep -E 'errexit|nounset|pipefail' || true) >&2
+fi
+
 DOCKER_IMAGE="albert-ai-sandbox:latest"
 
 # DB path (must match manager service). Allow override via MANAGER_DB_PATH.
@@ -31,6 +46,7 @@ OWNER_KEY_HASH_ENV="${ALBERT_OWNER_KEY_HASH:-}"  # passed in by REST service
 NON_INTERACTIVE="${ALBERT_NONINTERACTIVE:-}"     # suppress prompts
 DEBUG=""
 QUIET=""
+TRACE="${ALBERT_TRACE:-}"
 
 # Parse optional global flags (support both before and after command)
 ORIG_ARGS=("$@")
@@ -68,6 +84,23 @@ while [[ $# -gt 0 ]]; do
 done
 # Expose early debug after first pass
 debug_log() { [ -n "$DEBUG" ] && echo -e "${YELLOW}[DEBUG] $*${NC}" >&2; }
+trace_log() { [ -n "$TRACE" ] && echo "[TRACE] $*" >&2; }
+
+# Track whether any JSON has been emitted (for debugging silent failures)
+__ALBERT_JSON_EMITTED=""
+
+# Global EXIT trap to catch silent early termination and emit JSON diagnostics.
+_albert_exit_trap() {
+	local rc=$?
+	if [ -n "${ALBERT_TRACE:-}" ]; then
+		echo "[TRACE] global exit trap rc=$rc JSON_MODE='${JSON_MODE}' emitted='${__ALBERT_JSON_EMITTED}'" >&2
+	fi
+	if [ -n "$JSON_MODE" ] && [ -z "$__ALBERT_JSON_EMITTED" ]; then
+		# Avoid recursive trap if json_error triggered exit intentionally (it sets emitted flag already)
+		printf '{"error":"internal","message":"Exited prematurely (trap)","exitCode":%s}\n' "$rc" >&2
+	fi
+}
+trap _albert_exit_trap EXIT
 
 # Emit JSON safely (expects complete object spec via jq args)
 json_emit() {
@@ -75,11 +108,11 @@ json_emit() {
 	if [ -n "$JSON_MODE" ]; then
 		if [ $# -eq 1 ]; then
 			# Single raw jq program
-			jq -n "$1"
+			jq -n "$1" && __ALBERT_JSON_EMITTED=1
 		else
 			# Program followed by --arg pairs
 			local program="$1"; shift
-			jq -n "$program" "$@"
+			jq -n "$program" "$@" && __ALBERT_JSON_EMITTED=1
 		fi
 	fi
 }
@@ -307,13 +340,14 @@ json_error() {
     local msg="$1"; shift || true
 	if [ -n "$JSON_MODE" ]; then
 		if command -v jq >/dev/null 2>&1; then
-			jq -n --arg error "$short" --arg message "$msg" --arg code "$code" '{error:$error,message:$message,exitCode:($code|tonumber)}'
+			jq -n --arg error "$short" --arg message "$msg" --arg code "$code" '{error:$error,message:$message,exitCode:($code|tonumber)}' && __ALBERT_JSON_EMITTED=1
 		else
 			# Minimal manual JSON fallback when jq is unavailable
 			# Escape double quotes in strings (basic)
 			local esc_short=${short//\\/\\\\}; esc_short=${esc_short//\"/\\\"}
 			local esc_msg=${msg//\\/\\\\}; esc_msg=${esc_msg//\"/\\\"}
 			printf '{"error":"%s","message":"%s","exitCode":%s}\n' "$esc_short" "$esc_msg" "$code"
+			__ALBERT_JSON_EMITTED=1
 		fi
 	else
 		echo -e "${RED}Error: $msg${NC}" >&2
@@ -332,32 +366,40 @@ hash_plaintext_key() {
 
 # Generate a cryptic unique sandbox name if user omitted one
 generate_random_name() {
-	# Lightweight: sbx- + 6 hex chars from /dev/urandom; ensure not existing
+	# Lightweight: sbx- + 6-8 hex chars; robust against errors
 	local attempt name
 	for attempt in {1..20}; do
-		name="sbx-$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-8)"
+		name="sbx-$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' | cut -c1-8)"
 		[ -z "$name" ] && continue
-		docker ps -a --format '{{.Names}}' | grep -q "^${name}$" && continue
+		if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$" 2>/dev/null; then
+			continue
+		fi
 		echo "$name"; return 0
 	done
-	# Fallback timestamp
 	echo "sbx-$(date +%s)"
 }
 
 # Create container
 create_container() {
 	local name=$1
+	trace_log "enter create_container name='$name' JSON_MODE='${JSON_MODE}'"
 
 	if [ -z "$name" ]; then
 		name=$(generate_random_name)
 		debug_log "Generated random container name: $name"
+		trace_log "generated name='$name'"
 	fi
 
 	# Ensure API key valid (uses global require_api_key)
+	trace_log "before require_api_key key_hash_env='${OWNER_KEY_HASH_ENV}'"
 	require_api_key
-	# Check if container already exists
-	if [ -z "$QUIET" ] && docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
-		json_error 1 "Exists" "Container '$name' already exists"
+	trace_log "after require_api_key API_KEY_DB_ID='${API_KEY_DB_ID}' owner='${OWNER_KEY_HASH_ENV}'"
+	# Check if container already exists (avoid pipe causing non-zero propagation issues)
+	if [ -z "$QUIET" ]; then
+		if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$" 2>/dev/null; then
+			trace_log "container already exists before creation name='$name'"
+			json_error 1 "Exists" "Container '$name' already exists"
+		fi
 	fi
 	debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID"
 	
@@ -369,10 +411,12 @@ create_container() {
 
 	# Ensure image exists before attempting run
 	if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
+		trace_log "image missing '$DOCKER_IMAGE'"
 		json_error 1 "Image missing" "Docker image '$DOCKER_IMAGE' not found. Run 'build' first."
 	fi
 	
 	if [ -z "$novnc_port" ] || [ -z "$vnc_port" ] || [ -z "$mcphub_port" ] || [ -z "$filesvc_port" ]; then
+		trace_log "port allocation failed novnc='$novnc_port' vnc='$vnc_port' mcphub='$mcphub_port' filesvc='$filesvc_port'"
 		json_error 1 "No ports" "No free ports available"
 	fi
 	
@@ -409,6 +453,7 @@ create_container() {
 		$DOCKER_IMAGE
 	
 	if [ $? -eq 0 ]; then
+		trace_log "docker run success name='$name'"
 		# Register in registry
 		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port"
 
@@ -428,15 +473,14 @@ create_container() {
 		
 		if [ -n "$JSON_MODE" ]; then
 			HOSTIP=$(hostname -I | awk '{print $1}')
-			jq -n \
+			json_emit '{result:"created", name:$name, ownerHash:$ownerHash, ports:{novnc:$novnc_port,vnc:$vnc_port,mcphub:$mcphub_port,filesvc:$filesvc_port}, urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), filesUpload:("http://"+$host+"/"+$name+"/files/upload"), filesDownloadPattern:("http://"+$host+"/"+$name+"/files/download?path=/tmp/albert-files/<uuid.ext>")}}' \
 				--arg name "$name" \
 				--arg novnc_port "$novnc_port" \
 				--arg vnc_port "$vnc_port" \
 				--arg mcphub_port "$mcphub_port" \
 				--arg filesvc_port "$filesvc_port" \
 				--arg ownerHash "$OWNER_KEY_HASH_ENV" \
-				--arg host "$HOSTIP" \
-				'{result:"created", name:$name, ownerHash:$ownerHash, ports:{novnc:$novnc_port,vnc:$vnc_port,mcphub:$mcphub_port,filesvc:$filesvc_port}, urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), filesUpload:("http://"+$host+"/"+$name+"/files/upload"), filesDownloadPattern:("http://"+$host+"/"+$name+"/files/download?path=/tmp/albert-files/<uuid.ext>")}}'
+				--arg host "$HOSTIP"
 		else
 			echo -e "${GREEN}========================================${NC}"
 			echo -e "${GREEN}Sandbox container created successfully!${NC}"
@@ -450,7 +494,15 @@ create_container() {
 			echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
 		fi
 	else
+		trace_log "docker run failed name='$name' rc=$?"
 		json_error 1 "Create failed" "Error creating container"
+	fi
+
+	# Fallback: if JSON mode requested but nothing emitted (unexpected), emit generic error
+	if [ -n "$JSON_MODE" ] && [ -z "$__ALBERT_JSON_EMITTED" ]; then
+		trace_log "fallback JSON emitted name='$name'"
+		printf '{"error":"internal","message":"No JSON emitted (fallback)","exitCode":1}\n'
+		exit 1
 	fi
 }
 
