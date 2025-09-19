@@ -69,6 +69,21 @@ done
 # Expose early debug after first pass
 debug_log() { [ -n "$DEBUG" ] && echo -e "${YELLOW}[DEBUG] $*${NC}" >&2; }
 
+# Emit JSON safely (expects complete object spec via jq args)
+json_emit() {
+	# Usage: json_emit '{result:"ok"}' OR with args passed
+	if [ -n "$JSON_MODE" ]; then
+		if [ $# -eq 1 ]; then
+			# Single raw jq program
+			jq -n "$1"
+		else
+			# Program followed by --arg pairs
+			local program="$1"; shift
+			jq -n "$program" "$@"
+		fi
+	fi
+}
+
 if [ ${#FIRST_PASS[@]} -eq 0 ]; then
 	set -- "${ORIG_ARGS[@]}"
 else
@@ -147,7 +162,11 @@ build_image() {
 	echo -e "${YELLOW}Building Docker image...${NC}"
 	cd /opt/albert-ai-sandbox-manager/docker
 	docker build -t $DOCKER_IMAGE .
-	echo -e "${GREEN}Image built successfully${NC}"
+	if [ -n "$JSON_MODE" ]; then
+		json_emit '{result:"built", image:$img}' --arg img "$DOCKER_IMAGE"
+	else
+		echo -e "${GREEN}Image built successfully${NC}"
+	fi
 }
 
 # --- Schema + API Key validation ----------------------------------------------------
@@ -433,7 +452,11 @@ remove_container() {
 	# Remove from registry
 	remove_from_registry "$name"
 	
-	echo -e "${GREEN}Container '$name' has been removed${NC}"
+	if [ -n "$JSON_MODE" ]; then
+		json_emit '{result:"removed", name:$n}' --arg n "$name"
+	else
+		echo -e "${GREEN}Container '$name' has been removed${NC}"
+	fi
 }
 
 # Start container
@@ -449,8 +472,13 @@ start_container() {
 	
 	if [ $? -eq 0 ]; then
 		local info=$(get_container_info "$name")
-		echo -e "${GREEN}Container '$name' started${NC}"
-		echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
+		if [ -n "$JSON_MODE" ]; then
+			local hostip=$(hostname -I | awk '{print $1}')
+			json_emit '{result:"started", name:$n, url:($h+"/"+$n+"/"), host:$h}' --arg n "$name" --arg h "http://$hostip"
+		else
+			echo -e "${GREEN}Container '$name' started${NC}"
+			echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
+		fi
 	else
 		echo -e "${RED}Error starting container${NC}"
 		return 1
@@ -469,7 +497,11 @@ stop_container() {
 	docker stop "$name"
 	
 	if [ $? -eq 0 ]; then
-		echo -e "${GREEN}Container '$name' stopped${NC}"
+		if [ -n "$JSON_MODE" ]; then
+			json_emit '{result:"stopped", name:$n}' --arg n "$name"
+		else
+			echo -e "${GREEN}Container '$name' stopped${NC}"
+		fi
 	else
 		echo -e "${RED}Error stopping container${NC}"
 		return 1
@@ -484,8 +516,13 @@ restart_container() {
 	
 	if [ -z "$name" ]; then json_error 1 "Missing name" "Container name required"; fi
 	
-	stop_container "$name"
-	start_container "$name"
+	stop_container "$name" >/dev/null 2>&1 || true
+	start_container "$name" >/dev/null 2>&1 || true
+	if [ -n "$JSON_MODE" ]; then
+		json_emit '{result:"restarted", name:$n}' --arg n "$name"
+	else
+		echo -e "${GREEN}Container '$name' restarted${NC}"
+	fi
 }
 
 # Show status
@@ -507,12 +544,7 @@ show_status() {
 				local sj=$(show_single_status "$container_name" json)
 				[ -n "$sj" ] && rows+=("$sj")
 			done
-			printf '['
-			for i in "${!rows[@]}"; do
-				printf '%s' "${rows[$i]}"
-				if [ $i -lt $(( ${#rows[@]} - 1 )) ]; then printf ','; fi
-			done
-			printf ']'
+			if [ ${#rows[@]} -eq 0 ]; then printf '[]'; else printf '['; for i in "${!rows[@]}"; do printf '%s' "${rows[$i]}"; [ $i -lt $(( ${#rows[@]} - 1 )) ] && printf ','; done; printf ']'; fi
 		else
 			echo -e "${GREEN}Status of all sandbox containers:${NC}"
 			echo -e "${GREEN}=================================${NC}"
@@ -524,7 +556,11 @@ show_status() {
 			done
 		fi
 	else
-		show_single_status "$name"
+		if [ -n "$JSON_MODE" ]; then
+			show_single_status "$name" json
+		else
+			show_single_status "$name"
+		fi
 	fi
 }
 
@@ -534,7 +570,10 @@ show_single_status() {
 	local mode=${2:-text}
 	local info=$(get_container_info "$name")
 	if [ -z "$info" ]; then
-		[ "$mode" = "json" ] && return 0
+		if [ "$mode" = "json" ] || [ -n "$JSON_MODE" ]; then
+			json_emit '{error:"not_found", message:$m, name:$n}' --arg m "Container not found" --arg n "$name"
+			return 0
+		fi
 		echo -e "${RED}Container '$name' not found in registry${NC}"
 		return 1
 	fi
@@ -664,41 +703,37 @@ case "${1:-}" in
 		;;
 	selfcheck)
 		# Lightweight diagnostics: DB, schema, keys
-		echo "=== selfcheck ==="
-		echo "DB_PATH: $DB_PATH"
+		[ -z "$JSON_MODE" ] && echo "=== selfcheck ==="
+		[ -z "$JSON_MODE" ] && echo "DB_PATH: $DB_PATH"
 		# Ensure schema before inspection
 		ensure_schema
 		if [ -f "$DB_PATH" ]; then
 			if stat -c%s "$DB_PATH" >/dev/null 2>&1; then sz=$(stat -c%s "$DB_PATH"); else sz=$(stat -f%z "$DB_PATH" 2>/dev/null || echo ?); fi
-			echo "DB exists: yes (size ${sz} bytes)"
+			[ -z "$JSON_MODE" ] && echo "DB exists: yes (size ${sz} bytes)"
 		else
-			echo "DB exists: no"; exit 2
+			if [ -n "$JSON_MODE" ]; then json_emit '{error:"db_missing",message:"DB not found",result:"error"}'; else echo "DB exists: no"; fi; exit 2
 		fi
 		# Validate header signature
 		head_sig=$(head -c 16 "$DB_PATH" 2>/dev/null || true)
 		if echo "$head_sig" | grep -q "SQLite format 3"; then
-			echo "Header: OK (SQLite format 3)"
+			[ -z "$JSON_MODE" ] && echo "Header: OK (SQLite format 3)"
 		else
-			echo "Header: WARNING (unexpected first 16 bytes)"
+			[ -z "$JSON_MODE" ] && echo "Header: WARNING (unexpected first 16 bytes)"
 		fi
 		# Extra diagnostics
-		stat "$DB_PATH" 2>/dev/null | sed 's/^/STAT: /'
-		if command -v realpath >/dev/null 2>&1; then echo "Realpath: $(realpath "$DB_PATH")"; fi
-		echo -n "First 64 bytes (hex): "; hexdump -Cv "$DB_PATH" 2>/dev/null | head -n1 || echo "(hexdump unavailable)"
+		[ -z "$JSON_MODE" ] && stat "$DB_PATH" 2>/dev/null | sed 's/^/STAT: /'
+		if [ -z "$JSON_MODE" ] && command -v realpath >/dev/null 2>&1; then echo "Realpath: $(realpath "$DB_PATH")"; fi
+		if [ -z "$JSON_MODE" ]; then echo -n "First 64 bytes (hex): "; hexdump -Cv "$DB_PATH" 2>/dev/null | head -n1 || echo "(hexdump unavailable)"; fi
 		# sqlite3 CLI diagnostics
 		if command -v sqlite3 >/dev/null 2>&1; then
-			SQLITE_VER=$(sqlite3 -version 2>&1 || true)
-			echo "sqlite3 version: $SQLITE_VER"
+			if [ -z "$JSON_MODE" ]; then SQLITE_VER=$(sqlite3 -version 2>&1 || true); echo "sqlite3 version: $SQLITE_VER"; fi
 			# Capture stderr separately for .tables
 			SQLITE_TABLES_OUT=$(sqlite3 "$DB_PATH" ".tables" 2> /tmp/.albert_sqlite_tables_err.$$ || true)
-			if [ -s /tmp/.albert_sqlite_tables_err.$$ ]; then
-				echo "Tables (sqlite3 .tables) stderr:"; sed 's/^/  ERR: /' /tmp/.albert_sqlite_tables_err.$$
-			fi
+				if [ -z "$JSON_MODE" ] && [ -s /tmp/.albert_sqlite_tables_err.$$ ]; then echo "Tables (sqlite3 .tables) stderr:"; sed 's/^/  ERR: /' /tmp/.albert_sqlite_tables_err.$$; fi
 			rm -f /tmp/.albert_sqlite_tables_err.$$ 2>/dev/null || true
-			echo "Tables (sqlite3 .tables):"
-			if [ -n "$SQLITE_TABLES_OUT" ]; then printf '%s\n' "$SQLITE_TABLES_OUT" | sed 's/^/  /'; else echo "  (none)"; fi
+				if [ -z "$JSON_MODE" ]; then echo "Tables (sqlite3 .tables):"; if [ -n "$SQLITE_TABLES_OUT" ]; then printf '%s\n' "$SQLITE_TABLES_OUT" | sed 's/^/  /'; else echo "  (none)"; fi; fi
 		else
-			echo "sqlite3 CLI not installed"
+			[ -z "$JSON_MODE" ] && echo "sqlite3 CLI not installed"
 		fi
 		# Python view of tables & counts
  		if command -v python3 >/dev/null 2>&1; then
@@ -739,14 +774,12 @@ PY
 		# Legacy sqlite listing (kept for comparison)
 		if command -v sqlite3 >/dev/null 2>&1; then
 			SQLITE_KEYS_OUT=$(sqlite3 "$DB_PATH" "SELECT id, substr(key_hash,1,12), label, datetime(created_at,'unixepoch') FROM api_keys ORDER BY created_at DESC;" 2> /tmp/.albert_sqlite_keys_err.$$ || true)
-			if [ -s /tmp/.albert_sqlite_keys_err.$$ ]; then
-				echo "API keys (.sqlite3 direct) stderr:"; sed 's/^/  ERR: /' /tmp/.albert_sqlite_keys_err.$$
-			fi
+			if [ -z "$JSON_MODE" ] && [ -s /tmp/.albert_sqlite_keys_err.$$ ]; then echo "API keys (.sqlite3 direct) stderr:"; sed 's/^/  ERR: /' /tmp/.albert_sqlite_keys_err.$$; fi
 			rm -f /tmp/.albert_sqlite_keys_err.$$ 2>/dev/null || true
-			echo "API keys (.sqlite3 direct):"
-			if [ -n "$SQLITE_KEYS_OUT" ]; then printf '%s\n' "$SQLITE_KEYS_OUT" | awk 'BEGIN{FS="|"}{printf "  id=%s prefix=%s label=%s created=%s\n", $1,$2,$3,$4}'; else echo "  (query failed)"; fi
-		else
-			echo "API keys (.sqlite3 direct): sqlite3 not installed"
+			[ -z "$JSON_MODE" ] && {
+				echo "API keys (.sqlite3 direct):"
+				if [ -n "$SQLITE_KEYS_OUT" ]; then printf '%s\n' "$SQLITE_KEYS_OUT" | awk 'BEGIN{FS="|"}{printf "  id=%s prefix=%s label=%s created=%s\n", $1,$2,$3,$4}'; else echo "  (query failed)"; fi
+			}
 		fi
 		if [ -n "$OWNER_KEY_HASH_ENV" ]; then
 			inp="$OWNER_KEY_HASH_ENV"
@@ -758,6 +791,28 @@ PY
 			fi
 			m=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$candidate' LIMIT 1;" 2>/dev/null || true)
 			if [ -n "$m" ]; then echo "Lookup: MATCH (id=$m)"; else echo "Lookup: NO MATCH for $candidate"; fi
+		fi
+		if [ -n "$JSON_MODE" ]; then
+			# Build minimal JSON summary from python enumerated tables
+			python3 - "$DB_PATH" <<'PY' 2>/dev/null
+import os, sqlite3, json, sys, time
+db = os.environ.get('DB_PATH') or (len(sys.argv)>1 and sys.argv[1])
+out = {"result":"ok","dbPath":db,"tables":[],"apiKeys":[]}
+if db and os.path.exists(db):
+	try:
+		con=sqlite3.connect(db); cur=con.cursor()
+		cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+		out["tables"]=[r[0] for r in cur.fetchall()]
+		if 'api_keys' in out["tables"]:
+			for r in cur.execute("SELECT id, substr(key_hash,1,12), label, created_at FROM api_keys ORDER BY created_at DESC"):
+				out["apiKeys"].append({"id":r[0],"prefix":r[1],"label":r[2] or '',"created_at":r[3]})
+	except Exception as e:
+		out["error"]=str(e); out["result"]="error"
+	finally:
+		try: con.close()
+		except: pass
+print(json.dumps(out))
+PY
 		fi
 		exit 0
 		;;
