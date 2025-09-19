@@ -30,6 +30,7 @@ JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output
 OWNER_KEY_HASH_ENV="${ALBERT_OWNER_KEY_HASH:-}"  # passed in by REST service
 NON_INTERACTIVE="${ALBERT_NONINTERACTIVE:-}"     # suppress prompts
 DEBUG=""
+QUIET=""
 
 # Parse optional global flags (support both before and after command)
 ORIG_ARGS=("$@")
@@ -38,6 +39,7 @@ COMMAND_SEEN=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--json) JSON_MODE=1; shift ;;
+		--quiet) QUIET=1; shift ;;
 		--api-key-hash)
 			[ -z "$2" ] && { echo "Missing value for --api-key-hash" >&2; exit 2; }
 			OWNER_KEY_HASH_ENV="$2"; shift 2 ;;
@@ -104,6 +106,7 @@ if [ -n "$DEBUG" ]; then
   echo -e "${YELLOW}[DEBUG] Effective command: $*${NC}" >&2
   echo -e "${YELLOW}[DEBUG] DB_PATH(initial)=${DB_PATH}${NC}" >&2
   echo -e "${YELLOW}[DEBUG] OWNER_KEY_HASH_ENV(initial)=${OWNER_KEY_HASH_ENV}${NC}" >&2
+	echo -e "${YELLOW}[DEBUG] QUIET=${QUIET}${NC}" >&2
 fi
 
 # Show help
@@ -310,7 +313,7 @@ create_container() {
 	# Ensure API key valid (uses global require_api_key)
 	require_api_key
 	# Check if container already exists
-	if docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
+	if [ -z "$QUIET" ] && docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
 		json_error 1 "Exists" "Container '$name' already exists"
 	fi
 	debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID"
@@ -325,11 +328,13 @@ create_container() {
 		json_error 1 "No ports" "No free ports available"
 	fi
 	
-	echo -e "${YELLOW}Creating sandbox container '$name'...${NC}"
-	echo -e "${BLUE}  noVNC Port: $novnc_port${NC}"
-	echo -e "${BLUE}  VNC Port: $vnc_port${NC}"
-	echo -e "${BLUE}  MCP Hub Port: $mcphub_port${NC}"
-	echo -e "${BLUE}  File Service Port: $filesvc_port${NC}"
+	[ -z "$QUIET" ] && {
+		echo -e "${YELLOW}Creating sandbox container '$name'...${NC}"
+		echo -e "${BLUE}  noVNC Port: $novnc_port${NC}"
+		echo -e "${BLUE}  VNC Port: $vnc_port${NC}"
+		echo -e "${BLUE}  MCP Hub Port: $mcphub_port${NC}"
+		echo -e "${BLUE}  File Service Port: $filesvc_port${NC}"
+	}
 	
 	LABEL_ARGS=(--label "albert.manager=1")
 	if [ -n "$OWNER_KEY_HASH_ENV" ]; then
@@ -585,6 +590,15 @@ list_containers() {
 		printf "%-30s %-10s %-10s %-10s\n" "NAME" "STATUS" "NOVNC-PORT" "VNC-PORT"
 		printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
 	fi
+	local print_header=1
+	[ -n "$JSON_MODE" ] && print_header=0
+	if [ -n "$QUIET" ]; then print_header=0; fi
+	if [ $print_header -eq 1 ]; then
+		echo -e "${GREEN}ALBERT Sandbox Containers:${NC}"
+		echo -e "${GREEN}========================================${NC}"
+		printf "%-30s %-10s %-10s %-10s\n" "NAME" "STATUS" "NOVNC-PORT" "VNC-PORT"
+		printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
+	fi
 	
 	FILTERED=( $(get_all_containers) )
 	if [ -n "$OWNER_KEY_HASH_ENV" ]; then
@@ -627,7 +641,7 @@ list_containers() {
 			done
 			printf ']'
 		fi
-	else
+	elif [ -z "$QUIET" ]; then
 		if [ ${#FILTERED[@]} -eq 0 ]; then
 			echo -e "${YELLOW}(No containers for this API key)${NC}"
 		else
