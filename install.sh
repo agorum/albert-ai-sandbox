@@ -47,13 +47,19 @@ apt-get install -y \
 	python3-pip \
 	net-tools
 
-# Python dependencies for manager service
-echo -e "${YELLOW}Installing Python requirements...${NC}"
+# Python dependencies for manager service (use dedicated venv to avoid PEP 668 issues)
+echo -e "${YELLOW}Setting up Python virtual environment...${NC}"
+VENV_DIR="${INSTALL_DIR}/venv"
+if [ ! -d "${VENV_DIR}" ]; then
+	python3 -m venv "${VENV_DIR}" || { echo -e "${RED}Failed to create virtualenv${NC}"; exit 1; }
+fi
+"${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel --quiet || true
+echo -e "${YELLOW}Installing Python requirements in venv...${NC}"
 if [ -f "${SCRIPT_DIR}/requirements.txt" ]; then
-    pip3 install --no-cache-dir -r "${SCRIPT_DIR}/requirements.txt" || {
-        echo -e "${RED}Failed to install Python requirements${NC}"; exit 1; }
+	"${VENV_DIR}/bin/pip" install --no-cache-dir -r "${SCRIPT_DIR}/requirements.txt" || {
+		echo -e "${RED}Failed to install Python requirements in venv${NC}"; exit 1; }
 else
-    echo -e "${YELLOW}requirements.txt not found, skipping Python deps (manager service may fail)${NC}"
+	echo -e "${YELLOW}requirements.txt not found, skipping Python deps (manager service may fail)${NC}"
 fi
 
 # Docker installation
@@ -181,7 +187,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/albert-ai-sandbox-manager
-ExecStart=/usr/bin/env python3 /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py
+ExecStart=/opt/albert-ai-sandbox-manager/venv/bin/python /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py
 Restart=on-failure
 RestartSec=5
 Environment=MANAGER_PORT=5001
