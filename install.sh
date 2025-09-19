@@ -198,7 +198,7 @@ ln -sf ${INSTALL_DIR}/scripts/api-key-manager.sh /usr/local/bin/albert-api-key-m
 # Container Manager Service (systemd setup)
 # ---------------------------------------------------------------------------
 MANAGER_SERVICE_FILE="/etc/systemd/system/albert-container-manager.service"
-if [ ! -f "$MANAGER_SERVICE_FILE" ]; then
+echo -e "${YELLOW}Installing/Updating manager systemd unit...${NC}"
 cat > "$MANAGER_SERVICE_FILE" <<'EOF'
 [Unit]
 Description=ALBERT Container Manager REST Service
@@ -208,6 +208,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/albert-ai-sandbox-manager
+ExecStartPre=/usr/bin/bash -c 'for i in {1..15}; do docker info >/dev/null 2>&1 && exit 0; echo "[manager] waiting for docker ($i)"; sleep 2; done; echo "Docker daemon not ready after wait" >&2; exit 1'
 ExecStart=/usr/bin/env bash -c '[ -x /opt/albert-ai-sandbox-manager/venv/bin/python ] && exec /opt/albert-ai-sandbox-manager/venv/bin/python /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py || exec python3 /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py'
 Restart=on-failure
 RestartSec=5
@@ -221,15 +222,9 @@ Environment=MANAGER_PORT=5001
 [Install]
 WantedBy=multi-user.target
 EOF
-	systemctl daemon-reload
-	systemctl enable albert-container-manager.service
-	systemctl start albert-container-manager.service || echo -e "${YELLOW}Warning: Manager service failed to start; check logs with: journalctl -u albert-container-manager -e${NC}"
-else
-	echo -e "${YELLOW}Manager service unit already exists, skipping creation${NC}"
-	systemctl daemon-reload
-	systemctl enable albert-container-manager.service
-	systemctl restart albert-container-manager.service || true
-fi
+systemctl daemon-reload
+systemctl enable albert-container-manager.service
+systemctl restart albert-container-manager.service || echo -e "${YELLOW}Warning: Manager service failed to (re)start; check logs with: journalctl -u albert-container-manager -e${NC}"
 
 # ---------------------------------------------------------------------------
 # Nginx routing for manager service under /manager/

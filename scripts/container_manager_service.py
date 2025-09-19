@@ -59,7 +59,40 @@ Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 Path(os.path.dirname(DB_PATH)).mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
-client = docker.from_env()
+
+# Lazy singleton docker client (avoid import-time failure if Docker not ready or
+# requests-unixsocket not yet installed). We create it on first use with retries.
+_docker_client = None  # type: Optional[docker.DockerClient]
+
+def get_docker_client(retries: int = 5, delay: float = 1.5) -> docker.DockerClient:
+    """Return a cached docker client, creating it lazily with retries.
+
+    We intentionally create the client only when first needed so that:
+      * Service can start even if Docker daemon is still warming up
+      * Missing dependency issues (e.g. requests-unixsocket) can be fixed and
+        service restarted without crashing import
+    """
+    global _docker_client
+    if _docker_client is not None:
+        return _docker_client
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, retries + 1):
+        try:
+            # docker.from_env() respects DOCKER_HOST / sockets automatically.
+            c = docker.from_env()
+            # Light connectivity check; will raise if daemon not reachable
+            c.ping()
+            _docker_client = c
+            return c
+        except Exception as ex:  # broad: want to retry for any failure
+            last_exc = ex
+            time.sleep(delay)
+    # Exhausted retries
+    assert last_exc is not None
+    raise last_exc
+
+def docker_unavailable_response(ex: Exception):
+    return jsonify({"error": f"Docker unavailable: {ex.__class__.__name__}: {ex}"}), 503
 
 # --- Database helpers ------------------------------------------------------
 
@@ -163,7 +196,14 @@ def not_found(e):  # pragma: no cover (simple wrapper)
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok"})
+    # Provide docker readiness info (non-fatal if unreachable)
+    docker_status = "down"
+    try:
+        get_docker_client(retries=1, delay=0)
+        docker_status = "up"
+    except Exception:
+        pass
+    return jsonify({"status": "ok", "docker": docker_status})
 
 # --- Container operations --------------------------------------------------
 
@@ -184,6 +224,12 @@ def create_container():
         return jsonify({"error": "Field 'env' must be an object"}), 400
     cmd = body.get("cmd")
     auto_start = body.get("autoStart", True)
+
+    # Ensure docker client
+    try:
+        client = get_docker_client()
+    except Exception as ex:
+        return docker_unavailable_response(ex)
 
     # Pull image lazily
     try:
@@ -246,6 +292,10 @@ def _get_owned_container(api_key_hash: str, api_key_id: int, cid: str):
         return None, (jsonify({"error": "Container not found"}), 404)
     docker_id = row["container_id"]
     try:
+        client = get_docker_client()
+    except Exception as ex:
+        return None, docker_unavailable_response(ex)
+    try:
         c = client.containers.get(docker_id)
     except NotFound:
         return None, (jsonify({"error": "Container missing (stale entry)"}), 404)
@@ -259,6 +309,11 @@ def list_containers():
     auth_info, err = require_api_key()
     if err:
         return err
+    try:
+        client = get_docker_client()
+    except Exception as ex:
+        return docker_unavailable_response(ex)
+
     conn = get_db()
     try:
         rows = conn.execute(
