@@ -141,6 +141,25 @@ Revoke a key (removes owned containers & data):
 python scripts/api_key_manager.py revoke --key <PLAINTEXT_KEY>
 ```
 
+#### Shell Wrapper (`api-key-manager.sh`)
+
+For convenience a Bash wrapper script is provided (calls the Python CLI internally):
+
+```bash
+/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh create --label "Team A"
+/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh list
+/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh revoke --key <PLAINTEXT_KEY>
+```
+
+Show help:
+
+```bash
+/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh help
+```
+
+It respects the same environment variables: `MANAGER_DB_PATH`, `MANAGER_DATA_DIR`.
+
+
 ### REST Endpoints
 
 | Method | Path | Description |
