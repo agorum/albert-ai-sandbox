@@ -75,36 +75,35 @@ fi
 
 # Second pass: if command present, allow flags after it
 if [[ -n "$COMMAND_SEEN" ]]; then
-	CMD="$1"; shift
-	POST_FLAGS=()
-	while [[ $# -gt 0 ]]; do
-		case "$1" in
-			--json) JSON_MODE=1; shift ;;
-			--api-key-hash)
-				[ -z "$2" ] && { echo "Missing value for --api-key-hash" >&2; exit 2; }
-				OWNER_KEY_HASH_ENV="$2"; shift 2 ;;
-			--api-key)
-				[ -z "$2" ] && { echo "Missing value for --api-key" >&2; exit 2; }
-				if command -v python3 >/dev/null 2>&1; then
-					OWNER_KEY_HASH_ENV=$(python3 -c 'import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$2")
-				else
-					OWNER_KEY_HASH_ENV=$(printf "%s" "$2" | openssl dgst -sha256 | awk '{print $2}')
-				fi
-				shift 2 ;;
-			--non-interactive) NON_INTERACTIVE=1; shift ;;
-			--debug) DEBUG=1; shift ;;
-			--debug) DEBUG=1; shift ;;
-			*) POST_FLAGS+=("$1"); shift ;;
-		esac
-	done
-	set -- "$CMD" "${POST_FLAGS[@]}"
-	fi
+  CMD="$1"; shift || true
+  POST_FLAGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) JSON_MODE=1; shift ;;
+      --api-key-hash)
+        [ -z "$2" ] && { echo "Missing value for --api-key-hash" >&2; exit 2; }
+        OWNER_KEY_HASH_ENV="$2"; shift 2 ;;
+      --api-key)
+        [ -z "$2" ] && { echo "Missing value for --api-key" >&2; exit 2; }
+        if command -v python3 >/dev/null 2>&1; then
+          OWNER_KEY_HASH_ENV=$(python3 -c 'import sys,hashlib;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$2")
+        else
+          OWNER_KEY_HASH_ENV=$(printf "%s" "$2" | openssl dgst -sha256 | awk '{print $2}')
+        fi
+        shift 2 ;;
+      --non-interactive) NON_INTERACTIVE=1; shift ;;
+      --debug) DEBUG=1; shift ;;
+      *) POST_FLAGS+=("$1"); shift ;;
+    esac
+  done
+  set -- "$CMD" "${POST_FLAGS[@]}"
+fi
 
-	# Early debug snapshot
-	if [ -n "$DEBUG" ]; then
-		echo -e "${YELLOW}[DEBUG] Effective command: $*${NC}" >&2
-		echo -e "${YELLOW}[DEBUG] DB_PATH(initial)=${DB_PATH}${NC}" >&2
-		echo -e "${YELLOW}[DEBUG] OWNER_KEY_HASH_ENV(initial)=${OWNER_KEY_HASH_ENV}${NC}" >&2
+# Early debug snapshot
+if [ -n "$DEBUG" ]; then
+  echo -e "${YELLOW}[DEBUG] Effective command: $*${NC}" >&2
+  echo -e "${YELLOW}[DEBUG] DB_PATH(initial)=${DB_PATH}${NC}" >&2
+  echo -e "${YELLOW}[DEBUG] OWNER_KEY_HASH_ENV(initial)=${OWNER_KEY_HASH_ENV}${NC}" >&2
 fi
 
 # Show help
@@ -285,9 +284,28 @@ hash_plaintext_key() {
 	fi
 }
 
+# Generate a cryptic unique sandbox name if user omitted one
+generate_random_name() {
+	# Lightweight: sbx- + 6 hex chars from /dev/urandom; ensure not existing
+	local attempt name
+	for attempt in {1..20}; do
+		name="sbx-$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-8)"
+		[ -z "$name" ] && continue
+		docker ps -a --format '{{.Names}}' | grep -q "^${name}$" && continue
+		echo "$name"; return 0
+	done
+	# Fallback timestamp
+	echo "sbx-$(date +%s)"
+}
+
 # Create container
 create_container() {
 	local name=$1
+
+	if [ -z "$name" ]; then
+		name=$(generate_random_name)
+		debug_log "Generated random container name: $name"
+	fi
 
 	# Ensure API key valid (uses global require_api_key)
 	require_api_key
@@ -560,11 +578,13 @@ show_single_status() {
 list_containers() {
 	require_api_key
 	debug_log "Listing containers for key_hash=$OWNER_KEY_HASH_ENV"
-	echo -e "${GREEN}ALBERT Sandbox Containers:${NC}"
-	echo -e "${GREEN}========================================${NC}"
-	
-	printf "%-30s %-10s %-10s %-10s\n" "NAME" "STATUS" "NOVNC-PORT" "VNC-PORT"
-	printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
+	# Header (only in non-JSON mode)
+	if [ -z "$JSON_MODE" ]; then
+		echo -e "${GREEN}ALBERT Sandbox Containers:${NC}"
+		echo -e "${GREEN}========================================${NC}"
+		printf "%-30s %-10s %-10s %-10s\n" "NAME" "STATUS" "NOVNC-PORT" "VNC-PORT"
+		printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
+	fi
 	
 	FILTERED=( $(get_all_containers) )
 	if [ -n "$OWNER_KEY_HASH_ENV" ]; then
@@ -597,20 +617,28 @@ list_containers() {
 		fi
 	done
 	if [ -n "$JSON_MODE" ]; then
-		printf '['
-		for i in "${!JSON_ROWS[@]}"; do
-			printf '%s' "${JSON_ROWS[$i]}"
-			if [ $i -lt $(( ${#JSON_ROWS[@]} - 1 )) ]; then printf ','; fi
-		done
-		printf ']'
+		if [ ${#JSON_ROWS[@]} -eq 0 ]; then
+			printf '[]'
+		else
+			printf '['
+			for i in "${!JSON_ROWS[@]}"; do
+				printf '%s' "${JSON_ROWS[$i]}"
+				if [ $i -lt $(( ${#JSON_ROWS[@]} - 1 )) ]; then printf ','; fi
+			done
+			printf ']'
+		fi
 	else
-		echo ""
-		echo -e "${BLUE}Desktop: KDE Plasma | VNC Password: albert${NC}"
-		echo ""
-		echo -e "${BLUE}Access URLs:${NC}"
-		for container_name in "${FILTERED[@]}"; do
-			echo "  http://$(hostname -I | awk '{print $1}')/${container_name}/"
-		done
+		if [ ${#FILTERED[@]} -eq 0 ]; then
+			echo -e "${YELLOW}(No containers for this API key)${NC}"
+		else
+			echo ""
+			echo -e "${BLUE}Desktop: KDE Plasma | VNC Password: albert${NC}"
+			echo ""
+			echo -e "${BLUE}Access URLs:${NC}"
+			for container_name in "${FILTERED[@]}"; do
+				echo "  http://$(hostname -I | awk '{print $1}')/${container_name}/"
+			done
+		fi
 	fi
 }
 
@@ -716,6 +744,25 @@ PY
 			fi
 			m=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$candidate' LIMIT 1;" 2>/dev/null || true)
 			if [ -n "$m" ]; then echo "Lookup: MATCH (id=$m)"; else echo "Lookup: NO MATCH for $candidate"; fi
+		fi
+		exit 0
+		;;
+	dbtrace)
+		# Deeper DB diagnostics
+		echo "=== dbtrace ==="
+		echo "DB_PATH: $DB_PATH"
+		if [ ! -f "$DB_PATH" ]; then echo "DB does not exist"; exit 1; fi
+		stat "$DB_PATH" 2>/dev/null | sed 's/^/STAT: /'
+		if command -v realpath >/dev/null 2>&1; then echo "Realpath: $(realpath "$DB_PATH")"; fi
+		if command -v sqlite3 >/dev/null 2>&1; then
+			for q in 'PRAGMA schema_version' 'PRAGMA user_version' 'PRAGMA page_size' 'PRAGMA freelist_count' "SELECT count(*) AS api_keys FROM api_keys" "SELECT count(*) AS containers FROM containers"; do
+				printf 'Query: %s -> ' "$q"
+				sqlite3 "$DB_PATH" "$q" 2>/dev/null || echo "(error)"
+			done
+			printf 'Integrity: '
+			sqlite3 "$DB_PATH" 'PRAGMA integrity_check;' 2>/dev/null
+		else
+			echo "sqlite3 CLI not installed; limited dbtrace"
 		fi
 		exit 0
 		;;
