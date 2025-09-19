@@ -23,6 +23,7 @@ resolve_db_path() {
 	fi
 }
 resolve_db_path
+export DB_PATH  # ensure python heredocs can read it
 
 # Extended modes
 JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output
@@ -153,29 +154,29 @@ API_KEY_DB_ID=""
 ensure_schema() {
 	# Use python for reliable schema creation if available
 	if command -v python3 >/dev/null 2>&1; then
-		python3 - <<'PY'
+		python3 - "$DB_PATH" <<'PY'
 import os, sqlite3, sys
-db_path = os.environ.get('DB_PATH') or sys.argv[1] if len(sys.argv)>1 else None
+db_path = sys.argv[1] if len(sys.argv)>1 else os.environ.get('DB_PATH')
 if not db_path:
-		sys.exit(0)
+    sys.exit(0)
 os.makedirs(os.path.dirname(db_path), exist_ok=True)
 conn = sqlite3.connect(db_path)
 cur = conn.cursor()
 cur.executescript("""
 CREATE TABLE IF NOT EXISTS api_keys (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	key_hash TEXT UNIQUE NOT NULL,
-	label TEXT,
-	created_at INTEGER NOT NULL
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key_hash TEXT UNIQUE NOT NULL,
+  label TEXT,
+  created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS containers (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	api_key_id INTEGER NOT NULL,
-	container_id TEXT UNIQUE NOT NULL,
-	name TEXT,
-	image TEXT,
-	created_at INTEGER NOT NULL,
-	FOREIGN KEY(api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  api_key_id INTEGER NOT NULL,
+  container_id TEXT UNIQUE NOT NULL,
+  name TEXT,
+  image TEXT,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE
 );
 """)
 conn.commit(); conn.close()
@@ -638,12 +639,16 @@ case "${1:-}" in
 		else
 			echo "Header: WARNING (unexpected first 16 bytes)"
 		fi
+		# Extra diagnostics
+		stat "$DB_PATH" 2>/dev/null | sed 's/^/STAT: /'
+		if command -v realpath >/dev/null 2>&1; then echo "Realpath: $(realpath "$DB_PATH")"; fi
+		echo -n "First 64 bytes (hex): "; hexdump -Cv "$DB_PATH" 2>/dev/null | head -n1 || echo "(hexdump unavailable)"
 		echo "Tables (sqlite3 .tables):"; tbls=$(sqlite3 "$DB_PATH" ".tables" 2>/dev/null || true); if [ -n "$tbls" ]; then printf '%s\n' "$tbls" | sed 's/^/  /'; else echo "  (none)"; fi
 		# Python view of tables & counts
-		if command -v python3 >/dev/null 2>&1; then
-			python3 - <<'PY' 2>/dev/null || true
+ 		if command -v python3 >/dev/null 2>&1; then
+			python3 - "$DB_PATH" <<'PY' 2>/dev/null || true
 import os, sqlite3, time
-db=os.environ.get('DB_PATH')
+db = os.environ.get('DB_PATH') or (len(sys.argv)>1 and sys.argv[1])
 print('Tables (python query):')
 if not db or not os.path.exists(db):
     print('  (db missing)')
