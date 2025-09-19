@@ -7,16 +7,22 @@ source /opt/albert-ai-sandbox-manager/scripts/nginx-manager.sh
 DOCKER_IMAGE="albert-ai-sandbox:latest"
 
 # DB path (must match manager service). Allow override via MANAGER_DB_PATH.
-# DB path default aligned with python api_key_manager.py (project-root data dir fallback)
-if [ -n "$MANAGER_DB_PATH" ]; then
-	DB_PATH="$MANAGER_DB_PATH"
-elif [ -f "/opt/albert-ai-sandbox-manager/data/manager.db" ]; then
-	DB_PATH="/opt/albert-ai-sandbox-manager/data/manager.db"
-elif [ -f "$(pwd)/data/manager.db" ]; then
-	DB_PATH="$(pwd)/data/manager.db"
-else
-	DB_PATH="/opt/albert-ai-sandbox-manager/data/manager.db"  # create here if missing
-fi
+# Safe for 'set -u' (nounset) shells using ${VAR:-} expansions.
+resolve_db_path() {
+	local override="${MANAGER_DB_PATH:-}"
+	if [ -n "$override" ]; then
+		DB_PATH="$override"
+		return
+	fi
+	if [ -f "/opt/albert-ai-sandbox-manager/data/manager.db" ]; then
+		DB_PATH="/opt/albert-ai-sandbox-manager/data/manager.db"
+	elif [ -f "$(pwd)/data/manager.db" ]; then
+		DB_PATH="$(pwd)/data/manager.db"
+	else
+		DB_PATH="/opt/albert-ai-sandbox-manager/data/manager.db"  # will be created on first key insert
+	fi
+}
+resolve_db_path
 
 # Extended modes
 JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output

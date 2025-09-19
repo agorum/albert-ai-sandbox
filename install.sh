@@ -298,28 +298,3 @@ fi
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Installation completed!${NC}"
 echo -e "${GREEN}========================================${NC}"
-echo ""
-echo "Usage:"
-echo "  albert-ai-sandbox-manager create        - New sandbox with cryptic name"
-echo "  albert-ai-sandbox-manager create <name> - New sandbox with custom name"
-echo "  albert-ai-sandbox-manager list          - List containers"
-echo "  albert-ai-sandbox-manager status        - Show status"
-echo "  albert-ai-sandbox-manager help          - Show help"
-echo "  albert-api-key-manager create --label <lbl>  - Create API key"
-echo "  albert-api-key-manager list                 - List API keys"
-echo "  albert-api-key-manager revoke --key <key>   - Revoke API key"
-echo ""
-echo -e "${YELLOW}Info: VNC password for all containers: albert${NC}"
-echo ""
-echo "Example:"
-echo "  albert-ai-sandbox-manager create"
-echo ""
-echo -e "${YELLOW}Create first test sandbox? (y/n)${NC}"
-read -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-	albert-ai-sandbox-manager create test-sandbox || {
-		echo -e "${RED}Error creating test sandbox${NC}"
-		echo -e "${YELLOW}Try: albert-ai-sandbox-manager create${NC}"
-	}
-fi
