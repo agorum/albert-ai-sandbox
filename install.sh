@@ -48,24 +48,7 @@ apt-get install -y \
 	python3-venv \
 	net-tools
 
-# Python dependencies for manager service (use dedicated venv to avoid PEP 668 issues)
-echo -e "${YELLOW}Setting up Python virtual environment...${NC}"
-VENV_DIR="${INSTALL_DIR}/venv"
-if [ ! -d "${VENV_DIR}" ]; then
-	python3 -m venv "${VENV_DIR}" || {
-		echo -e "${YELLOW}First venv attempt failed, installing python3-venv and retrying...${NC}";
-		apt-get install -y python3-venv >/dev/null 2>&1 || true
-		python3 -m venv "${VENV_DIR}" || { echo -e "${RED}Failed to create virtualenv after retry${NC}"; exit 1; };
-	}
-fi
-"${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel --quiet || true
-echo -e "${YELLOW}Installing Python requirements in venv...${NC}"
-if [ -f "${SCRIPT_DIR}/requirements.txt" ]; then
-	"${VENV_DIR}/bin/pip" install --no-cache-dir -r "${SCRIPT_DIR}/requirements.txt" || {
-		echo -e "${RED}Failed to install Python requirements in venv${NC}"; exit 1; }
-else
-	echo -e "${YELLOW}requirements.txt not found, skipping Python deps (manager service may fail)${NC}"
-fi
+# (Will set up Python virtualenv after copying files)
 
 # Docker installation
 echo -e "${YELLOW}Installing Docker...${NC}"
@@ -93,6 +76,39 @@ cp -r ${SCRIPT_DIR}/docker/* ${INSTALL_DIR}/docker/ 2>/dev/null || {
 }
 cp -r ${SCRIPT_DIR}/config/* ${INSTALL_DIR}/config/ 2>/dev/null || true
 cp -r ${SCRIPT_DIR}/requirements.txt ${INSTALL_DIR}/ 2>/dev/null || true
+
+# Python dependencies for manager service (use dedicated venv to avoid PEP 668 issues)
+echo -e "${YELLOW}Setting up Python virtual environment...${NC}"
+VENV_DIR="${INSTALL_DIR}/venv"
+if [ ! -d "${VENV_DIR}" ]; then
+	python3 -m venv "${VENV_DIR}" 2>/dev/null || {
+		echo -e "${YELLOW}First venv attempt failed, ensuring python3-venv & ensurepip...${NC}";
+		apt-get install -y python3-venv >/dev/null 2>&1 || true
+		python3 -m ensurepip --upgrade 2>/dev/null || true
+		python3 -m venv "${VENV_DIR}" 2>/dev/null || {
+			echo -e "${RED}Virtualenv creation failed twice – falling back to system Python with --break-system-packages${NC}";
+			USE_SYSTEM_PIP=1
+		};
+	}
+fi
+
+if [ -z "${USE_SYSTEM_PIP:-}" ]; then
+	# Inside venv
+	"${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel --quiet || true
+	echo -e "${YELLOW}Installing Python requirements in venv...${NC}"
+	if [ -f "${INSTALL_DIR}/requirements.txt" ]; then
+		"${VENV_DIR}/bin/pip" install --no-cache-dir -r "${INSTALL_DIR}/requirements.txt" || {
+			echo -e "${RED}Failed to install Python requirements in venv${NC}"; exit 1; }
+	else
+		echo -e "${YELLOW}requirements.txt not found, skipping Python deps (manager service may fail)${NC}"
+	fi
+else
+	echo -e "${YELLOW}Using system Python (no venv). Installing requirements with --break-system-packages (PEP 668 override).${NC}"
+	if [ -f "${INSTALL_DIR}/requirements.txt" ]; then
+		pip3 install --no-cache-dir --break-system-packages -r "${INSTALL_DIR}/requirements.txt" || {
+			echo -e "${RED}Failed to install Python requirements system-wide${NC}"; exit 1; }
+	fi
+fi
 
 # Set permissions
 echo -e "${YELLOW}Setting permissions...${NC}"
@@ -192,7 +208,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/albert-ai-sandbox-manager
-ExecStart=/opt/albert-ai-sandbox-manager/venv/bin/python /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py
+ExecStart=/usr/bin/env bash -c '[ -x /opt/albert-ai-sandbox-manager/venv/bin/python ] && exec /opt/albert-ai-sandbox-manager/venv/bin/python /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py || exec python3 /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py'
 Restart=on-failure
 RestartSec=5
 Environment=MANAGER_PORT=5001
