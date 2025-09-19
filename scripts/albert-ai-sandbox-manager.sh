@@ -643,7 +643,21 @@ case "${1:-}" in
 		stat "$DB_PATH" 2>/dev/null | sed 's/^/STAT: /'
 		if command -v realpath >/dev/null 2>&1; then echo "Realpath: $(realpath "$DB_PATH")"; fi
 		echo -n "First 64 bytes (hex): "; hexdump -Cv "$DB_PATH" 2>/dev/null | head -n1 || echo "(hexdump unavailable)"
-		echo "Tables (sqlite3 .tables):"; tbls=$(sqlite3 "$DB_PATH" ".tables" 2>/dev/null || true); if [ -n "$tbls" ]; then printf '%s\n' "$tbls" | sed 's/^/  /'; else echo "  (none)"; fi
+		# sqlite3 CLI diagnostics
+		if command -v sqlite3 >/dev/null 2>&1; then
+			SQLITE_VER=$(sqlite3 -version 2>&1 || true)
+			echo "sqlite3 version: $SQLITE_VER"
+			# Capture stderr separately for .tables
+			SQLITE_TABLES_OUT=$(sqlite3 "$DB_PATH" ".tables" 2> /tmp/.albert_sqlite_tables_err.$$ || true)
+			if [ -s /tmp/.albert_sqlite_tables_err.$$ ]; then
+				echo "Tables (sqlite3 .tables) stderr:"; sed 's/^/  ERR: /' /tmp/.albert_sqlite_tables_err.$$
+			fi
+			rm -f /tmp/.albert_sqlite_tables_err.$$ 2>/dev/null || true
+			echo "Tables (sqlite3 .tables):"
+			if [ -n "$SQLITE_TABLES_OUT" ]; then printf '%s\n' "$SQLITE_TABLES_OUT" | sed 's/^/  /'; else echo "  (none)"; fi
+		else
+			echo "sqlite3 CLI not installed"
+		fi
 		# Python view of tables & counts
  		if command -v python3 >/dev/null 2>&1; then
 			python3 - "$DB_PATH" <<'PY' 2>/dev/null || true
@@ -681,7 +695,17 @@ PY
 			echo "(python3 not available for deep inspection)"
 		fi
 		# Legacy sqlite listing (kept for comparison)
-		echo "API keys (.sqlite3 direct):"; sqlite3 "$DB_PATH" "SELECT id, substr(key_hash,1,12), label, datetime(created_at,'unixepoch') FROM api_keys ORDER BY created_at DESC;" 2>/dev/null | awk 'BEGIN{FS="|"}{printf "  id=%s prefix=%s label=%s created=%s\n", $1,$2,$3,$4}' || echo "  (query failed)"
+		if command -v sqlite3 >/dev/null 2>&1; then
+			SQLITE_KEYS_OUT=$(sqlite3 "$DB_PATH" "SELECT id, substr(key_hash,1,12), label, datetime(created_at,'unixepoch') FROM api_keys ORDER BY created_at DESC;" 2> /tmp/.albert_sqlite_keys_err.$$ || true)
+			if [ -s /tmp/.albert_sqlite_keys_err.$$ ]; then
+				echo "API keys (.sqlite3 direct) stderr:"; sed 's/^/  ERR: /' /tmp/.albert_sqlite_keys_err.$$
+			fi
+			rm -f /tmp/.albert_sqlite_keys_err.$$ 2>/dev/null || true
+			echo "API keys (.sqlite3 direct):"
+			if [ -n "$SQLITE_KEYS_OUT" ]; then printf '%s\n' "$SQLITE_KEYS_OUT" | awk 'BEGIN{FS="|"}{printf "  id=%s prefix=%s label=%s created=%s\n", $1,$2,$3,$4}'; else echo "  (query failed)"; fi
+		else
+			echo "API keys (.sqlite3 direct): sqlite3 not installed"
+		fi
 		if [ -n "$OWNER_KEY_HASH_ENV" ]; then
 			inp="$OWNER_KEY_HASH_ENV"
 			if [[ $inp =~ ^[0-9a-fA-F]{64}$ ]]; then
