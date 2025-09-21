@@ -134,9 +134,10 @@ fi
 if [[ -n "$COMMAND_SEEN" ]]; then
   CMD="$1"; shift || true
   POST_FLAGS=()
-  while [[ $# -gt 0 ]]; do
+      while [[ $# -gt 0 ]]; do
     case "$1" in
       --json) JSON_MODE=1; shift ;;
+      --quiet) QUIET=1; shift ;;
       --api-key-hash)
         [ -z "$2" ] && { echo "Missing value for --api-key-hash" >&2; exit 2; }
         OWNER_KEY_HASH_ENV="$2"; shift 2 ;;
@@ -208,14 +209,41 @@ show_help() {
 
 # Build Docker image
 build_image() {
-	echo -e "${YELLOW}Building Docker image...${NC}"
-	cd /opt/albert-ai-sandbox-manager/docker
-	docker build -t $DOCKER_IMAGE .
-	if [ -n "$JSON_MODE" ]; then
-		json_emit '{result:"built", image:$img}' --arg img "$DOCKER_IMAGE"
-	else
-		echo -e "${GREEN}Image built successfully${NC}"
-	fi
+        local build_dir="/opt/albert-ai-sandbox-manager/docker"
+
+        if [ -z "$JSON_MODE" ] && [ -z "$QUIET" ]; then
+                echo -e "${YELLOW}Building Docker image...${NC}"
+        fi
+
+        if ! pushd "$build_dir" >/dev/null 2>&1; then
+                local msg="Docker build context not found at $build_dir"
+                if [ -n "$JSON_MODE" ]; then
+                        json_error 2 "build_context_missing" "$msg"
+                else
+                        echo -e "${RED}$msg${NC}" >&2
+                fi
+                return 2
+        fi
+
+        docker build -t "$DOCKER_IMAGE" .
+        local rc=$?
+        popd >/dev/null 2>&1 || true
+
+        if [ $rc -ne 0 ]; then
+                if [ -n "$JSON_MODE" ]; then
+                        json_error "$rc" "build_failed" "Docker build failed with exit code $rc"
+                else
+                        echo -e "${RED}Docker build failed (exit $rc)${NC}" >&2
+                fi
+                return $rc
+        fi
+
+        if [ -n "$JSON_MODE" ]; then
+                json_emit '{result:"built", image:$img}' --arg img "$DOCKER_IMAGE"
+        elif [ -z "$QUIET" ]; then
+                echo -e "${GREEN}Image built successfully${NC}"
+        fi
+        return 0
 }
 
 # --- Schema + API Key validation ----------------------------------------------------
@@ -320,17 +348,20 @@ PY
 }
 
 verify_container_ownership() {
-	local name=$1
-	if [ -z "$OWNER_KEY_HASH_ENV" ]; then
-		json_error 2 "API key required" "Use --api-key/--api-key-hash for container-specific operations."
-	fi
-	local lbl=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash" }}' "$name" 2>/dev/null || true)
-	if [ -z "$lbl" ]; then
-		json_error 3 "Ownership label missing" "Container '$name' has no ownership label – access denied."
-	fi
-	if [ "$lbl" != "$OWNER_KEY_HASH_ENV" ]; then
-		json_error 3 "Ownership mismatch" "Container '$name' not owned by supplied API key."
-	fi
+        local name=$1
+        if [ -z "$OWNER_KEY_HASH_ENV" ]; then
+                json_error 2 "API key required" "Use --api-key/--api-key-hash for container-specific operations."
+        fi
+        local lbl
+        if ! lbl=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash" }}' "$name" 2>/dev/null); then
+                json_error 3 "not_found" "Container '$name' not found."
+        fi
+        if [ "$lbl" = "<no value>" ] || [ -z "$lbl" ]; then
+                json_error 3 "unmanaged_container" "Container '$name' is not managed by this sandbox (ownership label missing)."
+        fi
+        if [ "$lbl" != "$OWNER_KEY_HASH_ENV" ]; then
+                json_error 3 "Ownership mismatch" "Container '$name' not owned by supplied API key."
+        fi
 }
 
 # Unified JSON / text error helper
@@ -395,12 +426,10 @@ create_container() {
 	require_api_key
 	trace_log "after require_api_key API_KEY_DB_ID='${API_KEY_DB_ID}' owner='${OWNER_KEY_HASH_ENV}'"
 	# Check if container already exists (avoid pipe causing non-zero propagation issues)
-	if [ -z "$QUIET" ]; then
-		if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$" 2>/dev/null; then
-			trace_log "container already exists before creation name='$name'"
-			json_error 1 "Exists" "Container '$name' already exists"
-		fi
-	fi
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$" 2>/dev/null; then
+                trace_log "container already exists before creation name='$name'"
+                json_error 1 "Exists" "Container '$name' already exists"
+        fi
 	debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID"
 	
 	# Find free ports
@@ -420,13 +449,13 @@ create_container() {
 		json_error 1 "No ports" "No free ports available"
 	fi
 	
-	[ -z "$QUIET" ] && {
-		echo -e "${YELLOW}Creating sandbox container '$name'...${NC}"
-		echo -e "${BLUE}  noVNC Port: $novnc_port${NC}"
-		echo -e "${BLUE}  VNC Port: $vnc_port${NC}"
-		echo -e "${BLUE}  MCP Hub Port: $mcphub_port${NC}"
-		echo -e "${BLUE}  File Service Port: $filesvc_port${NC}"
-	}
+        if [ -z "$JSON_MODE" ] && [ -z "$QUIET" ]; then
+                echo -e "${YELLOW}Creating sandbox container '$name'...${NC}"
+                echo -e "${BLUE}  noVNC Port: $novnc_port${NC}"
+                echo -e "${BLUE}  VNC Port: $vnc_port${NC}"
+                echo -e "${BLUE}  MCP Hub Port: $mcphub_port${NC}"
+                echo -e "${BLUE}  File Service Port: $filesvc_port${NC}"
+        fi
 	
 	LABEL_ARGS=(--label "albert.manager=1")
 	if [ -n "$OWNER_KEY_HASH_ENV" ]; then
@@ -434,12 +463,12 @@ create_container() {
 	fi
 
 	# Create Docker container
-	docker run -d \
-		"${LABEL_ARGS[@]}" \
-		--name "$name" \
-		--restart unless-stopped \
-		--cap-add=SYS_ADMIN \
-		--security-opt seccomp=unconfined \
+        docker run -d \
+                "${LABEL_ARGS[@]}" \
+                --name "$name" \
+                --restart unless-stopped \
+                --cap-add=SYS_ADMIN \
+                --security-opt seccomp=unconfined \
 		-p ${novnc_port}:6081 \
 		-p ${vnc_port}:5901 \
 		-p ${mcphub_port}:3000 \
@@ -449,11 +478,13 @@ create_container() {
 		-e MCP_HUB_PORT=3000 \
 		-e FILE_SERVICE_PORT=4000 \
 		-v ${name}_data:/home/ubuntu \
-		--shm-size=2g \
-		$DOCKER_IMAGE
-	
-	if [ $? -eq 0 ]; then
-		trace_log "docker run success name='$name'"
+                --shm-size=2g \
+                "$DOCKER_IMAGE" >/dev/null
+
+        local run_rc=$?
+
+        if [ $run_rc -eq 0 ]; then
+                trace_log "docker run success name='$name'"
 		# Register in registry
 		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port"
 
@@ -493,17 +524,18 @@ create_container() {
 			echo -e "${YELLOW}MCP Hub Bearer token: albert${NC}"
 			echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
 		fi
-	else
-		trace_log "docker run failed name='$name' rc=$?"
-		json_error 1 "Create failed" "Error creating container"
-	fi
+        else
+                trace_log "docker run failed name='$name' rc=$run_rc"
+                json_error 1 "Create failed" "Error creating container"
+        fi
 
 	# Fallback: if JSON mode requested but nothing emitted (unexpected), emit generic error
-	if [ -n "$JSON_MODE" ] && [ -z "$__ALBERT_JSON_EMITTED" ]; then
-		trace_log "fallback JSON emitted name='$name'"
-		printf '{"error":"internal","message":"No JSON emitted (fallback)","exitCode":1}\n'
-		exit 1
-	fi
+        if [ -n "$JSON_MODE" ] && [ -z "$__ALBERT_JSON_EMITTED" ]; then
+                trace_log "fallback JSON emitted name='$name'"
+                printf '{"error":"internal","message":"No JSON emitted (fallback)","exitCode":1}\n'
+                __ALBERT_JSON_EMITTED=1
+                exit 1
+        fi
 }
 
 # Remove container
@@ -514,18 +546,20 @@ remove_container() {
 	
 	if [ -z "$name" ]; then json_error 1 "Missing name" "Container name required"; fi
 	
-	echo -e "${YELLOW}Removing container '$name'...${NC}"
-	
-	# Stop and remove container
-	docker stop "$name" 2>/dev/null
-	docker rm "$name" 2>/dev/null
-	
-	if [ -z "$NON_INTERACTIVE" ]; then
-		read -p "Also delete data volume? (y/n): " -n 1 -r; echo
-		if [[ $REPLY =~ ^[Yy]$ ]]; then
-			docker volume rm "${name}_data" 2>/dev/null
-		fi
-	fi
+        if [ -z "$JSON_MODE" ] && [ -z "$QUIET" ]; then
+                echo -e "${YELLOW}Removing container '$name'...${NC}"
+        fi
+
+        # Stop and remove container
+        docker stop "$name" >/dev/null
+        docker rm "$name" >/dev/null
+
+        if [ -z "$NON_INTERACTIVE" ]; then
+                read -p "Also delete data volume? (y/n): " -n 1 -r; echo
+                if [[ $REPLY =~ ^[Yy]$ ]]; then
+                        docker volume rm "${name}_data" >/dev/null
+                fi
+        fi
 	
 	# Remove nginx config
 	remove_nginx_config "$name"
@@ -533,11 +567,11 @@ remove_container() {
 	# Remove from registry
 	remove_from_registry "$name"
 	
-	if [ -n "$JSON_MODE" ]; then
-		json_emit '{result:"removed", name:$n}' --arg n "$name"
-	else
-		echo -e "${GREEN}Container '$name' has been removed${NC}"
-	fi
+        if [ -n "$JSON_MODE" ]; then
+                json_emit '{result:"removed", name:$n}' --arg n "$name"
+        elif [ -z "$QUIET" ]; then
+                echo -e "${GREEN}Container '$name' has been removed${NC}"
+        fi
 }
 
 # Start container
@@ -548,22 +582,30 @@ start_container() {
 	
 	if [ -z "$name" ]; then json_error 1 "Missing name" "Container name required"; fi
 	
-	echo -e "${YELLOW}Starting container '$name'...${NC}"
-	docker start "$name"
-	
-	if [ $? -eq 0 ]; then
-		local info=$(get_container_info "$name")
-		if [ -n "$JSON_MODE" ]; then
-			local hostip=$(hostname -I | awk '{print $1}')
-			json_emit '{result:"started", name:$n, url:($h+"/"+$n+"/"), host:$h}' --arg n "$name" --arg h "http://$hostip"
-		else
-			echo -e "${GREEN}Container '$name' started${NC}"
-			echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
-		fi
-	else
-		echo -e "${RED}Error starting container${NC}"
-		return 1
-	fi
+        if [ -z "$JSON_MODE" ] && [ -z "$QUIET" ]; then
+                echo -e "${YELLOW}Starting container '$name'...${NC}"
+        fi
+
+        docker start "$name" >/dev/null
+        local rc=$?
+
+        if [ $rc -eq 0 ]; then
+                local info=$(get_container_info "$name")
+                if [ -n "$JSON_MODE" ]; then
+                        local hostip=$(hostname -I | awk '{print $1}')
+                        json_emit '{result:"started", name:$n, url:($h+"/"+$n+"/"), host:$h}' --arg n "$name" --arg h "http://$hostip"
+                elif [ -z "$QUIET" ]; then
+                        echo -e "${GREEN}Container '$name' started${NC}"
+                        echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
+                fi
+        else
+                if [ -n "$JSON_MODE" ]; then
+                        json_error "$rc" "start_failed" "Docker failed to start container '$name' (exit $rc)"
+                else
+                        echo -e "${RED}Error starting container${NC}" >&2
+                fi
+                return $rc
+        fi
 }
 
 # Stop container
@@ -574,19 +616,27 @@ stop_container() {
 	
 	if [ -z "$name" ]; then json_error 1 "Missing name" "Container name required"; fi
 	
-	echo -e "${YELLOW}Stopping container '$name'...${NC}"
-	docker stop "$name"
-	
-	if [ $? -eq 0 ]; then
-		if [ -n "$JSON_MODE" ]; then
-			json_emit '{result:"stopped", name:$n}' --arg n "$name"
-		else
-			echo -e "${GREEN}Container '$name' stopped${NC}"
-		fi
-	else
-		echo -e "${RED}Error stopping container${NC}"
-		return 1
-	fi
+        if [ -z "$JSON_MODE" ] && [ -z "$QUIET" ]; then
+                echo -e "${YELLOW}Stopping container '$name'...${NC}"
+        fi
+
+        docker stop "$name" >/dev/null
+        local rc=$?
+
+        if [ $rc -eq 0 ]; then
+                if [ -n "$JSON_MODE" ]; then
+                        json_emit '{result:"stopped", name:$n}' --arg n "$name"
+                elif [ -z "$QUIET" ]; then
+                        echo -e "${GREEN}Container '$name' stopped${NC}"
+                fi
+        else
+                if [ -n "$JSON_MODE" ]; then
+                        json_error "$rc" "stop_failed" "Docker failed to stop container '$name' (exit $rc)"
+                else
+                        echo -e "${RED}Error stopping container${NC}" >&2
+                fi
+                return $rc
+        fi
 }
 
 # Restart container
@@ -599,11 +649,11 @@ restart_container() {
 	
 	stop_container "$name" >/dev/null 2>&1 || true
 	start_container "$name" >/dev/null 2>&1 || true
-	if [ -n "$JSON_MODE" ]; then
-		json_emit '{result:"restarted", name:$n}' --arg n "$name"
-	else
-		echo -e "${GREEN}Container '$name' restarted${NC}"
-	fi
+        if [ -n "$JSON_MODE" ]; then
+                json_emit '{result:"restarted", name:$n}' --arg n "$name"
+        elif [ -z "$QUIET" ]; then
+                echo -e "${GREEN}Container '$name' restarted${NC}"
+        fi
 }
 
 # Show status
@@ -613,11 +663,11 @@ show_status() {
 	# Enforce API key also for status (list or single) to avoid leaking names
 	require_api_key
 
-	if [ -z "$name" ]; then
-		# All containers
-		if [ -n "$JSON_MODE" ]; then
-			local rows=()
-			for container_name in $(get_all_containers); do
+                if [ -z "$name" ]; then
+                # All containers
+                if [ -n "$JSON_MODE" ]; then
+                        local rows=()
+                        for container_name in $(get_all_containers); do
 				if [ -n "$OWNER_KEY_HASH_ENV" ]; then
 					local lbl=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash"}}' "$container_name" 2>/dev/null || true)
 					[ "$lbl" != "$OWNER_KEY_HASH_ENV" ] && continue
@@ -625,7 +675,17 @@ show_status() {
 				local sj=$(show_single_status "$container_name" json)
 				[ -n "$sj" ] && rows+=("$sj")
 			done
-			if [ ${#rows[@]} -eq 0 ]; then printf '[]'; else printf '['; for i in "${!rows[@]}"; do printf '%s' "${rows[$i]}"; [ $i -lt $(( ${#rows[@]} - 1 )) ] && printf ','; done; printf ']'; fi
+                        if [ ${#rows[@]} -eq 0 ]; then
+                                printf '[]\n'
+                        else
+                                printf '['
+                                for i in "${!rows[@]}"; do
+                                        printf '%s' "${rows[$i]}"
+                                        if [ $i -lt $(( ${#rows[@]} - 1 )) ]; then printf ','; fi
+                                done
+                                printf ']\n'
+                        fi
+                        __ALBERT_JSON_EMITTED=1
 		else
 			echo -e "${GREEN}Status of all sandbox containers:${NC}"
 			echo -e "${GREEN}=================================${NC}"
@@ -670,21 +730,22 @@ show_single_status() {
 		stats=$(docker stats --no-stream --format "CPU: {{.CPUPerc}} | RAM: {{.MemUsage}}" "$name" 2>/dev/null || true)
 	fi
 	local hostip=$(hostname -I | awk '{print $1}')
-	if [ "$mode" = "json" ] || [ -n "$JSON_MODE" ]; then
-		jq -n \
-			--arg name "$name" \
-			--arg status "$running" \
-			--arg created "$created" \
-			--arg novnc "$port" \
-			--arg vnc "$vnc_port" \
+        if [ "$mode" = "json" ] || [ -n "$JSON_MODE" ]; then
+                jq -n \
+                        --arg name "$name" \
+                        --arg status "$running" \
+                        --arg created "$created" \
+                        --arg novnc "$port" \
+                        --arg vnc "$vnc_port" \
 			--arg mcphub "$mcphub_port" \
 			--arg filesvc "$filesvc_port" \
 			--arg stats "$stats" \
 			--arg ownerHash "$OWNER_KEY_HASH_ENV" \
 			--arg host "$hostip" \
-			'{name:$name,status:$status,created:$created,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc},resources:$stats,urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), files:("http://"+$host+"/"+$name+"/files/")}}'
-	else
-		echo -e "${BLUE}Container: ${NC}$name"
+                        '{name:$name,status:$status,created:$created,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc},resources:$stats,urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), files:("http://"+$host+"/"+$name+"/files/")}}'
+                __ALBERT_JSON_EMITTED=1
+        else
+                echo -e "${BLUE}Container: ${NC}$name"
 		echo -e "${BLUE}Created: ${NC}$created"
 		echo -e "${BLUE}Desktop: ${NC}KDE Plasma"
 		echo -e "${BLUE}noVNC Port: ${NC}$port"
@@ -701,24 +762,17 @@ show_single_status() {
 
 # List containers
 list_containers() {
-	require_api_key
-	debug_log "Listing containers for key_hash=$OWNER_KEY_HASH_ENV"
-	# Header (only in non-JSON mode)
-	if [ -z "$JSON_MODE" ]; then
-		echo -e "${GREEN}ALBERT Sandbox Containers:${NC}"
-		echo -e "${GREEN}========================================${NC}"
-		printf "%-30s %-10s %-10s %-10s\n" "NAME" "STATUS" "NOVNC-PORT" "VNC-PORT"
-		printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
-	fi
-	local print_header=1
-	[ -n "$JSON_MODE" ] && print_header=0
-	if [ -n "$QUIET" ]; then print_header=0; fi
-	if [ $print_header -eq 1 ]; then
-		echo -e "${GREEN}ALBERT Sandbox Containers:${NC}"
-		echo -e "${GREEN}========================================${NC}"
-		printf "%-30s %-10s %-10s %-10s\n" "NAME" "STATUS" "NOVNC-PORT" "VNC-PORT"
-		printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
-	fi
+        require_api_key
+        debug_log "Listing containers for key_hash=$OWNER_KEY_HASH_ENV"
+        local print_header=1
+        [ -n "$JSON_MODE" ] && print_header=0
+        [ -n "$QUIET" ] && print_header=0
+        if [ $print_header -eq 1 ]; then
+                echo -e "${GREEN}ALBERT Sandbox Containers:${NC}"
+                echo -e "${GREEN}========================================${NC}"
+                printf "%-30s %-10s %-10s %-10s\n" "NAME" "STATUS" "NOVNC-PORT" "VNC-PORT"
+                printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
+        fi
 	
 	FILTERED=( $(get_all_containers) )
 	if [ -n "$OWNER_KEY_HASH_ENV" ]; then
@@ -732,41 +786,44 @@ list_containers() {
 	JSON_ROWS=()
 	for container_name in "${FILTERED[@]}"; do
 		local info=$(get_container_info "$container_name")
-		local port=$(echo "$info" | jq -r '.port')
-		local vnc_port=$(echo "$info" | jq -r '.vnc_port')
-		
-		if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
-				local status="${GREEN}Running${NC}"
-		else
-				local status="${RED}Stopped${NC}"
-		fi
-		
-		if [ -n "$JSON_MODE" ]; then
-			mcphub_port=$(echo "$info" | jq -r '.mcphub_port // empty')
-			filesvc_port=$(echo "$info" | jq -r '.filesvc_port // empty')
-			plain_status=$(docker ps --format '{{.Names}}' | grep -q "^${container_name}$" && echo running || echo stopped)
-			JSON_ROWS+=( "$(jq -n --arg name "$container_name" --arg status "$plain_status" --arg novnc "$port" --arg vnc "$vnc_port" --arg mcphub "$mcphub_port" --arg filesvc "$filesvc_port" --arg ownerHash "$OWNER_KEY_HASH_ENV" '{name:$name,status:$status,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc}}')" )
-		else
-			printf "%-30s %-20b %-10s %-10s\n" "$container_name" "$status" "$port" "$vnc_port"
-		fi
-	done
-	if [ -n "$JSON_MODE" ]; then
-		if [ ${#JSON_ROWS[@]} -eq 0 ]; then
-			printf '[]'
-		else
-			printf '['
-			for i in "${!JSON_ROWS[@]}"; do
-				printf '%s' "${JSON_ROWS[$i]}"
-				if [ $i -lt $(( ${#JSON_ROWS[@]} - 1 )) ]; then printf ','; fi
-			done
-			printf ']'
-		fi
-	elif [ -z "$QUIET" ]; then
-		if [ ${#FILTERED[@]} -eq 0 ]; then
-			echo -e "${YELLOW}(No containers for this API key)${NC}"
-		else
-			echo ""
-			echo -e "${BLUE}Desktop: KDE Plasma | VNC Password: albert${NC}"
+                local port=$(echo "$info" | jq -r '.port')
+                local vnc_port=$(echo "$info" | jq -r '.vnc_port')
+
+                if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+                                local status="${GREEN}Running${NC}"
+                else
+                                local status="${RED}Stopped${NC}"
+                fi
+
+                if [ -n "$JSON_MODE" ]; then
+                        mcphub_port=$(echo "$info" | jq -r '.mcphub_port // empty')
+                        filesvc_port=$(echo "$info" | jq -r '.filesvc_port // empty')
+                        plain_status=$(docker ps --format '{{.Names}}' | grep -q "^${container_name}$" && echo running || echo stopped)
+                        JSON_ROWS+=( "$(jq -n --arg name "$container_name" --arg status "$plain_status" --arg novnc "$port" --arg vnc "$vnc_port" --arg mcphub "$mcphub_port" --arg filesvc "$filesvc_port" --arg ownerHash "$OWNER_KEY_HASH_ENV" '{name:$name,status:$status,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc}}')" )
+                elif [ -n "$QUIET" ]; then
+                        printf '%s\n' "$container_name"
+                else
+                        printf "%-30s %-20b %-10s %-10s\n" "$container_name" "$status" "$port" "$vnc_port"
+                fi
+        done
+        if [ -n "$JSON_MODE" ]; then
+                if [ ${#JSON_ROWS[@]} -eq 0 ]; then
+                        printf '[]\n'
+                else
+                        printf '['
+                        for i in "${!JSON_ROWS[@]}"; do
+                                printf '%s' "${JSON_ROWS[$i]}"
+                                if [ $i -lt $(( ${#JSON_ROWS[@]} - 1 )) ]; then printf ','; fi
+                        done
+                        printf ']\n'
+                fi
+                __ALBERT_JSON_EMITTED=1
+        elif [ -z "$QUIET" ]; then
+                if [ ${#FILTERED[@]} -eq 0 ]; then
+                        echo -e "${YELLOW}(No containers for this API key)${NC}"
+                else
+                        echo ""
+                        echo -e "${BLUE}Desktop: KDE Plasma | VNC Password: albert${NC}"
 			echo ""
 			echo -e "${BLUE}Access URLs:${NC}"
 			for container_name in "${FILTERED[@]}"; do
@@ -794,13 +851,12 @@ case "${1:-}" in
 		else
 			if [ -n "$JSON_MODE" ]; then json_emit '{error:"db_missing",message:"DB not found",result:"error"}'; else echo "DB exists: no"; fi; exit 2
 		fi
-		# Validate header signature
-		head_sig=$(head -c 16 "$DB_PATH" 2>/dev/null || true)
-		if echo "$head_sig" | grep -q "SQLite format 3"; then
-			[ -z "$JSON_MODE" ] && echo "Header: OK (SQLite format 3)"
-		else
-			[ -z "$JSON_MODE" ] && echo "Header: WARNING (unexpected first 16 bytes)"
-		fi
+                # Validate header signature
+                if head -c 16 "$DB_PATH" 2>/dev/null | LC_ALL=C grep -aq "SQLite format 3"; then
+                        [ -z "$JSON_MODE" ] && echo "Header: OK (SQLite format 3)"
+                else
+                        [ -z "$JSON_MODE" ] && echo "Header: WARNING (unexpected first 16 bytes)"
+                fi
 		# Extra diagnostics
 		[ -z "$JSON_MODE" ] && stat "$DB_PATH" 2>/dev/null | sed 's/^/STAT: /'
 		if [ -z "$JSON_MODE" ] && command -v realpath >/dev/null 2>&1; then echo "Realpath: $(realpath "$DB_PATH")"; fi
@@ -816,9 +872,9 @@ case "${1:-}" in
 		else
 			[ -z "$JSON_MODE" ] && echo "sqlite3 CLI not installed"
 		fi
-		# Python view of tables & counts
- 		if command -v python3 >/dev/null 2>&1; then
-			python3 - "$DB_PATH" <<'PY' 2>/dev/null || true
+                # Python view of tables & counts
+                if [ -z "$JSON_MODE" ] && command -v python3 >/dev/null 2>&1; then
+                        python3 - "$DB_PATH" <<'PY' 2>/dev/null || true
 import os, sqlite3, time
 db = os.environ.get('DB_PATH') or (len(sys.argv)>1 and sys.argv[1])
 print('Tables (python query):')
@@ -849,9 +905,9 @@ else:
     finally:
         con.close()
 PY
-		else
-			echo "(python3 not available for deep inspection)"
-		fi
+                elif [ -z "$JSON_MODE" ]; then
+                        echo "(python3 not available for deep inspection)"
+                fi
 		# Legacy sqlite listing (kept for comparison)
 		if command -v sqlite3 >/dev/null 2>&1; then
 			SQLITE_KEYS_OUT=$(sqlite3 "$DB_PATH" "SELECT id, substr(key_hash,1,12), label, datetime(created_at,'unixepoch') FROM api_keys ORDER BY created_at DESC;" 2> /tmp/.albert_sqlite_keys_err.$$ || true)
@@ -862,41 +918,55 @@ PY
 				if [ -n "$SQLITE_KEYS_OUT" ]; then printf '%s\n' "$SQLITE_KEYS_OUT" | awk 'BEGIN{FS="|"}{printf "  id=%s prefix=%s label=%s created=%s\n", $1,$2,$3,$4}'; else echo "  (query failed)"; fi
 			}
 		fi
-		if [ -n "$OWNER_KEY_HASH_ENV" ]; then
-			inp="$OWNER_KEY_HASH_ENV"
-			if [[ $inp =~ ^[0-9a-fA-F]{64}$ ]]; then
-				candidate="$inp"
-			else
-				candidate=$(hash_plaintext_key "$inp")
+                if [ -z "$JSON_MODE" ] && [ -n "$OWNER_KEY_HASH_ENV" ]; then
+                        inp="$OWNER_KEY_HASH_ENV"
+                        if [[ $inp =~ ^[0-9a-fA-F]{64}$ ]]; then
+                                candidate="$inp"
+                        else
+                                candidate=$(hash_plaintext_key "$inp")
 				echo "Hashed provided plaintext -> $candidate"
 			fi
 			m=$(sqlite3 "$DB_PATH" "SELECT id FROM api_keys WHERE key_hash='$candidate' LIMIT 1;" 2>/dev/null || true)
 			if [ -n "$m" ]; then echo "Lookup: MATCH (id=$m)"; else echo "Lookup: NO MATCH for $candidate"; fi
 		fi
-		if [ -n "$JSON_MODE" ]; then
-			# Build minimal JSON summary from python enumerated tables
-			python3 - "$DB_PATH" <<'PY' 2>/dev/null
+                if [ -n "$JSON_MODE" ]; then
+                        selfcheck_json=""
+                        if command -v python3 >/dev/null 2>&1; then
+                                selfcheck_json=$(
+python3 - "$DB_PATH" <<'PY' 2>/dev/null
 import os, sqlite3, json, sys, time
 db = os.environ.get('DB_PATH') or (len(sys.argv)>1 and sys.argv[1])
 out = {"result":"ok","dbPath":db,"tables":[],"apiKeys":[]}
 if db and os.path.exists(db):
-	try:
-		con=sqlite3.connect(db); cur=con.cursor()
-		cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-		out["tables"]=[r[0] for r in cur.fetchall()]
-		if 'api_keys' in out["tables"]:
-			for r in cur.execute("SELECT id, substr(key_hash,1,12), label, created_at FROM api_keys ORDER BY created_at DESC"):
-				out["apiKeys"].append({"id":r[0],"prefix":r[1],"label":r[2] or '',"created_at":r[3]})
-	except Exception as e:
-		out["error"]=str(e); out["result"]="error"
-	finally:
-		try: con.close()
-		except: pass
+        try:
+                con=sqlite3.connect(db); cur=con.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                out["tables"]=[r[0] for r in cur.fetchall()]
+                if 'api_keys' in out["tables"]:
+                        for r in cur.execute("SELECT id, substr(key_hash,1,12), label, created_at FROM api_keys ORDER BY created_at DESC"):
+                                out["apiKeys"].append({"id":r[0],"prefix":r[1],"label":r[2] or '',"created_at":r[3]})
+        except Exception as e:
+                out["error"]=str(e); out["result"]="error"
+        finally:
+                try: con.close()
+                except: pass
 print(json.dumps(out))
 PY
-		fi
-		exit 0
-		;;
+                                )
+                                sc_rc=$?
+                                if [ $sc_rc -ne 0 ]; then
+                                        selfcheck_json=""
+                                fi
+                        fi
+                        if [ -n "$selfcheck_json" ]; then
+                                printf '%s\n' "$selfcheck_json"
+                                __ALBERT_JSON_EMITTED=1
+                        else
+                                json_emit '{result:"ok",dbPath:$path,tables:[],apiKeys:[]}' --arg path "$DB_PATH"
+                        fi
+                fi
+                exit 0
+                ;;
 	dbtrace)
 		# Deeper DB diagnostics
 		echo "=== dbtrace ==="
