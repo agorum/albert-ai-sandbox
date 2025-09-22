@@ -41,6 +41,30 @@ cleanup_nginx_include() {
         fi
 }
 
+# Stop running Albert sandbox containers and remove them
+if command -v docker >/dev/null 2>&1; then
+        containers=$(docker ps -a --filter "label=albert.manager=1" --format '{{.Names}}' 2>/dev/null || true)
+
+        if [ -n "$containers" ]; then
+                echo -e "${YELLOW}Stopping running Albert sandbox containers...${NC}"
+                while IFS= read -r container; do
+                        [ -z "$container" ] && continue
+                        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
+                                docker stop "$container" >/dev/null 2>&1 || true
+                        fi
+                done <<< "$containers"
+
+                echo -e "${YELLOW}Removing Albert sandbox containers and data...${NC}"
+                while IFS= read -r container; do
+                        [ -z "$container" ] && continue
+                        docker rm "$container" >/dev/null 2>&1 || true
+                        if docker volume inspect "${container}_data" >/dev/null 2>&1; then
+                                docker volume rm "${container}_data" >/dev/null 2>&1 || true
+                        fi
+                done <<< "$containers"
+        fi
+fi
+
 # Stop and disable systemd service if present
 if systemctl list-unit-files 2>/dev/null | grep -q '^albert-container-manager.service'; then
         echo -e "${YELLOW}Stopping albert-container-manager.service...${NC}"
