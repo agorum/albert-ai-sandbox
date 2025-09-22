@@ -364,6 +364,10 @@ def get_container(cid: str):
         match = data
     if not match:
         return jsonify({"error": "Container not found"}), 404
+    if isinstance(match, dict) and match.get("error"):
+        if match.get("error") == "not_found":
+            return jsonify({"error": "Container not found"}), 404
+        return jsonify({"error": "Status failed", "details": match}), 500
     # Enrich with docker info
     ser = serialize_container(cid)
     ser.update(_extract_script_metadata(match))
