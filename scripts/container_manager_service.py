@@ -70,6 +70,7 @@ if not Path(DB_PATH).exists() and legacy_db.exists():
 
 app = Flask(__name__)
 
+
 def docker_info_available() -> bool:
     """Best-effort check whether the Docker daemon is reachable."""
     try:
@@ -106,17 +107,24 @@ def inspect_container(name: str) -> Optional[Dict[str, Any]]:
     return payload[0]
 
 
-def serialize_container(name: str, api_key_id: int) -> Dict[str, Any]:
+def _normalize_finished_at(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    sentinel = "0001-01-01T00:00:00"
+    if value.startswith(sentinel):
+        return None
+    return value
+
+
+def serialize_container(name: str) -> Dict[str, Any]:
     """Return a normalized container description using docker CLI inspect."""
     info = inspect_container(name)
     if not info:
         return {
             "name": name,
-            "apiKeyId": api_key_id,
         }
     config = info.get("Config") or {}
     state = info.get("State") or {}
-    labels = config.get("Labels") or {}
     resolved_name = (info.get("Name") or "").lstrip("/") or name
     return {
         "id": info.get("Id"),
@@ -124,12 +132,28 @@ def serialize_container(name: str, api_key_id: int) -> Dict[str, Any]:
         "image": config.get("Image"),
         "status": state.get("Status"),
         "running": state.get("Running"),
-        "exitCode": state.get("ExitCode"),
         "startedAt": state.get("StartedAt"),
-        "finishedAt": state.get("FinishedAt"),
-        "apiKeyId": api_key_id,
-        "labels": labels,
+        "finishedAt": _normalize_finished_at(state.get("FinishedAt")),
     }
+
+
+def _extract_script_metadata(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    result: Dict[str, Any] = {}
+    created = payload.get("created")
+    if created:
+        result["createdAt"] = created
+    ports = payload.get("ports")
+    if isinstance(ports, dict):
+        result["ports"] = ports
+    urls = payload.get("urls")
+    if isinstance(urls, dict):
+        result["urls"] = urls
+    status = payload.get("status")
+    if status:
+        result["status"] = status
+    return result
 
 # --- Database helpers ------------------------------------------------------
 
@@ -296,9 +320,9 @@ def create_container():
     if not sandbox_name:
         return jsonify({"error": "Sandbox create returned no name", "details": raw}), 500
     _ensure_registry_mapping(auth_info, sandbox_name)
-    ser = serialize_container(sandbox_name, auth_info["id"])
+    ser = serialize_container(sandbox_name)
+    ser.update(_extract_script_metadata(data))
     ser["sandboxName"] = sandbox_name
-    ser["script"] = data
     return jsonify({"container": ser}), 201
 
 
@@ -316,12 +340,12 @@ def list_containers():
     enriched = []
     for entry in data:
         name = entry.get("name")
-        obj = {"sandboxName": name, **entry}
+        details = serialize_container(name) if name else {}
+        details.update(_extract_script_metadata(entry))
         if name:
-            details = serialize_container(name, auth_info["id"])
-            if details.get("id"):
-                obj["id"] = details["id"]
-        enriched.append(obj)
+            details.setdefault("name", name)
+            details["sandboxName"] = name
+        enriched.append(details)
     return jsonify({"containers": enriched})
 
 @app.get("/containers/<cid>")
@@ -341,9 +365,9 @@ def get_container(cid: str):
     if not match:
         return jsonify({"error": "Container not found"}), 404
     # Enrich with docker info
-    ser = serialize_container(cid, auth_info["id"])
+    ser = serialize_container(cid)
+    ser.update(_extract_script_metadata(match))
     ser["sandboxName"] = cid
-    ser["script"] = match
     return jsonify({"container": ser})
 
 @app.post("/containers/<cid>/start")
