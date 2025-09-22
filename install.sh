@@ -226,6 +226,46 @@ systemctl enable albert-container-manager.service
 systemctl restart albert-container-manager.service || echo -e "${YELLOW}Warning: Manager service failed to (re)start; check logs with: journalctl -u albert-container-manager -e${NC}"
 
 # ---------------------------------------------------------------------------
+# Inactivity watcher (systemd setup)
+# ---------------------------------------------------------------------------
+INACTIVITY_SERVICE_FILE="/etc/systemd/system/albert-inactivity-watcher.service"
+INACTIVITY_TIMER_FILE="/etc/systemd/system/albert-inactivity-watcher.timer"
+cat > "$INACTIVITY_SERVICE_FILE" <<'EOF'
+[Unit]
+Description=ALBERT Sandbox Inactivity Watcher
+After=network-online.target nginx.service albert-container-manager.service
+Wants=nginx.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/albert-ai-sandbox-manager
+Environment=ALBERT_INACTIVITY_STATE=/opt/albert-ai-sandbox-manager/data/container-activity.json
+Environment=ALBERT_MANAGER_SCRIPT=/opt/albert-ai-sandbox-manager/scripts/albert-ai-sandbox-manager.sh
+Environment=ALBERT_NGINX_ACCESS_LOG=/var/log/nginx/access.log
+Environment=ALBERT_INACTIVITY_SECONDS=600
+ExecStart=/usr/bin/env bash -c '[ -x /opt/albert-ai-sandbox-manager/venv/bin/python ] && exec /opt/albert-ai-sandbox-manager/venv/bin/python /opt/albert-ai-sandbox-manager/scripts/inactivity_watcher.py || exec python3 /opt/albert-ai-sandbox-manager/scripts/inactivity_watcher.py'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > "$INACTIVITY_TIMER_FILE" <<'EOF'
+[Unit]
+Description=Run ALBERT inactivity watcher periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now albert-inactivity-watcher.timer
+
+# ---------------------------------------------------------------------------
 # Nginx routing for manager service under /manager/
 # ---------------------------------------------------------------------------
 MANAGER_NGX_CONF="${NGINX_CONF_DIR}/albert-manager.conf"
