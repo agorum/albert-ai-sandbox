@@ -47,6 +47,7 @@ NON_INTERACTIVE="${ALBERT_NONINTERACTIVE:-}"     # suppress prompts
 DEBUG=""
 QUIET=""
 TRACE="${ALBERT_TRACE:-}"
+STATUS_SKIP_STATS="${ALBERT_STATUS_SKIP_STATS:-}"
 
 # Parse optional global flags (support both before and after command)
 ORIG_ARGS=("$@")
@@ -747,7 +748,11 @@ show_single_status() {
 	local stats=""
 	if docker ps --format '{{.Names}}' | grep -q "^${name}$"; then
 		running="running"
-		stats=$(docker stats --no-stream --format "CPU: {{.CPUPerc}} | RAM: {{.MemUsage}}" "$name" 2>/dev/null || true)
+		if [ -z "$STATUS_SKIP_STATS" ]; then
+			stats=$(docker stats --no-stream --format "CPU: {{.CPUPerc}} | RAM: {{.MemUsage}}" "$name" 2>/dev/null || true)
+		else
+			stats=""
+		fi
 	fi
 	local hostip=$(hostname -I | awk '{print $1}')
         if [ "$mode" = "json" ] || [ -n "$JSON_MODE" ]; then

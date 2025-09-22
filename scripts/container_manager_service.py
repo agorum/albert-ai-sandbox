@@ -41,14 +41,11 @@ import sqlite3
 import hashlib
 import time
 import json
-import uuid
 import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
 from flask import Flask, request, jsonify
-import docker
-from docker.errors import DockerException, NotFound, APIError
 
 THIS_FILE = Path(__file__).resolve()
 BASE_DIR = THIS_FILE.parent.parent
@@ -73,39 +70,66 @@ if not Path(DB_PATH).exists() and legacy_db.exists():
 
 app = Flask(__name__)
 
-# Lazy singleton docker client (avoid import-time failure if Docker not ready or
-# requests-unixsocket not yet installed). We create it on first use with retries.
-_docker_client = None  # type: Optional[docker.DockerClient]
+def docker_info_available() -> bool:
+    """Best-effort check whether the Docker daemon is reachable."""
+    try:
+        subprocess.run(
+            ["docker", "info"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=10,
+        )
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
 
-def get_docker_client(retries: int = 5, delay: float = 1.5) -> docker.DockerClient:
-    """Return a cached docker client, creating it lazily with retries.
 
-    We intentionally create the client only when first needed so that:
-      * Service can start even if Docker daemon is still warming up
-      * Missing dependency issues (e.g. requests-unixsocket) can be fixed and
-        service restarted without crashing import
-    """
-    global _docker_client
-    if _docker_client is not None:
-        return _docker_client
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, retries + 1):
-        try:
-            # docker.from_env() respects DOCKER_HOST / sockets automatically.
-            c = docker.from_env()
-            # Light connectivity check; will raise if daemon not reachable
-            c.ping()
-            _docker_client = c
-            return c
-        except Exception as ex:  # broad: want to retry for any failure
-            last_exc = ex
-            time.sleep(delay)
-    # Exhausted retries
-    assert last_exc is not None
-    raise last_exc
+def inspect_container(name: str) -> Optional[Dict[str, Any]]:
+    """Return the raw docker inspect payload for a container name."""
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", name],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not payload:
+        return None
+    return payload[0]
 
-def docker_unavailable_response(ex: Exception):
-    return jsonify({"error": f"Docker unavailable: {ex.__class__.__name__}: {ex}"}), 503
+
+def serialize_container(name: str, api_key_id: int) -> Dict[str, Any]:
+    """Return a normalized container description using docker CLI inspect."""
+    info = inspect_container(name)
+    if not info:
+        return {
+            "name": name,
+            "apiKeyId": api_key_id,
+        }
+    config = info.get("Config") or {}
+    state = info.get("State") or {}
+    labels = config.get("Labels") or {}
+    resolved_name = (info.get("Name") or "").lstrip("/") or name
+    return {
+        "id": info.get("Id"),
+        "name": resolved_name,
+        "image": config.get("Image"),
+        "status": state.get("Status"),
+        "running": state.get("Running"),
+        "exitCode": state.get("ExitCode"),
+        "startedAt": state.get("StartedAt"),
+        "finishedAt": state.get("FinishedAt"),
+        "apiKeyId": api_key_id,
+        "labels": labels,
+    }
 
 # --- Database helpers ------------------------------------------------------
 
@@ -180,22 +204,6 @@ def container_data_dir(api_key_hash: str, name_or_id: str) -> str:
     os.makedirs(path, exist_ok=True)
     return path
 
-def serialize_container(c, api_key_id: int) -> Dict[str, Any]:
-    c.reload()
-    state = c.attrs.get("State", {})
-    return {
-        "id": c.id,
-        "name": c.name,
-        "image": c.image.tags[0] if c.image.tags else c.image.short_id,
-        "status": state.get("Status"),
-        "running": state.get("Running"),
-        "exitCode": state.get("ExitCode"),
-        "startedAt": state.get("StartedAt"),
-        "finishedAt": state.get("FinishedAt"),
-        "apiKeyId": api_key_id,
-        "labels": c.labels,
-    }
-
 LABEL_MANAGER = "albert.manager"
 LABEL_APIKEY_HASH = "albert.apikey_hash"
 
@@ -208,6 +216,7 @@ def _script_env(api_key_hash: str) -> dict:
     env["ALBERT_JSON"] = "1"  # request JSON output mode
     env["ALBERT_OWNER_KEY_HASH"] = api_key_hash  # for filtering / labeling
     env["ALBERT_NONINTERACTIVE"] = "1"  # avoid interactive prompts (remove)
+    env["ALBERT_STATUS_SKIP_STATS"] = "1"  # speed up status endpoints for REST use
     return env
 
 def _run_script(args: List[str], api_key_hash: str, expect_json: bool = True) -> Tuple[int, str, Optional[Any]]:
@@ -236,20 +245,21 @@ def _run_script(args: List[str], api_key_hash: str, expect_json: bool = True) ->
 
 def _ensure_registry_mapping(api_key_info: dict, name: str):
     """Ensure the DB has an entry mapping this API key to the Docker container id (by name)."""
-    # Resolve container id via docker (lazy client)
-    try:
-        client = get_docker_client()
-        c = client.containers.get(name)
-    except Exception:
+    info = inspect_container(name)
+    if not info:
         return
+    container_id = info.get("Id")
+    if not container_id:
+        return
+    image_ref = (info.get("Config") or {}).get("Image")
     conn = get_db()
     try:
         # Upsert-like: ignore if exists
-        existing = conn.execute("SELECT 1 FROM containers WHERE container_id=?", (c.id,)).fetchone()
+        existing = conn.execute("SELECT 1 FROM containers WHERE container_id=?", (container_id,)).fetchone()
         if not existing:
             conn.execute(
                 "INSERT INTO containers(api_key_id, container_id, name, image, created_at) VALUES(?,?,?,?,?)",
-                (api_key_info["id"], c.id, name, c.image.tags[0] if c.image.tags else c.image.short_id, int(time.time())),
+                (api_key_info["id"], container_id, name, image_ref, int(time.time())),
             )
             conn.commit()
     finally:
@@ -265,12 +275,7 @@ def not_found(e):  # pragma: no cover (simple wrapper)
 
 @app.get("/health")
 def health():
-    docker_status = "down"
-    try:
-        get_docker_client(retries=1, delay=0)
-        docker_status = "up"
-    except Exception:
-        docker_status = "down"
+    docker_status = "up" if docker_info_available() else "down"
     return jsonify({"status": "ok", "docker": docker_status})
 
 @app.post("/containers")
@@ -291,12 +296,7 @@ def create_container():
     if not sandbox_name:
         return jsonify({"error": "Sandbox create returned no name", "details": raw}), 500
     _ensure_registry_mapping(auth_info, sandbox_name)
-    try:
-        client = get_docker_client()
-        c = client.containers.get(sandbox_name)
-        ser = serialize_container(c, auth_info["id"])
-    except Exception as ex:
-        ser = {"name": sandbox_name, "error": f"Could not inspect container: {ex}"}
+    ser = serialize_container(sandbox_name, auth_info["id"])
     ser["sandboxName"] = sandbox_name
     ser["script"] = data
     return jsonify({"container": ser}), 201
@@ -314,20 +314,13 @@ def list_containers():
         return jsonify({"error": "List failed", "details": raw, "exitCode": rc}), 500
     # Attach docker IDs where possible
     enriched = []
-    try:
-        client = get_docker_client()
-    except Exception:
-        client = None
     for entry in data:
         name = entry.get("name")
         obj = {"sandboxName": name, **entry}
-        if client and name:
-            try:
-                c = client.containers.get(name)
-                obj["id"] = c.id
-                obj.update({"status": c.status})
-            except Exception:
-                pass
+        if name:
+            details = serialize_container(name, auth_info["id"])
+            if details.get("id"):
+                obj["id"] = details["id"]
         enriched.append(obj)
     return jsonify({"containers": enriched})
 
@@ -348,12 +341,7 @@ def get_container(cid: str):
     if not match:
         return jsonify({"error": "Container not found"}), 404
     # Enrich with docker info
-    try:
-        client = get_docker_client()
-        c = client.containers.get(cid)
-        ser = serialize_container(c, auth_info["id"])
-    except Exception as ex:
-        ser = {"name": cid, "error": f"Could not inspect: {ex}"}
+    ser = serialize_container(cid, auth_info["id"])
     ser["sandboxName"] = cid
     ser["script"] = match
     return jsonify({"container": ser})
