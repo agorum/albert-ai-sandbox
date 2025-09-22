@@ -23,10 +23,6 @@ if [[ $EUID -ne 0 ]]; then
 	exit 1
 fi
 
-# Make all shell scripts executable
-echo -e "${YELLOW}Setting execution permissions...${NC}"
-find "${SCRIPT_DIR}" -type f -name "*.sh" -exec chmod +x {} \;
-
 # System update
 echo -e "${YELLOW}Updating system...${NC}"
 apt-get update
@@ -53,9 +49,10 @@ apt-get install -y \
 # Docker installation
 echo -e "${YELLOW}Installing Docker...${NC}"
 if ! command -v docker &> /dev/null; then
-	curl -fsSL https://get.docker.com -o get-docker.sh
-	sh get-docker.sh
-	rm get-docker.sh
+        TMP_DOCKER_SCRIPT="$(mktemp /tmp/get-docker.XXXXXX.sh)"
+        curl -fsSL https://get.docker.com -o "${TMP_DOCKER_SCRIPT}"
+        sh "${TMP_DOCKER_SCRIPT}"
+        rm -f "${TMP_DOCKER_SCRIPT}"
 	systemctl enable docker
 	systemctl start docker
 else
