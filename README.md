@@ -1,246 +1,112 @@
-# ALBERT Sandbox Manager
+# ALBERT | AI Sandbox
 
-A Docker-based system for managing isolated desktop environments with browser access via noVNC.
+ALBERT | AI Sandbox provides isolated, browser-ready compute environments for AI agents such as ALBERT | AI. Each sandbox is created on demand through a REST service, launched as a Docker container, and ships with everything an autonomous agent needs: a full desktop exposed over noVNC, an MC Hub instance with Playwright for automated browser control, and a shell execution service for running scripts or Python code. When human intervention is required, the same desktop can be opened in any modern browser so credentials or multi-factor prompts can be handled interactively.
 
-## Features
+## Key Capabilities
+- Spin up dedicated desktop sandboxes per API request, preloaded with browser automation and shell tooling.
+- Share desktops securely over noVNC so users can supervise or intervene without local software.
+- Run MCHub with Playwright inside every container to orchestrate browser sessions for the AI agent.
+- Execute shell commands, scripts, or notebooks inside the container through the embedded shell service.
+- Auto-stop containers after 10 minutes of inactivity to conserve capacity.
+- Keep data and lifecycle operations isolated per API key, ensuring one tenant cannot touch another tenant's sandboxes.
 
-- 🖥️ Ubuntu 22.04 desktop environment
-- 🌐 Browser access without client software (noVNC)
-- 🔒 Security through cryptic container names (no password needed)
-- 🚀 Firefox and Chromium pre-installed
-- 💾 Persistent data via Docker volumes
-- 🔧 Easy management via CLI
-- 📦 Simple file service inside each container (upload/download via REST)
+## System Requirements
+- Host OS: Debian 12 (bookworm) verified; comparable Debian-based systems should work with equivalent packages.
+- Root access to run the installer, manage services, and configure nginx.
+- Docker Engine and systemd available on the host.
+- Internet connectivity during installation to fetch Docker components and Python packages.
 
 ## Installation
+1. Sign in to a Debian 12 host with root privileges.
+2. Clone the repository and run the installer:
+   ```bash
+   git clone <repository-url> albert-ai-sandbox
+   cd albert-ai-sandbox
+   sudo bash install.sh
+   ```
+3. The installer provisions all required packages, builds the desktop container image, registers the manager service, and places helper scripts under `/opt/albert-ai-sandbox-manager` with convenient symlinks in `/usr/local/bin`.
+4. After installation the `albert-container-manager` systemd service runs on port `5001`, ready to accept API calls.
 
+## Provision API Keys
+API keys gate access to everything: container creation, lifecycle control, and file exchange. Use the bundled helper from the installation directory:
 ```bash
-git clone <repository-url> albert-ai-sandbox-manager
-cd albert-ai-sandbox-manager
-bash install.sh
+sudo /opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh create --label "My Agent"
 ```
+- `create` prints the plaintext key once; store it securely because only the hash is kept on the host.
+- `list` shows existing keys with labels and hash prefixes, helping you audit active tenants.
+- `revoke` removes a key and cleans up any sandboxes it owns.
 
-## Usage
+Every container is tagged with the SHA-256 hash of the API key that created it. Command-line and REST actions must present the corresponding plaintext key; operations against other tenants are rejected.
+
+## Manage Sandboxes from the Command Line
+The `albert-ai-sandbox-manager` script (installed into `/usr/local/bin`) wraps the REST workflow so you can manage sandboxes locally without writing integration code. Supply either `--api-key <PLAINTEXT>` or a precomputed hash via `--api-key-hash`.
+
+Supported actions include:
+- `create [name]` – Provision a sandbox with an optional friendly name; the script returns URLs for the desktop, MC Hub, and file service.
+- `list` / `status [name]` – Inspect all sandboxes or a single sandbox for the current API key, including uptime and exposed ports.
+- `start`, `stop`, `restart` – Control the lifecycle of an existing sandbox.
+- `remove <name>` – Delete the sandbox and its persisted data.
+- `build` – Rebuild the Docker image after you modify assets under `/opt/albert-ai-sandbox-manager/docker`.
+
+Example:
 ```bash
-cd /opt/albert-ai-sandbox-manager
-./albert-ai-sandbox-manager
+albert-ai-sandbox-manager create --api-key "$ALBERT_API_KEY" --json
+albert-ai-sandbox-manager list --api-key "$ALBERT_API_KEY"
 ```
+JSON mode is convenient for programmatic consumption when wiring the manager into CI/CD or orchestration pipelines.
 
-## File service (upload/download)
+## Manage Sandboxes over REST
+Integrators can talk directly to the manager service (default `http://127.0.0.1:5001`) using Bearer authentication with the plaintext API key.
 
-Each sandbox also exposes a small REST file service via nginx under the container path:
-
-
-On upload, the file is stored in `/tmp/albert-files` inside the container using a new UUID and the original file extension. The response contains the full absolute path, e.g.:
-
-```json
-{ "path": "/tmp/albert-files/6d6d2d64-7e3a-4b33-9b46-2c5b0f205f3e.pdf" }
-```
-
-Download returns the file contents as a stream. If the file path is invalid or missing, you'll receive an error JSON with appropriate status codes.
-
-### Quick test from Windows PowerShell
-
-Replace placeholders: `$host` (your server IP), `$name` (your container name), and the path returned by upload.
-
-```powershell
-# Upload a file
-$host = "192.168.1.10"
-$name = "<your-container-name>"
-$file = "C:\\path\\to\\document.pdf"
-$response = Invoke-RestMethod -Method Post -Uri "http://$host/$name/files/upload" -Form @{ file = Get-Item $file }
-$response
-
-# Download it back
-$path = $response.path
-Invoke-WebRequest -Uri "http://$host/$name/files/download?path=$([uri]::EscapeDataString($path))" -OutFile "C:\\temp\\downloaded.pdf"
-```
-
-## Container Manager REST Service (Host)
-
-In addition to the per-sandbox file service, a host-level management service allows
-secure lifecycle control of Docker containers via an authenticated REST API.
-
-### Capabilities
-
-1. Create a new container
-2. Stop a container
-3. Start a container
-4. Restart a container
-5. Query container status
-6. List containers (owned by the API key)
-7. Delete a container (including its data directory)
-
-All operations are isolated per API key. An API key can only manage the containers it created.
-
-### Security Model
-
-- Clients authenticate using a Bearer token: `Authorization: Bearer <API_KEY>`
-- Only the SHA256 hash of the key is stored in SQLite (`api_keys.key_hash`)
-- Containers are labeled with ownership metadata:
-	- `albert.manager=1`
-	- `albert.apikey_hash=<sha256>`
-- A container request fails with 403 if ownership doesn't match.
-
-### Directory Layout
-
-```
-data/
-	manager.db                 # SQLite database
-	containers/
-		<keyhash-prefix>/
-			<container-name>/ ...  # Container-specific data directory (created on demand)
-```
-
-`<keyhash-prefix>` is the first 12 characters of the API key hash.
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MANAGER_PORT` | `5001` | Port for the service |
-| `MANAGER_DB_PATH` | `./data/manager.db` | Path to SQLite DB |
-| `MANAGER_DATA_DIR` | `./data/containers` | Base directory for per-container data |
-| `MANAGER_ALLOWED_IMAGES` | (empty = allow all) | Comma-separated allow-list of images |
-
-### Install Python Dependencies
-
-```powershell
-pip install -r requirements.txt
-```
-
-### Start the Service (Host)
-
-```powershell
-python scripts/container_manager_service.py
-```
-
-Service health check:
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:5001/health"
-```
-
-### API Key Management (CLI)
-
-Create a key (prints plaintext once):
-
-```powershell
-python scripts/api_key_manager.py create --label "Team A"
-```
-
-List keys:
-
-```powershell
-python scripts/api_key_manager.py list
-```
-
-Revoke a key (removes owned containers & data):
-
-```powershell
-python scripts/api_key_manager.py revoke --key <PLAINTEXT_KEY>
-```
-
-#### Shell Wrapper (`api-key-manager.sh`)
-
-For convenience a Bash wrapper script is provided (calls the Python CLI internally):
-
+List existing sandboxes:
 ```bash
-/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh create --label "Team A"
-/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh list
-/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh revoke --key <PLAINTEXT_KEY>
+curl -H "Authorization: Bearer $ALBERT_API_KEY" \
+     http://127.0.0.1:5001/containers
 ```
-
-Show help:
-
+Create a sandbox (auto-starts and returns connection details):
 ```bash
-/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh help
+curl -X POST \
+     -H "Authorization: Bearer $ALBERT_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"name": "agent-lab-01"}' \
+     http://127.0.0.1:5001/containers
 ```
-
-It respects the same environment variables: `MANAGER_DB_PATH`, `MANAGER_DATA_DIR`.
-
-
-### REST Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Service health (no auth) |
-| POST | `/containers` | Create (body requires `image`) |
-| GET | `/containers` | List owned containers |
-| GET | `/containers/<id>` | Inspect container (name or ID) |
-| POST | `/containers/<id>/start` | Start container |
-| POST | `/containers/<id>/stop` | Stop (optional `?timeout=10`) |
-| POST | `/containers/<id>/restart` | Restart |
-| DELETE | `/containers/<id>` | Delete (stops first if running) |
-
-Create request JSON fields:
-
-```json
-{
-	"image": "python:3.11-slim",      // required
-	"name": "optional-name",          // optional (auto-generated if omitted)
-	"env": {"FOO": "bar"},            // optional
-	"cmd": ["python", "app.py"],       // optional
-	"autoStart": true                   // default true
-}
-```
-
-### Example PowerShell Usage
-
-```powershell
-$key = "<PLAINTEXT_API_KEY>"
-$headers = @{ Authorization = "Bearer $key"; 'Content-Type' = 'application/json' }
-
-# Create a container
-$body = @{ image = "hello-world"; autoStart = $true } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri http://localhost:5001/containers -Headers $headers -Body $body
-
-# List containers
-Invoke-RestMethod -Uri http://localhost:5001/containers -Headers $headers
-
-# Stop container (replace <id>)
-Invoke-RestMethod -Method Post -Uri http://localhost:5001/containers/<id>/stop -Headers $headers
-
-# Delete container
-Invoke-RestMethod -Method Delete -Uri http://localhost:5001/containers/<id> -Headers $headers
-```
-
-### cURL Examples (Linux/macOS style)
-
+Stop a sandbox when you are done:
 ```bash
-API_KEY=...; BASE=http://localhost:5001
-
-curl -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
-	-d '{"image":"hello-world"}' $BASE/containers
-
-curl -H "Authorization: Bearer $API_KEY" $BASE/containers
+curl -X POST \
+     -H "Authorization: Bearer $ALBERT_API_KEY" \
+     http://127.0.0.1:5001/containers/agent-lab-01/stop
 ```
+Additional endpoints let you restart, delete, or retrieve detailed status for a single sandbox. All responses include the noVNC desktop URL, MC Hub endpoint, shell gateway, and idle-timeout metadata so you can embed the sandbox into your own control plane.
 
-### Error Handling
+## File Transfer Services
+Each sandbox exposes a lightweight file bridge so agents can move artifacts in and out of the container. The service sits behind nginx and is automatically namespaced per sandbox.
 
-| Status | Reason |
-|--------|--------|
-| 400 | Missing fields, malformed JSON, bad image pull |
-| 401 | Missing/invalid API key |
-| 403 | Image not allowed or ownership violation |
-| 404 | Container not found |
-| 500 | Docker/internal errors |
+- Uploads accept multipart form data and return the absolute path inside the container. Agents can then reference that path from shell or Python sessions.
+- Downloads stream files back to the caller when provided with a valid path.
 
-### Smoke Test Script
+Example requests (replace `<sandbox>` with the sandbox name returned during creation):
+```bash
+curl -X POST \
+     -H "Authorization: Bearer $ALBERT_API_KEY" \
+     -F "file=@model-output.json" \
+     http://<host>/<sandbox>/files/upload
 
-You can run a scripted lifecycle test once you have a key:
-
-```powershell
-python scripts\smoke_test_manager.py --key <PLAINTEXT_API_KEY>
+curl -H "Authorization: Bearer $ALBERT_API_KEY" \
+     "http://<host>/<sandbox>/files/download?path=/tmp/albert-files/<uuid.ext>" \
+     --output ./downloaded.json
 ```
+Uploads and downloads are guarded by the owning API key, so tenants only see their own data.
 
-### Notes / Future Hardening Ideas
+## Automatic Desktop Access
+Every sandbox boots into a full desktop session with the ALBERT toolchain already configured. The installer sets up nginx and noVNC to relay the desktop through `http://<host>/<sandbox>/`, making it easy for operators to open the environment in a browser, complete authentication steps, or monitor an agent live. When activity stops for 10 minutes the container is shut down automatically; the next `start` call resumes the environment.
 
-- Rate limiting (per key) via a proxy or Flask limiter
-- Image allow-list enforcement (already supported via env var)
-- Resource constraints (CPU/mem) at create time
-- Key hashing could include salt/stretching (current: plain SHA256)
+## Uninstall
+To remove the sandbox manager, disable the systemd service, clean up nginx entries, and delete installed files:
+```bash
+sudo bash uninstall.sh
+```
+The script leaves Docker images and shared OS packages untouched so you can decide whether to keep them for future installations.
 
----
-If you encounter issues or have feature requests, please open an issue or PR.
-
+## Enterprise Integration
+A ready-to-use integration of ALBERT | AI Sandbox is available inside ALBERT | AI from agorum core. Learn more at https://www.agorum.com.
