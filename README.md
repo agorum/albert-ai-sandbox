@@ -109,4 +109,4 @@ sudo bash uninstall.sh
 The script leaves Docker images and shared OS packages untouched so you can decide whether to keep them for future installations.
 
 ## Enterprise Integration
-A ready-to-use integration of ALBERT | AI Sandbox is available inside ALBERT | AI from agorum core. Learn more at https://www.agorum.com.
+A ready-to-use integration of ALBERT | AI Sandbox is available inside ALBERT | AI from agorum Software GmbH. Learn more at https://www.agorum.com.
