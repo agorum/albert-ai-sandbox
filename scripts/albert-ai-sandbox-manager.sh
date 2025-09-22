@@ -397,17 +397,37 @@ hash_plaintext_key() {
 
 # Generate a cryptic unique sandbox name if user omitted one
 generate_random_name() {
-	# Lightweight: sbx- + 6-8 hex chars; robust against errors
-	local attempt name
+	# Hardened: sbx- + 16 hex chars (8 bytes from /dev/urandom) to resist guessing
+	local attempt suffix name
 	for attempt in {1..20}; do
-		name="sbx-$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' | cut -c1-8)"
-		[ -z "$name" ] && continue
+		suffix=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' | cut -c1-16)
+		[ -z "$suffix" ] && continue
+		if [ ${#suffix} -lt 16 ]; then
+			continue
+		fi
+		name="sbx-$suffix"
 		if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$" 2>/dev/null; then
 			continue
 		fi
 		echo "$name"; return 0
 	done
-	echo "sbx-$(date +%s)"
+	# Fallback: derive deterministic 16-char suffix from high-resolution timestamp data
+	local seed suffix_fallback
+	seed="$(date +%s%N)-$$-${RANDOM:-0}"
+	if command -v sha256sum >/dev/null 2>&1; then
+		suffix_fallback=$(printf '%s' "$seed" | sha256sum | awk '{print $1}' | cut -c1-16)
+	elif command -v openssl >/dev/null 2>&1; then
+		suffix_fallback=$(printf '%s' "$seed" | openssl dgst -sha256 2>/dev/null | awk '{print $2}' | cut -c1-16)
+	else
+		suffix_fallback=$(printf '%s' "$seed" | tr -cd 'a-f0-9' | cut -c1-16)
+	fi
+	if [ -z "$suffix_fallback" ]; then
+		suffix_fallback=$(printf '%s' "$seed" | tr -cd '[:alnum:]' | head -c 16)
+	fi
+	if [ ${#suffix_fallback} -lt 16 ]; then
+		suffix_fallback=$(printf '%s' "$suffix_fallback$suffix_fallback" | head -c 16)
+	fi
+	echo "sbx-${suffix_fallback:-fallback}"
 }
 
 # Create container
