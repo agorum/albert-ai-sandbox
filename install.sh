@@ -169,7 +169,8 @@ ensure_single_include_line() {
 
 if [ -f "${DEFAULT_SITE}" ]; then
 	echo -e "${YELLOW}Reconciling nginx default site includes...${NC}"
-	include_count=$(grep -c "include .*albert-\\*.conf;" "${DEFAULT_SITE}" 2>/dev/null || echo 0)
+	include_count=$(grep -c "include .*albert-\\*.conf;" "${DEFAULT_SITE}" 2>/dev/null || true)
+	include_count=${include_count:-0}
 
 	if [ "${include_count}" -ne 1 ]; then
 		ensure_single_include_line "${DEFAULT_SITE}" "${INCLUDE_LINE}"
@@ -321,7 +322,8 @@ fi
 
 # Check final nginx configuration
 echo -e "${YELLOW}Checking final nginx configuration...${NC}"
-include_count=$(grep -c "include.*albert-\*.conf;" /etc/nginx/sites-enabled/default 2>/dev/null || echo 0)
+include_count=$(grep -c "include.*albert-\*.conf;" /etc/nginx/sites-enabled/default 2>/dev/null || true)
+include_count=${include_count:-0}
 if [ "$include_count" -eq 1 ]; then
 	echo -e "${GREEN}✓ Nginx include correctly configured (1 include found)${NC}"
 elif [ "$include_count" -gt 1 ]; then
