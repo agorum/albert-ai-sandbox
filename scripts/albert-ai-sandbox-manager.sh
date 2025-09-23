@@ -48,6 +48,7 @@ DEBUG=""
 QUIET=""
 TRACE="${ALBERT_TRACE:-}"
 STATUS_SKIP_STATS="${ALBERT_STATUS_SKIP_STATS:-}"
+MCPHUB_WAIT_ERROR=""
 
 # Parse optional global flags (support both before and after command)
 ORIG_ARGS=("$@")
@@ -387,6 +388,100 @@ json_error() {
     exit "$code"
 }
 
+wait_for_mcphub_ready() {
+	local container_name="$1"
+	local host_port="$2"
+	local timeout="${ALBERT_MCPHUB_TIMEOUT:-120}"
+	local interval="${ALBERT_MCPHUB_POLL_INTERVAL:-2}"
+	local start_ts current elapsed probe_cmd
+
+	MCPHUB_WAIT_ERROR=""
+
+	case "$timeout" in
+		''|*[!0-9]*) timeout=120 ;;
+		*) : ;;
+	esac
+	case "$interval" in
+		''|*[!0-9]*) interval=2 ;;
+		*) : ;;
+	esac
+	if [ "$interval" -lt 1 ]; then
+		interval=1
+	fi
+
+	if [ -z "$container_name" ]; then
+		MCPHUB_WAIT_ERROR="Container name missing for MCP Hub wait"
+		return 1
+	fi
+
+	if [ -z "$host_port" ]; then
+		local port_line
+		port_line=$(docker port "$container_name" 3000/tcp 2>/dev/null | head -n1)
+		if [ -n "$port_line" ]; then
+			host_port="${port_line##*:}"
+			host_port="${host_port%%[^0-9]*}"
+		fi
+	fi
+
+	if [ -z "$host_port" ]; then
+		trace_log "wait_for_mcphub_ready: no port info for container='$container_name'"
+		return 0
+	fi
+
+	if command -v curl >/dev/null 2>&1; then
+		probe_cmd="curl"
+	elif command -v wget >/dev/null 2>&1; then
+		probe_cmd="wget"
+	elif command -v nc >/dev/null 2>&1; then
+		probe_cmd="nc"
+	else
+		trace_log "wait_for_mcphub_ready: no probe tool available; skipping wait"
+		return 0
+	fi
+
+	if [ -z "$JSON_MODE" ] && [ -z "$QUIET" ]; then
+		echo -e "${YELLOW}Waiting for MCP Hub in '${container_name}' (port ${host_port})...${NC}"
+	fi
+
+	start_ts=$(date +%s)
+	while true; do
+		case "$probe_cmd" in
+			curl)
+				if curl --silent --max-time 2 "http://127.0.0.1:${host_port}/" >/dev/null 2>&1; then
+					break
+				fi
+				;;
+			wget)
+				if wget --quiet --spider --tries=1 --timeout=2 "http://127.0.0.1:${host_port}/" >/dev/null 2>&1; then
+					break
+				fi
+				;;
+			nc)
+				if nc -z -w 2 127.0.0.1 "$host_port" >/dev/null 2>&1; then
+					break
+				fi
+				;;
+		esac
+
+		current=$(date +%s)
+		elapsed=$((current - start_ts))
+		if [ "$elapsed" -ge "$timeout" ]; then
+			MCPHUB_WAIT_ERROR="MCP Hub im Container '$container_name' wurde nach ${timeout}s nicht bereit."
+			trace_log "wait_for_mcphub_ready: timeout container='$container_name' port='$host_port' timeout='${timeout}'"
+			return 1
+		fi
+		sleep "$interval"
+	done
+
+	current=$(date +%s)
+	elapsed=$((current - start_ts))
+	trace_log "wait_for_mcphub_ready: ready container='$container_name' port='$host_port' method='$probe_cmd' elapsed='${elapsed}s'"
+	if [ -z "$JSON_MODE" ] && [ -z "$QUIET" ]; then
+		echo -e "${GREEN}MCP Hub bereit nach ${elapsed}s.${NC}"
+	fi
+	return 0
+}
+
 hash_plaintext_key() {
 	# Hash a plaintext key (URL-safe base64 like token_urlsafe) deterministically
 	if command -v python3 >/dev/null 2>&1; then
@@ -504,8 +599,17 @@ create_container() {
 
         local run_rc=$?
 
-        if [ $run_rc -eq 0 ]; then
-                trace_log "docker run success name='$name'"
+	if [ $run_rc -eq 0 ]; then
+		trace_log "docker run success name='$name'"
+		if ! wait_for_mcphub_ready "$name" "$mcphub_port"; then
+			if [ -n "$JSON_MODE" ]; then
+				json_error 1 "mcphub_timeout" "${MCPHUB_WAIT_ERROR:-MCP Hub in container '$name' wurde nicht rechtzeitig bereit.}"
+			else
+				echo -e "${RED}${MCPHUB_WAIT_ERROR:-MCP Hub im Container '$name' wurde nicht rechtzeitig bereit.}${NC}" >&2
+			fi
+			return 1
+		fi
+
 		# Register in registry
 		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port"
 
@@ -610,15 +714,31 @@ start_container() {
         docker start "$name" >/dev/null
         local rc=$?
 
-        if [ $rc -eq 0 ]; then
-                local info=$(get_container_info "$name")
-                if [ -n "$JSON_MODE" ]; then
-                        local hostip=$(hostname -I | awk '{print $1}')
-                        json_emit '{result:"started", name:$n, url:($h+"/"+$n+"/"), host:$h}' --arg n "$name" --arg h "http://$hostip"
-                elif [ -z "$QUIET" ]; then
-                        echo -e "${GREEN}Container '$name' started${NC}"
-                        echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
-                fi
+	if [ $rc -eq 0 ]; then
+		local info=$(get_container_info "$name")
+		local mcphub_port=""
+		if [ -n "$info" ]; then
+			if command -v jq >/dev/null 2>&1; then
+				mcphub_port=$(printf '%s\n' "$info" | jq -r '.mcphub_port // empty')
+			else
+				mcphub_port=$(printf '%s\n' "$info" | sed -n 's/.*"mcphub_port"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' | head -n1)
+			fi
+		fi
+		if ! wait_for_mcphub_ready "$name" "$mcphub_port"; then
+			if [ -n "$JSON_MODE" ]; then
+				json_error 1 "mcphub_timeout" "${MCPHUB_WAIT_ERROR:-MCP Hub in container '$name' wurde nicht rechtzeitig bereit.}"
+			else
+				echo -e "${RED}${MCPHUB_WAIT_ERROR:-MCP Hub im Container '$name' wurde nicht rechtzeitig bereit.}${NC}" >&2
+			fi
+			return 1
+		fi
+		if [ -n "$JSON_MODE" ]; then
+			local hostip=$(hostname -I | awk '{print $1}')
+			json_emit '{result:"started", name:$n, url:($h+"/"+$n+"/"), host:$h}' --arg n "$name" --arg h "http://$hostip"
+		elif [ -z "$QUIET" ]; then
+			echo -e "${GREEN}Container '$name' started${NC}"
+			echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
+		fi
         else
                 if [ -n "$JSON_MODE" ]; then
                         json_error "$rc" "start_failed" "Docker failed to start container '$name' (exit $rc)"
