@@ -494,6 +494,37 @@ hash_plaintext_key() {
 	fi
 }
 
+container_exists() {
+	local name="$1"
+	docker container inspect "$name" >/dev/null 2>&1
+}
+
+purge_missing_sandbox_metadata() {
+	local missing="$1"
+	trace_log "purge_missing_sandbox_metadata name='$missing'"
+	remove_from_registry "$missing" >/dev/null 2>&1 || true
+	remove_nginx_config "$missing" >/dev/null 2>&1 || true
+	if [ -n "$DB_PATH" ] && [ -f "$DB_PATH" ] && command -v sqlite3 >/dev/null 2>&1; then
+		sqlite3 "$DB_PATH" "DELETE FROM containers WHERE name='$missing';" 2>/dev/null || true
+	fi
+}
+
+collect_visible_containers() {
+	local name label
+	while IFS= read -r name; do
+		[ -z "$name" ] && continue
+		label=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash"}}' "$name" 2>/dev/null || true)
+		if [ $? -ne 0 ]; then
+			purge_missing_sandbox_metadata "$name"
+			continue
+		fi
+		if [ -n "$OWNER_KEY_HASH_ENV" ] && [ "$label" != "$OWNER_KEY_HASH_ENV" ]; then
+			continue
+		fi
+		echo "$name"
+	done < <(get_all_containers)
+}
+
 # Normalize a user-supplied sandbox label into a Docker-safe slug
 normalize_requested_name() {
 	local input="${1:-}"
@@ -846,17 +877,25 @@ show_status() {
 	# Enforce API key also for status (list or single) to avoid leaking names
 	require_api_key
 
-                if [ -z "$name" ]; then
-                # All containers
-                if [ -n "$JSON_MODE" ]; then
-                        local rows=()
-                        for container_name in $(get_all_containers); do
-				if [ -n "$OWNER_KEY_HASH_ENV" ]; then
-					local lbl=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash"}}' "$container_name" 2>/dev/null || true)
-					[ "$lbl" != "$OWNER_KEY_HASH_ENV" ] && continue
+	if [ -z "$name" ]; then
+		# All containers
+		mapfile -t __VISIBLE_CONTAINERS < <(collect_visible_containers)
+		if [ -n "$JSON_MODE" ]; then
+			local rows=()
+			for container_name in "${__VISIBLE_CONTAINERS[@]}"; do
+				if ! container_exists "$container_name"; then
+					purge_missing_sandbox_metadata "$container_name"
+					continue
+				fi
+				local info_json=$(get_container_info "$container_name")
+				if [ -z "$info_json" ]; then
+					purge_missing_sandbox_metadata "$container_name"
+					continue
 				fi
 				local sj=$(show_single_status "$container_name" json)
-				[ -n "$sj" ] && rows+=("$sj")
+				if [ -n "$sj" ] && [[ "$sj" != *'"error"'* ]]; then
+					rows+=("$sj")
+				fi
 			done
                         if [ ${#rows[@]} -eq 0 ]; then
                                 printf '[]\n'
@@ -874,10 +913,15 @@ show_status() {
 			echo -e "${GREEN}=================================${NC}"
 			echo -e "${BLUE}Desktop: KDE Plasma${NC}"
 			echo "------------------------------"
-			for container_name in $(get_all_containers); do
-				show_single_status "$container_name"
+		for container_name in "${__VISIBLE_CONTAINERS[@]}"; do
+			if ! container_exists "$container_name"; then
+				purge_missing_sandbox_metadata "$container_name"
+				continue
+			fi
+			if show_single_status "$container_name"; then
 				echo "------------------------------"
-			done
+			fi
+		done
 		fi
 	else
 		if [ -n "$JSON_MODE" ]; then
@@ -899,6 +943,16 @@ show_single_status() {
 			return 0
 		fi
 		echo -e "${RED}Container '$name' not found in registry${NC}"
+		return 1
+	fi
+	if ! container_exists "$name"; then
+		purge_missing_sandbox_metadata "$name"
+		local missing_msg="Container '$name' not found (Docker container missing)"
+		if [ "$mode" = "json" ] || [ -n "$JSON_MODE" ]; then
+			json_emit '{error:"not_found", message:$m, name:$n}' --arg m "$missing_msg" --arg n "$name"
+			return 0
+		fi
+		echo -e "${RED}${missing_msg}${NC}"
 		return 1
 	fi
 	local port=$(echo "$info" | jq -r '.port')
@@ -961,20 +1015,20 @@ list_containers() {
                 printf "%-30s %-10s %-10s %-10s\n" "----" "------" "----------" "--------"
         fi
 	
-	FILTERED=( $(get_all_containers) )
-	if [ -n "$OWNER_KEY_HASH_ENV" ]; then
-		TMP=()
-		for nm in "${FILTERED[@]}"; do
-			LBL=$(docker inspect -f '{{ index .Config.Labels "albert.apikey_hash"}}' "$nm" 2>/dev/null || true)
-			if [ "$LBL" = "$OWNER_KEY_HASH_ENV" ]; then TMP+=("$nm"); fi
-		done
-		FILTERED=("${TMP[@]}")
-	fi
+	mapfile -t FILTERED < <(collect_visible_containers)
 	JSON_ROWS=()
 	for container_name in "${FILTERED[@]}"; do
-		local info=$(get_container_info "$container_name")
-                local port=$(echo "$info" | jq -r '.port')
-                local vnc_port=$(echo "$info" | jq -r '.vnc_port')
+		if ! container_exists "$container_name"; then
+			purge_missing_sandbox_metadata "$container_name"
+			continue
+		fi
+			local info=$(get_container_info "$container_name")
+			if [ -z "$info" ]; then
+				purge_missing_sandbox_metadata "$container_name"
+				continue
+			fi
+			local port=$(echo "$info" | jq -r '.port')
+			local vnc_port=$(echo "$info" | jq -r '.vnc_port')
 
                 if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
                                 local status="${GREEN}Running${NC}"
