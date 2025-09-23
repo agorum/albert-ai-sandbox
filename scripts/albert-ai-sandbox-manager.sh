@@ -494,17 +494,51 @@ hash_plaintext_key() {
 	fi
 }
 
-# Generate a cryptic unique sandbox name if user omitted one
+# Normalize a user-supplied sandbox label into a Docker-safe slug
+normalize_requested_name() {
+	local input="${1:-}"
+	local sanitized="${input,,}"
+	sanitized=${sanitized//[^a-z0-9.-]/-}
+	while [[ "$sanitized" == *--* ]]; do
+		sanitized=${sanitized//--/-}
+	done
+	while [[ "$sanitized" == *..* ]]; do
+		sanitized=${sanitized//../.}
+	done
+	while [[ "$sanitized" == -* || "$sanitized" == .* ]]; do
+		sanitized=${sanitized#[-.]}
+	done
+	while [[ "$sanitized" == *- || "$sanitized" == *. ]]; do
+		sanitized=${sanitized%[-.]}
+	done
+	if [ -z "$sanitized" ]; then
+		sanitized="custom"
+	fi
+	if [ ${#sanitized} -gt 42 ]; then
+		sanitized=${sanitized:0:42}
+	fi
+	echo "$sanitized"
+}
+
+# Generate a cryptic unique sandbox name, optionally incorporating a user hint
 generate_random_name() {
-	# Hardened: sbx- + 16 hex chars (8 bytes from /dev/urandom) to resist guessing
+	# Hardened: random 16-hex suffix (8 bytes from /dev/urandom) to resist guessing
+	local base="${1:-}"
+	local sanitized_base=""
+	local prefix="sbx"
 	local attempt suffix name
+
+	if [ -n "$base" ]; then
+		sanitized_base=$(normalize_requested_name "$base")
+		[ -n "$sanitized_base" ] && prefix="${prefix}-${sanitized_base}"
+	fi
 	for attempt in {1..20}; do
 		suffix=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' | cut -c1-16)
 		[ -z "$suffix" ] && continue
 		if [ ${#suffix} -lt 16 ]; then
 			continue
 		fi
-		name="sbx-$suffix"
+		name="$prefix-$suffix"
 		if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$" 2>/dev/null; then
 			continue
 		fi
@@ -526,7 +560,7 @@ generate_random_name() {
 	if [ ${#suffix_fallback} -lt 16 ]; then
 		suffix_fallback=$(printf '%s' "$suffix_fallback$suffix_fallback" | head -c 16)
 	fi
-	echo "sbx-${suffix_fallback:-fallback}"
+	echo "${prefix}-${suffix_fallback:-fallback}"
 }
 
 # Create container
@@ -538,6 +572,11 @@ create_container() {
 		name=$(generate_random_name)
 		debug_log "Generated random container name: $name"
 		trace_log "generated name='$name'"
+	else
+		local requested_name="$name"
+		name=$(generate_random_name "$requested_name")
+		debug_log "Normalized requested container name '$requested_name' to '$name'"
+		trace_log "normalized requested='$requested_name' final='$name'"
 	fi
 
 	# Ensure API key valid (uses global require_api_key)
