@@ -479,6 +479,9 @@ wait_for_mcphub_ready() {
 	if [ -z "$JSON_MODE" ] && [ -z "$QUIET" ]; then
 		echo -e "${GREEN}MCP Hub bereit nach ${elapsed}s.${NC}"
 	fi
+
+	# wait a bit more
+	sleep 5
 	return 0
 }
 
