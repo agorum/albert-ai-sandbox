@@ -163,6 +163,24 @@ ensure_single_include_line() {
 				print "\t" inc_line
 				inserted=1
 			}
+	}
+	' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
+}
+
+ensure_client_max_body_size() {
+	local file_path="$1"
+	local setting_line="client_max_body_size 0;"
+
+	cp "$file_path" "${file_path}.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+
+	awk -v cfg_line="$setting_line" '
+		BEGIN { inserted=0 }
+		{
+			print $0
+			if (!inserted && $0 ~ /server_name[[:space:]]+_;/) {
+				print "\t" cfg_line
+				inserted=1
+			}
 		}
 	' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
 }
@@ -177,6 +195,14 @@ if [ -f "${DEFAULT_SITE}" ]; then
 		echo -e "${GREEN}✓ Nginx include normalized to a single line${NC}"
 	else
 		echo -e "${GREEN}✓ Nginx include already present (1)${NC}"
+	fi
+
+	if ! grep -Eq '^[[:space:]]*client_max_body_size[[:space:]]+0;' "${DEFAULT_SITE}"; then
+		echo -e "${YELLOW}Adding client_max_body_size 0 to nginx default site...${NC}"
+		ensure_client_max_body_size "${DEFAULT_SITE}"
+		echo -e "${GREEN}✓ client_max_body_size configured for default site${NC}"
+	else
+		echo -e "${GREEN}✓ client_max_body_size already present in default site${NC}"
 	fi
 fi
 
