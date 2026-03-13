@@ -158,6 +158,8 @@ def _extract_script_metadata(payload: Any) -> Dict[str, Any]:
     status = payload.get("status")
     if status:
         result["status"] = status
+    if "persistent" in payload:
+        result["persistent"] = payload["persistent"]
     return result
 
 # --- Database helpers ------------------------------------------------------
@@ -314,10 +316,13 @@ def create_container():
         return err
     body = request.get_json(silent=True) or {}
     requested_name = body.get("name")
+    persistent = body.get("persistent", False)
     # Delegate to external script (image/env not yet parameterized here)
     args = ["create"]
     if requested_name:
         args.append(requested_name)
+    if persistent:
+        args.append("--persistent")
     with _mutate_lock:
         rc, raw, data = _run_script(args, auth_info["key_hash"], expect_json=True)
     if rc != 0 or not isinstance(data, dict):
@@ -413,13 +418,49 @@ def restart_container(cid: str):
         return jsonify({"error": "Restart failed", "details": raw, "exitCode": rc}), 500
     return get_container(cid)
 
+@app.patch("/containers/<cid>/persistent")
+def set_persistent(cid: str):
+    auth_info, err = require_api_key()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    persistent = body.get("persistent", True)
+    # Verify ownership by running a status check
+    rc, raw, data = _run_script(["status", cid], auth_info["key_hash"], expect_json=True)
+    if rc != 0:
+        return jsonify({"error": "Container not found", "details": raw}), 404
+    # Update registry directly
+    registry_file = Path(os.environ.get(
+        "ALBERT_REGISTRY_FILE",
+        "/opt/albert-ai-sandbox-manager/config/container-registry.json",
+    ))
+    with _mutate_lock:
+        try:
+            with registry_file.open("r", encoding="utf-8") as fh:
+                registry = json.load(fh)
+        except Exception:
+            return jsonify({"error": "Registry not available"}), 500
+        found = False
+        for entry in registry:
+            if entry.get("name") == cid:
+                entry["persistent"] = bool(persistent)
+                found = True
+                break
+        if not found:
+            return jsonify({"error": "Container not found in registry"}), 404
+        tmp = registry_file.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        tmp.replace(registry_file)
+    return jsonify({"name": cid, "persistent": bool(persistent)})
+
 @app.delete("/containers/<cid>")
 def delete_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
     with _mutate_lock:
-        rc, raw, _ = _run_script(["remove", cid], auth_info["key_hash"], expect_json=False)
+        rc, raw, _ = _run_script(["remove", cid, "--remove-volumes"], auth_info["key_hash"], expect_json=False)
     if rc != 0:
         return jsonify({"error": "Remove failed", "details": raw, "exitCode": rc}), 500
     # DB cleanup (best-effort)

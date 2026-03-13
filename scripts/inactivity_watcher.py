@@ -19,6 +19,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_STATE_PATH = BASE_DIR / "data" / "container-activity.json"
 DEFAULT_LOG_PATH = Path(os.environ.get("ALBERT_NGINX_ACCESS_LOG", "/var/log/nginx/access.log"))
 DEFAULT_THRESHOLD_SECONDS = int(os.environ.get("ALBERT_INACTIVITY_SECONDS", "600"))
+DEFAULT_MAX_AGE_SECONDS = int(os.environ.get("ALBERT_MAX_AGE_SECONDS", "86400"))
+MAX_AGE_SECONDS = DEFAULT_MAX_AGE_SECONDS
 MANAGER_SCRIPT = Path(os.environ.get(
     "ALBERT_MANAGER_SCRIPT",
     "/opt/albert-ai-sandbox-manager/scripts/albert-ai-sandbox-manager.sh",
@@ -316,6 +318,72 @@ def stop_container(name: str, key_hash: str) -> bool:
     return True
 
 
+def remove_container(name: str, key_hash: str) -> bool:
+    """Remove (delete) a container via the manager script."""
+    if not MANAGER_SCRIPT.exists():
+        print(f"[WARN] Manager script not found at {MANAGER_SCRIPT}, skipping remove for {name}")
+        return False
+    env = os.environ.copy()
+    env.setdefault("ALBERT_STATUS_SKIP_STATS", "1")
+    cmd = [
+        str(MANAGER_SCRIPT),
+        "remove",
+        name,
+        "--api-key-hash",
+        key_hash,
+        "--json",
+        "--non-interactive",
+        "--remove-volumes",
+        "--quiet",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
+    except subprocess.SubprocessError as exc:
+        print(f"[ERROR] Failed to remove expired container {name}: {exc}")
+        return False
+    if result.returncode != 0:
+        print(
+            f"[WARN] Remove command for {name} failed (rc={result.returncode}): {result.stderr.strip() or result.stdout.strip()}"
+        )
+        return False
+    print(f"[INFO] Removed expired container {name} (exceeded max age)")
+    return True
+
+
+def evaluate_and_remove_expired(state: Dict[str, Dict[str, float]], now: float) -> None:
+    """Remove containers that have exceeded ALBERT_MAX_AGE_SECONDS since creation."""
+    if MAX_AGE_SECONDS <= 0:
+        return
+    registry = load_registry()
+    for name, entry in list(registry.items()):
+        if entry.get("persistent"):
+            debug(f"Container {name} is persistent, skipping expiration check")
+            continue
+        created_str = entry.get("created")
+        created_at = parse_docker_timestamp(created_str) if created_str else None
+        if created_at is None:
+            info = inspect_container_state(name)
+            if info:
+                created_at = parse_docker_timestamp(info.get("Created"))
+        if created_at is None:
+            debug(f"Container {name}: no creation time found, skipping expiration check")
+            continue
+        age = now - created_at
+        debug(f"Container {name} age {age:.1f}s (max {MAX_AGE_SECONDS}s)")
+        if age < MAX_AGE_SECONDS:
+            continue
+        info = inspect_container_state(name)
+        key_hash = ""
+        if info:
+            labels = (info.get("Config") or {}).get("Labels") or {}
+            key_hash = labels.get("albert.apikey_hash", "")
+        print(f"[INFO] Container {name} exceeded max age ({age:.0f}s > {MAX_AGE_SECONDS}s), removing")
+        if remove_container(name, key_hash):
+            state.get("containers", {}).pop(name, None)
+            state.get("running_since", {}).pop(name, None)
+            state.get("stop_history", {}).pop(name, None)
+
+
 def evaluate_and_stop_idle(state: Dict[str, Dict[str, float]], now: float) -> None:
     containers_state = state.setdefault("containers", {})
     running_since_state = state.setdefault("running_since", {})
@@ -380,6 +448,7 @@ def main() -> int:
         update_activity_from_logs(state)
         now = time.time()
         evaluate_and_stop_idle(state, now)
+        evaluate_and_remove_expired(state, now)
         save_state(STATE_PATH, state)
         return 0
     finally:

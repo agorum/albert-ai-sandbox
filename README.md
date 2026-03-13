@@ -8,6 +8,7 @@ ALBERT | AI Sandbox provides isolated, browser-ready compute environments for AI
 - Run MCHub with Playwright inside every container to orchestrate browser sessions for the AI agent.
 - Execute shell commands, scripts, or notebooks inside the container through the embedded shell service.
 - Auto-stop containers after 10 minutes of inactivity to conserve capacity.
+- Auto-delete containers (including volumes) after a configurable max age (default 24 hours).
 - Keep data and lifecycle operations isolated per API key, ensuring one tenant cannot touch another tenant's sandboxes.
 
 ## System Requirements
@@ -100,6 +101,59 @@ Uploads and downloads are guarded by the owning API key, so tenants only see the
 
 ## Automatic Desktop Access
 Every sandbox boots into a full desktop session with the ALBERT toolchain already configured. The installer sets up nginx and noVNC to relay the desktop through `http://<host>/<sandbox>/`, making it easy for operators to open the environment in a browser, complete authentication steps, or monitor an agent live. When activity stops for 10 minutes the container is shut down automatically; the next `start` call resumes the environment.
+
+## Container Lifecycle & Automatic Cleanup
+The sandbox manager runs two automatic housekeeping mechanisms:
+
+| Mechanism | Default | Environment Variable | Effect |
+|---|---|---|---|
+| Inactivity stop | 10 minutes | `ALBERT_INACTIVITY_SECONDS` | Stops idle containers (preserves data) |
+| Max age removal | 24 hours | `ALBERT_MAX_AGE_SECONDS` | Deletes containers **and volumes** permanently |
+
+Both settings are configured as environment variables in the inactivity watcher systemd unit. To change them, edit the service file and reload:
+```bash
+sudo systemctl edit albert-inactivity-watcher.service
+```
+Add or override values in the `[Service]` section:
+```ini
+[Service]
+Environment=ALBERT_MAX_AGE_SECONDS=172800
+Environment=ALBERT_INACTIVITY_SECONDS=900
+```
+Then apply the changes:
+```bash
+sudo systemctl daemon-reload
+```
+
+Set `ALBERT_MAX_AGE_SECONDS=0` to disable automatic container removal entirely.
+
+### Persistent Containers
+Containers can be marked as **persistent** to exclude them from automatic max-age deletion. Persistent containers are still subject to inactivity-based stopping but will never be automatically removed.
+
+Set persistent at creation time via the REST API:
+```bash
+curl -X POST \
+     -H "Authorization: Bearer $ALBERT_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"name": "my-persistent-sandbox", "persistent": true}' \
+     http://127.0.0.1:5001/containers
+```
+
+Or via the CLI:
+```bash
+albert-ai-sandbox-manager create my-persistent-sandbox --api-key "$ALBERT_API_KEY" --persistent --json
+```
+
+Toggle persistent on an existing container:
+```bash
+curl -X PATCH \
+     -H "Authorization: Bearer $ALBERT_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"persistent": true}' \
+     http://127.0.0.1:5001/containers/my-sandbox/persistent
+```
+
+The `persistent` flag is shown in all list and status responses (`"persistent": true/false`). By default, containers are **not** persistent.
 
 ## Uninstall
 To remove the sandbox manager, disable the systemd service, clean up nginx entries, and delete installed files:

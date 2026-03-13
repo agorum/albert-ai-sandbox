@@ -44,6 +44,8 @@ export DB_PATH  # ensure python heredocs can read it
 JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output
 OWNER_KEY_HASH_ENV="${ALBERT_OWNER_KEY_HASH:-}"  # passed in by REST service
 NON_INTERACTIVE="${ALBERT_NONINTERACTIVE:-}"     # suppress prompts
+REMOVE_VOLUMES=""
+PERSISTENT=""
 DEBUG=""
 QUIET=""
 TRACE="${ALBERT_TRACE:-}"
@@ -70,6 +72,8 @@ while [[ $# -gt 0 ]]; do
 			fi
 			shift 2 ;;
 		--non-interactive) NON_INTERACTIVE=1; shift ;;
+		--remove-volumes) REMOVE_VOLUMES=1; shift ;;
+		--persistent) PERSISTENT=1; shift ;;
 		--debug) DEBUG=1; shift ;;
 		--)
 			shift; while [[ $# -gt 0 ]]; do FIRST_PASS+=("$1"); shift; done; break ;;
@@ -152,6 +156,8 @@ if [[ -n "$COMMAND_SEEN" ]]; then
         fi
         shift 2 ;;
       --non-interactive) NON_INTERACTIVE=1; shift ;;
+      --remove-volumes) REMOVE_VOLUMES=1; shift ;;
+      --persistent) PERSISTENT=1; shift ;;
       --debug) DEBUG=1; shift ;;
       *) POST_FLAGS+=("$1"); shift ;;
     esac
@@ -690,7 +696,9 @@ create_container() {
 		fi
 
 		# Register in registry
-		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port"
+		local persistent_val="false"
+		[ -n "$PERSISTENT" ] && persistent_val="true"
+		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port" "$persistent_val"
 
 		# Insert mapping into containers table (ignore if already exists)
 		CONTAINER_ID=$(docker inspect -f '{{ .Id }}' "$name" 2>/dev/null || true)
@@ -710,13 +718,14 @@ create_container() {
 
 		if [ -n "$JSON_MODE" ]; then
 			HOSTIP=$(hostname -I | awk '{print $1}')
-			json_emit '{result:"created", name:$name, ownerHash:$ownerHash, ports:{novnc:$novnc_port,vnc:$vnc_port,mcphub:$mcphub_port,filesvc:$filesvc_port}, urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), filesUpload:("http://"+$host+"/"+$name+"/files/upload"), filesDownloadPattern:("http://"+$host+"/"+$name+"/files/download?path=/tmp/albert-files/<uuid.ext>")}}' \
+			json_emit '{result:"created", name:$name, ownerHash:$ownerHash, persistent:$persistent, ports:{novnc:$novnc_port,vnc:$vnc_port,mcphub:$mcphub_port,filesvc:$filesvc_port}, urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), filesUpload:("http://"+$host+"/"+$name+"/files/upload"), filesDownloadPattern:("http://"+$host+"/"+$name+"/files/download?path=/tmp/albert-files/<uuid.ext>")}}' \
 				--arg name "$name" \
 				--arg novnc_port "$novnc_port" \
 				--arg vnc_port "$vnc_port" \
 				--arg mcphub_port "$mcphub_port" \
 				--arg filesvc_port "$filesvc_port" \
 				--arg ownerHash "$OWNER_KEY_HASH_ENV" \
+				--argjson persistent "$persistent_val" \
 				--arg host "$HOSTIP"
 		else
 			echo -e "${GREEN}========================================${NC}"
@@ -764,8 +773,10 @@ remove_container() {
         if [ -z "$NON_INTERACTIVE" ]; then
                 read -p "Also delete data volume? (y/n): " -n 1 -r; echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
-                        docker volume rm "${name}_data" >/dev/null
+                        docker volume rm "${name}_data" >/dev/null 2>&1 || true
                 fi
+        elif [ -n "$REMOVE_VOLUMES" ]; then
+                docker volume rm "${name}_data" >/dev/null 2>&1 || true
         fi
 	
 	# Acquire lock for registry/nginx modification
@@ -974,6 +985,7 @@ show_single_status() {
 	local mcphub_port=$(echo "$info" | jq -r '.mcphub_port // empty')
 	local filesvc_port=$(echo "$info" | jq -r '.filesvc_port // empty')
 	local created=$(echo "$info" | jq -r '.created')
+	local persistent_flag=$(echo "$info" | jq '.persistent // false')
 	local running="stopped"
 	local stats=""
 	if docker ps --format '{{.Names}}' | grep -q "^${name}$"; then
@@ -990,6 +1002,7 @@ show_single_status() {
                         --arg name "$name" \
                         --arg status "$running" \
                         --arg created "$created" \
+                        --argjson persistent "$persistent_flag" \
                         --arg novnc "$port" \
                         --arg vnc "$vnc_port" \
 			--arg mcphub "$mcphub_port" \
@@ -997,7 +1010,7 @@ show_single_status() {
 			--arg stats "$stats" \
 			--arg ownerHash "$OWNER_KEY_HASH_ENV" \
 			--arg host "$hostip" \
-                        '{name:$name,status:$status,created:$created,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc},resources:$stats,urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), files:("http://"+$host+"/"+$name+"/files/")}}'
+                        '{name:$name,status:$status,created:$created,persistent:$persistent,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc},resources:$stats,urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), files:("http://"+$host+"/"+$name+"/files/")}}'
                 __ALBERT_JSON_EMITTED=1
         else
                 echo -e "${BLUE}Container: ${NC}$name"
@@ -1053,8 +1066,9 @@ list_containers() {
                 if [ -n "$JSON_MODE" ]; then
                         mcphub_port=$(echo "$info" | jq -r '.mcphub_port // empty')
                         filesvc_port=$(echo "$info" | jq -r '.filesvc_port // empty')
+                        persistent_flag=$(echo "$info" | jq '.persistent // false')
                         plain_status=$(docker ps --format '{{.Names}}' | grep -q "^${container_name}$" && echo running || echo stopped)
-                        JSON_ROWS+=( "$(jq -n --arg name "$container_name" --arg status "$plain_status" --arg novnc "$port" --arg vnc "$vnc_port" --arg mcphub "$mcphub_port" --arg filesvc "$filesvc_port" --arg ownerHash "$OWNER_KEY_HASH_ENV" '{name:$name,status:$status,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc}}')" )
+                        JSON_ROWS+=( "$(jq -n --arg name "$container_name" --arg status "$plain_status" --arg novnc "$port" --arg vnc "$vnc_port" --arg mcphub "$mcphub_port" --arg filesvc "$filesvc_port" --arg ownerHash "$OWNER_KEY_HASH_ENV" --argjson persistent "$persistent_flag" '{name:$name,status:$status,ownerHash:$ownerHash,persistent:$persistent,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc}}')" )
                 elif [ -n "$QUIET" ]; then
                         printf '%s\n' "$container_name"
                 else

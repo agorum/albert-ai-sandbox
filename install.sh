@@ -270,6 +270,7 @@ Environment=ALBERT_INACTIVITY_STATE=/opt/albert-ai-sandbox-manager/data/containe
 Environment=ALBERT_MANAGER_SCRIPT=/opt/albert-ai-sandbox-manager/scripts/albert-ai-sandbox-manager.sh
 Environment=ALBERT_NGINX_ACCESS_LOG=/var/log/nginx/access.log
 Environment=ALBERT_INACTIVITY_SECONDS=600
+Environment=ALBERT_MAX_AGE_SECONDS=86400
 ExecStart=/usr/bin/env bash -c '[ -x /opt/albert-ai-sandbox-manager/venv/bin/python ] && exec /opt/albert-ai-sandbox-manager/venv/bin/python /opt/albert-ai-sandbox-manager/scripts/inactivity_watcher.py || exec python3 /opt/albert-ai-sandbox-manager/scripts/inactivity_watcher.py'
 
 [Install]

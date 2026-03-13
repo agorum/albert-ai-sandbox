@@ -41,9 +41,10 @@ add_to_registry() {
 	local vnc_port=$3
 	local mcphub_port=$4
 	local filesvc_port=${5:-}
-	
+	local persistent=${6:-false}
+
 	init_registry
-	
+
 	# Create entry with optional mcphub_port
 	if [ -n "$mcphub_port" ] || [ -n "$filesvc_port" ]; then
 		local entry=$(jq -n \
@@ -53,17 +54,27 @@ add_to_registry() {
 			--arg mcphub_port "${mcphub_port:-}" \
 			--arg filesvc_port "${filesvc_port:-}" \
 			--arg created "$(date -Iseconds)" \
-			'{name: $name, port: $port, vnc_port: $vnc_port, mcphub_port: $mcphub_port, filesvc_port: $filesvc_port, created: $created}')
+			--argjson persistent "$persistent" \
+			'{name: $name, port: $port, vnc_port: $vnc_port, mcphub_port: $mcphub_port, filesvc_port: $filesvc_port, created: $created, persistent: $persistent}')
 	else
 		local entry=$(jq -n \
 			--arg name "$name" \
 			--arg port "$port" \
 			--arg vnc_port "$vnc_port" \
 			--arg created "$(date -Iseconds)" \
-			'{name: $name, port: $port, vnc_port: $vnc_port, created: $created}')
+			--argjson persistent "$persistent" \
+			'{name: $name, port: $port, vnc_port: $vnc_port, created: $created, persistent: $persistent}')
 	fi
-	
+
 	jq ". += [$entry]" "$REGISTRY_FILE" > "${REGISTRY_FILE}.tmp" && mv "${REGISTRY_FILE}.tmp" "$REGISTRY_FILE"
+}
+
+# Update persistent flag in registry
+set_persistent_flag() {
+	local name=$1
+	local persistent=$2
+	init_registry
+	jq "map(if .name == \"$name\" then .persistent = $persistent else . end)" "$REGISTRY_FILE" > "${REGISTRY_FILE}.tmp" && mv "${REGISTRY_FILE}.tmp" "$REGISTRY_FILE"
 }
 
 # Remove container from registry
