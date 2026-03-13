@@ -2,6 +2,7 @@
 """Monitor nginx access log and stop idle sandbox containers."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -359,16 +360,31 @@ def evaluate_and_stop_idle(state: Dict[str, Dict[str, float]], now: float) -> No
             containers_state[record.name] = now
 
 
+WATCHER_LOCK = Path("/opt/albert-ai-sandbox-manager/config/.watcher.lock")
+
+
 def main() -> int:
-    if shutil.which("docker") is None:
-        print("[WARN] Docker binary not found; skipping inactivity check")
+    # Prevent overlapping runs (e.g. if timer fires while previous run is still active)
+    lock_fd = open(WATCHER_LOCK, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("[INFO] Another watcher instance is running; skipping")
         return 0
-    state = load_state(STATE_PATH)
-    update_activity_from_logs(state)
-    now = time.time()
-    evaluate_and_stop_idle(state, now)
-    save_state(STATE_PATH, state)
-    return 0
+
+    try:
+        if shutil.which("docker") is None:
+            print("[WARN] Docker binary not found; skipping inactivity check")
+            return 0
+        state = load_state(STATE_PATH)
+        update_activity_from_logs(state)
+        now = time.time()
+        evaluate_and_stop_idle(state, now)
+        save_state(STATE_PATH, state)
+        return 0
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 if __name__ == "__main__":

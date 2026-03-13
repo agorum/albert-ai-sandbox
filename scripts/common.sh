@@ -6,6 +6,19 @@ NGINX_CONF_DIR="/etc/nginx/sites-available"
 NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
 BASE_PORT=6080
 MAX_PORT=8080
+LOCK_FILE="/opt/albert-ai-sandbox-manager/config/.manager.lock"
+LOCK_FD=200
+
+# Acquire exclusive lock for read-modify-write operations on shared files.
+# Auto-releases on process exit or when release_lock is called.
+acquire_lock() {
+	exec 200>"$LOCK_FILE"
+	flock -w 300 200 || { echo "ERROR: Could not acquire lock after 300s" >&2; return 1; }
+}
+
+release_lock() {
+	flock -u 200 2>/dev/null || true
+}
 
 # Colors
 RED='\033[0;31m'

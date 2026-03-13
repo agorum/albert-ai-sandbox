@@ -502,11 +502,13 @@ container_exists() {
 purge_missing_sandbox_metadata() {
 	local missing="$1"
 	trace_log "purge_missing_sandbox_metadata name='$missing'"
+	acquire_lock || { echo "ERROR: Could not acquire lock for purge" >&2; return 1; }
 	remove_from_registry "$missing" >/dev/null 2>&1 || true
 	remove_nginx_config "$missing" >/dev/null 2>&1 || true
 	if [ -n "$DB_PATH" ] && [ -f "$DB_PATH" ] && command -v sqlite3 >/dev/null 2>&1; then
 		sqlite3 "$DB_PATH" "DELETE FROM containers WHERE name='$missing';" 2>/dev/null || true
 	fi
+	release_lock
 }
 
 collect_visible_containers() {
@@ -620,7 +622,10 @@ create_container() {
                 json_error 1 "Exists" "Container '$name' already exists"
         fi
 	debug_log "Resolved API_KEY_DB_ID=$API_KEY_DB_ID"
-	
+
+	# Acquire exclusive lock to prevent concurrent registry/port corruption
+	acquire_lock || json_error 1 "Lock" "Could not acquire manager lock"
+
 	# Find free ports
 	local novnc_port=$(find_free_novnc_port)
 	local vnc_port=$(find_free_vnc_port)
@@ -675,6 +680,7 @@ create_container() {
 	if [ $run_rc -eq 0 ]; then
 		trace_log "docker run success name='$name'"
 		if ! wait_for_mcphub_ready "$name" "$mcphub_port"; then
+			release_lock
 			if [ -n "$JSON_MODE" ]; then
 				json_error 1 "mcphub_timeout" "${MCPHUB_WAIT_ERROR:-MCP Hub in container '$name' wurde nicht rechtzeitig bereit.}"
 			else
@@ -699,7 +705,9 @@ create_container() {
 		if [ ! -f "${NGINX_CONF_DIR}/albert-mcphub-global.conf" ]; then
 			create_global_mcphub_config "$mcphub_port"
 		fi
-		
+
+		release_lock
+
 		if [ -n "$JSON_MODE" ]; then
 			HOSTIP=$(hostname -I | awk '{print $1}')
 			json_emit '{result:"created", name:$name, ownerHash:$ownerHash, ports:{novnc:$novnc_port,vnc:$vnc_port,mcphub:$mcphub_port,filesvc:$filesvc_port}, urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), filesUpload:("http://"+$host+"/"+$name+"/files/upload"), filesDownloadPattern:("http://"+$host+"/"+$name+"/files/download?path=/tmp/albert-files/<uuid.ext>")}}' \
@@ -723,6 +731,7 @@ create_container() {
 			echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
 		fi
         else
+                release_lock
                 trace_log "docker run failed name='$name' rc=$run_rc"
                 json_error 1 "Create failed" "Error creating container"
         fi
@@ -759,12 +768,17 @@ remove_container() {
                 fi
         fi
 	
+	# Acquire lock for registry/nginx modification
+	acquire_lock || json_error 1 "Lock" "Could not acquire manager lock"
+
 	# Remove nginx config
 	remove_nginx_config "$name"
-	
+
 	# Remove from registry
 	remove_from_registry "$name"
-	
+
+	release_lock
+
         if [ -n "$JSON_MODE" ]; then
                 json_emit '{result:"removed", name:$n}' --arg n "$name"
         elif [ -z "$QUIET" ]; then

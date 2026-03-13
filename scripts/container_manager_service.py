@@ -42,6 +42,7 @@ import hashlib
 import time
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -69,6 +70,10 @@ if not Path(DB_PATH).exists() and legacy_db.exists():
         pass
 
 app = Flask(__name__)
+
+# Serialize mutating operations (create, remove, start, stop, restart) to prevent
+# concurrent subprocess calls from corrupting shared files (registry JSON, nginx configs).
+_mutate_lock = threading.Lock()
 
 
 def docker_info_available() -> bool:
@@ -313,7 +318,8 @@ def create_container():
     args = ["create"]
     if requested_name:
         args.append(requested_name)
-    rc, raw, data = _run_script(args, auth_info["key_hash"], expect_json=True)
+    with _mutate_lock:
+        rc, raw, data = _run_script(args, auth_info["key_hash"], expect_json=True)
     if rc != 0 or not isinstance(data, dict):
         return jsonify({"error": "Sandbox create failed", "details": raw, "exitCode": rc}), 500
     sandbox_name = data.get("name") or requested_name
@@ -379,7 +385,8 @@ def start_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    rc, raw, data = _run_script(["start", cid], auth_info["key_hash"], expect_json=True)
+    with _mutate_lock:
+        rc, raw, data = _run_script(["start", cid], auth_info["key_hash"], expect_json=True)
     if rc != 0:
         return jsonify({"error": "Start failed", "details": raw, "exitCode": rc}), 500
     return get_container(cid)
@@ -389,7 +396,8 @@ def stop_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    rc, raw, data = _run_script(["stop", cid], auth_info["key_hash"], expect_json=False)
+    with _mutate_lock:
+        rc, raw, data = _run_script(["stop", cid], auth_info["key_hash"], expect_json=False)
     if rc != 0:
         return jsonify({"error": "Stop failed", "details": raw, "exitCode": rc}), 500
     return get_container(cid)
@@ -399,7 +407,8 @@ def restart_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    rc, raw, data = _run_script(["restart", cid], auth_info["key_hash"], expect_json=False)
+    with _mutate_lock:
+        rc, raw, data = _run_script(["restart", cid], auth_info["key_hash"], expect_json=False)
     if rc != 0:
         return jsonify({"error": "Restart failed", "details": raw, "exitCode": rc}), 500
     return get_container(cid)
@@ -409,7 +418,8 @@ def delete_container(cid: str):
     auth_info, err = require_api_key()
     if err:
         return err
-    rc, raw, _ = _run_script(["remove", cid], auth_info["key_hash"], expect_json=False)
+    with _mutate_lock:
+        rc, raw, _ = _run_script(["remove", cid], auth_info["key_hash"], expect_json=False)
     if rc != 0:
         return jsonify({"error": "Remove failed", "details": raw, "exitCode": rc}), 500
     # DB cleanup (best-effort)
