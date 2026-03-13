@@ -1,5 +1,6 @@
 # Repository Guidelines
 
+
 ## Project Structure & Module Organization
 - `scripts/` contains the host-facing Python services and shell wrappers; `container_manager_service.py` exposes the REST API and `albert-ai-sandbox-manager.sh` orchestrates Docker lifecycle tasks.
 - `docker/` holds the sandbox desktop image (Dockerfile, startup script, assets). Rebuild the image after any change here.
