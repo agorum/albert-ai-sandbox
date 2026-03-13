@@ -419,6 +419,7 @@ def restart_container(cid: str):
     return get_container(cid)
 
 @app.patch("/containers/<cid>/persistent")
+@app.post("/containers/<cid>/persistent")
 def set_persistent(cid: str):
     auth_info, err = require_api_key()
     if err:
