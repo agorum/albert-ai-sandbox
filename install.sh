@@ -145,8 +145,9 @@ ensure_single_include_line() {
 	local file_path="$1"
 	local include_line="$2"
 
-	# Backup original once per run
-	cp "$file_path" "${file_path}.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+	# Backup original to a separate directory (not sites-enabled, which nginx auto-loads)
+	mkdir -p "${INSTALL_DIR}/nginx"
+	cp "$file_path" "${INSTALL_DIR}/nginx/$(basename "$file_path").backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
 
 	# Remove all old markers and include lines (also catches stray variants)
 	sed -i '/# Albert Sandbox Configs/d' "$file_path"
@@ -171,7 +172,9 @@ ensure_client_max_body_size() {
 	local file_path="$1"
 	local setting_line="client_max_body_size 0;"
 
-	cp "$file_path" "${file_path}.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+	# Backup original to a separate directory (not sites-enabled, which nginx auto-loads)
+	mkdir -p "${INSTALL_DIR}/nginx"
+	cp "$file_path" "${INSTALL_DIR}/nginx/$(basename "$file_path").backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
 
 	awk -v cfg_line="$setting_line" '
 		BEGIN { inserted=0 }
