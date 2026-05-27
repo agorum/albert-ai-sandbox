@@ -40,6 +40,23 @@ resolve_db_path() {
 resolve_db_path
 export DB_PATH  # ensure python heredocs can read it
 
+# Returns the public base URL used in API responses and banner output.
+# - If ALBERT_PUBLIC_URL is set (e.g. https://sandbox.host.domain), it is
+#   returned verbatim with a trailing slash stripped so concatenations like
+#   "$base/$name/" stay clean.
+# - Otherwise we fall back to the legacy behaviour: http:// + primary IPv4
+#   from `hostname -I`. This keeps installations without a public FQDN
+#   working unchanged.
+public_base_url() {
+	if [ -n "${ALBERT_PUBLIC_URL:-}" ]; then
+		printf '%s' "${ALBERT_PUBLIC_URL%/}"
+		return 0
+	fi
+	local hostip
+	hostip=$(hostname -I | awk '{print $1}')
+	printf 'http://%s' "$hostip"
+}
+
 # Extended modes
 JSON_MODE="${ALBERT_JSON:-}"          # set to any non-empty for JSON output
 OWNER_KEY_HASH_ENV="${ALBERT_OWNER_KEY_HASH:-}"  # passed in by REST service
@@ -295,16 +312,19 @@ PY
 
 lookup_api_key_id_python() {
 	local hash="$1"
-	python3 - <<PY 2>/dev/null || true
+	# Pass lookup hash as env var to avoid shell-to-python string interpolation.
+	# Quoted heredoc ('PY') prevents bash variable expansion inside the heredoc body.
+	LOOKUP_HASH="$hash" python3 - <<'PY' 2>/dev/null || true
 import sqlite3, os
-db=os.environ.get('DB_PATH')
+db = os.environ.get('DB_PATH')
+lookup_hash = os.environ.get('LOOKUP_HASH', '')
 if not db or not os.path.exists(db):
-		print("")
-		raise SystemExit
-con=sqlite3.connect(db)
-cur=con.cursor()
-cur.execute("SELECT id FROM api_keys WHERE key_hash=? LIMIT 1", ("$hash",))
-r=cur.fetchone()
+    print("")
+    raise SystemExit
+con = sqlite3.connect(db)
+cur = con.cursor()
+cur.execute("SELECT id FROM api_keys WHERE key_hash=? LIMIT 1", (lookup_hash,))
+r = cur.fetchone()
 print(r[0] if r else "")
 con.close()
 PY
@@ -662,21 +682,33 @@ create_container() {
 		LABEL_ARGS+=(--label "albert.apikey_hash=$OWNER_KEY_HASH_ENV")
 	fi
 
+	# Generate per-container secrets.
+	# VNC: tightvncserver truncates to 8 chars, so we stay inside that limit.
+	# File service token: 32 hex chars (128 bits).
+	local vnc_password
+	vnc_password="$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c 8)"
+	local filesvc_token
+	filesvc_token="$(openssl rand -hex 16)"
+	trace_log "generated per-container credentials name='$name'"
+
 	# Create Docker container
+	# Port publishing is bound to 127.0.0.1 so the container ports are only
+	# reachable via the local nginx reverse proxy, not from the public internet.
         docker run -d \
                 "${LABEL_ARGS[@]}" \
                 --name "$name" \
                 --restart unless-stopped \
                 --cap-add=SYS_ADMIN \
                 --security-opt seccomp=unconfined \
-		-p ${novnc_port}:6081 \
-		-p ${vnc_port}:5901 \
-		-p ${mcphub_port}:3000 \
-		-p ${filesvc_port}:4000 \
+		-p 127.0.0.1:${novnc_port}:6081 \
+		-p 127.0.0.1:${vnc_port}:5901 \
+		-p 127.0.0.1:${mcphub_port}:3000 \
+		-p 127.0.0.1:${filesvc_port}:4000 \
 		-e VNC_PORT=5901 \
 		-e NO_VNC_PORT=6081 \
 		-e MCP_HUB_PORT=3000 \
 		-e FILE_SERVICE_PORT=4000 \
+		-e VNC_PASSWORD="$vnc_password" \
 		-v ${name}_data:/home/ubuntu \
                 --shm-size=2g \
                 "$DOCKER_IMAGE" >/dev/null
@@ -698,16 +730,17 @@ create_container() {
 		# Register in registry
 		local persistent_val="false"
 		[ -n "$PERSISTENT" ] && persistent_val="true"
-		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port" "$persistent_val"
+		add_to_registry "$name" "$novnc_port" "$vnc_port" "$mcphub_port" "$filesvc_port" "$persistent_val" "$vnc_password" "$filesvc_token"
 
 		# Insert mapping into containers table (ignore if already exists)
 		CONTAINER_ID=$(docker inspect -f '{{ .Id }}' "$name" 2>/dev/null || true)
 		if [ -n "$CONTAINER_ID" ] && [ -n "$API_KEY_DB_ID" ]; then
 			sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO containers(api_key_id, container_id, name, image, created_at) VALUES($API_KEY_DB_ID,'$CONTAINER_ID','$name','$DOCKER_IMAGE', strftime('%s','now'));" 2>/dev/null || true
 		fi
-		
-		# Configure nginx (includes file service)
-		create_nginx_config "$name" "$novnc_port" "$mcphub_port" "$filesvc_port"
+
+		# Configure nginx (includes file service). VNC password is embedded
+		# into the redirect URL so noVNC autoconnect still works per-container.
+		create_nginx_config "$name" "$novnc_port" "$mcphub_port" "$filesvc_port" "$vnc_password"
 		
 		# Create global MCP Hub configuration (only once)
 		if [ ! -f "${NGINX_CONF_DIR}/albert-mcphub-global.conf" ]; then
@@ -716,28 +749,33 @@ create_container() {
 
 		release_lock
 
+		local base
+		base=$(public_base_url)
 		if [ -n "$JSON_MODE" ]; then
-			HOSTIP=$(hostname -I | awk '{print $1}')
-			json_emit '{result:"created", name:$name, ownerHash:$ownerHash, persistent:$persistent, ports:{novnc:$novnc_port,vnc:$vnc_port,mcphub:$mcphub_port,filesvc:$filesvc_port}, urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), filesUpload:("http://"+$host+"/"+$name+"/files/upload"), filesDownloadPattern:("http://"+$host+"/"+$name+"/files/download?path=/tmp/albert-files/<uuid.ext>")}}' \
+			json_emit '{result:"created", name:$name, ownerHash:$ownerHash, persistent:$persistent, vncPassword:$vncPassword, fileServiceToken:$fileServiceToken, ports:{novnc:$novnc_port,vnc:$vnc_port,mcphub:$mcphub_port,filesvc:$filesvc_port}, urls:{desktop:($host+"/"+$name+"/"), mcphub:($host+"/"+$name+"/mcphub/mcp"), filesUpload:($host+"/"+$name+"/files/upload"), filesDownloadPattern:($host+"/"+$name+"/files/download?path=/tmp/albert-files/<uuid.ext>")}}' \
 				--arg name "$name" \
 				--arg novnc_port "$novnc_port" \
 				--arg vnc_port "$vnc_port" \
 				--arg mcphub_port "$mcphub_port" \
 				--arg filesvc_port "$filesvc_port" \
 				--arg ownerHash "$OWNER_KEY_HASH_ENV" \
+				--arg vncPassword "$vnc_password" \
+				--arg fileServiceToken "$filesvc_token" \
 				--argjson persistent "$persistent_val" \
-				--arg host "$HOSTIP"
+				--arg host "$base"
 		else
 			echo -e "${GREEN}========================================${NC}"
 			echo -e "${GREEN}Sandbox container created successfully!${NC}"
 			echo -e "${GREEN}========================================${NC}"
 			echo -e "${GREEN}Name: ${name}${NC}"
-			echo -e "${GREEN}DESKTOP: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
-			echo -e "${GREEN}MCP URL: http://$(hostname -I | awk '{print $1}')/${name}/mcphub/mcp${NC}"
-			echo -e "${GREEN}File Service Upload: http://$(hostname -I | awk '{print $1}')/${name}/files/upload${NC}"
-			echo -e "${GREEN}File Service Download: http://$(hostname -I | awk '{print $1}')/${name}/files/download?path=/tmp/albert-files/<uuid.ext>${NC}"
+			echo -e "${GREEN}DESKTOP: ${base}/${name}/${NC}"
+			echo -e "${GREEN}MCP URL: ${base}/${name}/mcphub/mcp${NC}"
+			echo -e "${GREEN}File Service Upload: ${base}/${name}/files/upload${NC}"
+			echo -e "${GREEN}File Service Download: ${base}/${name}/files/download?path=/tmp/albert-files/<uuid.ext>${NC}"
+			echo -e "${YELLOW}VNC Password: ${vnc_password}${NC}"
+			echo -e "${YELLOW}File Service Token (Bearer): ${filesvc_token}${NC}"
 			echo -e "${YELLOW}MCP Hub Bearer token: albert${NC}"
-			echo -e "${YELLOW}Important: Note the URL - the name is the access protection!${NC}"
+			echo -e "${YELLOW}Important: secrets above are shown once - store them safely.${NC}"
 		fi
         else
                 release_lock
@@ -830,12 +868,13 @@ start_container() {
 			fi
 			return 1
 		fi
+		local base
+		base=$(public_base_url)
 		if [ -n "$JSON_MODE" ]; then
-			local hostip=$(hostname -I | awk '{print $1}')
-			json_emit '{result:"started", name:$n, url:($h+"/"+$n+"/"), host:$h}' --arg n "$name" --arg h "http://$hostip"
+			json_emit '{result:"started", name:$n, url:($h+"/"+$n+"/"), host:$h}' --arg n "$name" --arg h "$base"
 		elif [ -z "$QUIET" ]; then
 			echo -e "${GREEN}Container '$name' started${NC}"
-			echo -e "${GREEN}URL: http://$(hostname -I | awk '{print $1}')/${name}/${NC}"
+			echo -e "${GREEN}URL: ${base}/${name}/${NC}"
 		fi
         else
                 if [ -n "$JSON_MODE" ]; then
@@ -996,7 +1035,8 @@ show_single_status() {
 			stats=""
 		fi
 	fi
-	local hostip=$(hostname -I | awk '{print $1}')
+	local base
+	base=$(public_base_url)
         if [ "$mode" = "json" ] || [ -n "$JSON_MODE" ]; then
                 jq -n \
                         --arg name "$name" \
@@ -1009,8 +1049,8 @@ show_single_status() {
 			--arg filesvc "$filesvc_port" \
 			--arg stats "$stats" \
 			--arg ownerHash "$OWNER_KEY_HASH_ENV" \
-			--arg host "$hostip" \
-                        '{name:$name,status:$status,created:$created,persistent:$persistent,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc},resources:$stats,urls:{desktop:("http://"+$host+"/"+$name+"/"), mcphub:("http://"+$host+"/"+$name+"/mcphub/mcp"), files:("http://"+$host+"/"+$name+"/files/")}}'
+			--arg host "$base" \
+                        '{name:$name,status:$status,created:$created,persistent:$persistent,ownerHash:$ownerHash,ports:{novnc:$novnc,vnc:$vnc,mcphub:$mcphub,filesvc:$filesvc},resources:$stats,urls:{desktop:($host+"/"+$name+"/"), mcphub:($host+"/"+$name+"/mcphub/mcp"), files:($host+"/"+$name+"/files/")}}'
                 __ALBERT_JSON_EMITTED=1
         else
                 echo -e "${BLUE}Container: ${NC}$name"
@@ -1024,7 +1064,7 @@ show_single_status() {
 		else
 			echo -e "${BLUE}Docker Status: ${RED}Stopped${NC}"
 		fi
-		echo -e "${BLUE}URL: ${NC}http://${hostip}/${name}/"
+		echo -e "${BLUE}URL: ${NC}${base}/${name}/"
 	fi
 }
 

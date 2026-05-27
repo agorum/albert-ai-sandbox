@@ -1,0 +1,28 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# Local scratch / context files (audits, notes, ad-hoc dumps)
+.context/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Runtime / install artifacts
+data/
+config/container-registry.json
+nginx/*.backup.*

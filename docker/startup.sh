@@ -3,10 +3,24 @@
 echo "Starting VNC server with 1280x720 resolution..."
 rm -rf /tmp/.X*-lock /tmp/.X11-unix
 
-# Automatically set password "albert"
+# VNC password: prefer env VNC_PASSWORD; otherwise generate a random one.
+# tightvnc truncates passwords at 8 chars, so we cap/generate accordingly.
+if [ -z "${VNC_PASSWORD}" ]; then
+	VNC_PASSWORD="$(openssl rand -base64 9 | tr -dc 'A-Za-z0-9' | head -c 8)"
+	echo "Generated random VNC password (length 8)."
+fi
+VNC_PASSWORD_TRUNC="$(printf '%s' "${VNC_PASSWORD}" | cut -c1-8)"
+export VNC_PASSWORD_TRUNC
+
 su - ubuntu -c "mkdir -p ~/.vnc"
-su - ubuntu -c "echo 'albert' | vncpasswd -f > ~/.vnc/passwd"
+su - ubuntu -c "printf '%s' \"${VNC_PASSWORD_TRUNC}\" | vncpasswd -f > ~/.vnc/passwd"
 su - ubuntu -c "chmod 600 ~/.vnc/passwd"
+
+# File service token: must be provided via env; otherwise file service refuses requests.
+if [ -z "${FILE_SERVICE_TOKEN}" ]; then
+	echo "Warning: FILE_SERVICE_TOKEN not set; file service will reject all requests." >&2
+fi
+export FILE_SERVICE_TOKEN
 
 # Start VNC with 1280x720 resolution
 su - ubuntu -c 'tightvncserver :1 -geometry 1280x720 -depth 24 -rfbauth ~/.vnc/passwd' &

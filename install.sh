@@ -140,7 +140,11 @@ echo -e "${YELLOW}Configuring nginx...${NC}"
 DEFAULT_SITE="${NGINX_ENABLED_DIR}/default"
 INCLUDE_LINE="include ${NGINX_CONF_DIR}/albert-*.conf;"
 
-# Helper to ensure exactly one include line after 'server_name _;' using awk (robust vs sed newlines)
+# Helper to ensure the albert include line is present after every relevant
+# server_name directive. "Relevant" = the default HTTP block (server_name _;)
+# AND any certbot-managed TLS block (server_name ...; # managed by Certbot).
+# Both must include albert-*.conf so /<container>/ and /manager/ work over
+# HTTPS as well as HTTP.
 ensure_single_include_line() {
 	local file_path="$1"
 	local include_line="$2"
@@ -154,17 +158,15 @@ ensure_single_include_line() {
 	sed -i '/# ALBERT Sandbox Configs/d' "$file_path"
 	sed -i '/include .*albert-\*.conf;/d' "$file_path"
 
-	# Insert a single include block after the first server_name _; line
+	# Insert an include block after each matching server_name line.
 	awk -v inc_line="$include_line" '
-		BEGIN { inserted=0 }
 		{
 			print $0
-			if (!inserted && $0 ~ /server_name[[:space:]]+_;/) {
+			if ($0 ~ /server_name[[:space:]]+_;/ || $0 ~ /server_name[[:space:]].*managed by Certbot/) {
 				print "\t# Albert Sandbox Configs"
 				print "\t" inc_line
-				inserted=1
 			}
-	}
+		}
 	' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
 }
 
@@ -176,13 +178,14 @@ ensure_client_max_body_size() {
 	mkdir -p "${INSTALL_DIR}/nginx"
 	cp "$file_path" "${INSTALL_DIR}/nginx/$(basename "$file_path").backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
 
+	# Drop prior occurrences so this is idempotent across re-runs.
+	sed -i '/^[[:space:]]*client_max_body_size[[:space:]]\+0;/d' "$file_path"
+
 	awk -v cfg_line="$setting_line" '
-		BEGIN { inserted=0 }
 		{
 			print $0
-			if (!inserted && $0 ~ /server_name[[:space:]]+_;/) {
+			if ($0 ~ /server_name[[:space:]]+_;/ || $0 ~ /server_name[[:space:]].*managed by Certbot/) {
 				print "\t" cfg_line
-				inserted=1
 			}
 		}
 	' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
@@ -190,22 +193,28 @@ ensure_client_max_body_size() {
 
 if [ -f "${DEFAULT_SITE}" ]; then
 	echo -e "${YELLOW}Reconciling nginx default site includes...${NC}"
+
+	# Count target server_name lines (the plain default + any certbot TLS block).
+	target_count=$(grep -cE 'server_name[[:space:]]+_;|server_name[[:space:]].*managed by Certbot' "${DEFAULT_SITE}" 2>/dev/null || true)
+	target_count=${target_count:-0}
 	include_count=$(grep -c "include .*albert-\\*.conf;" "${DEFAULT_SITE}" 2>/dev/null || true)
 	include_count=${include_count:-0}
 
-	if [ "${include_count}" -ne 1 ]; then
+	if [ "${include_count}" -ne "${target_count}" ] || [ "${target_count}" -eq 0 ]; then
 		ensure_single_include_line "${DEFAULT_SITE}" "${INCLUDE_LINE}"
-		echo -e "${GREEN}✓ Nginx include normalized to a single line${NC}"
+		echo -e "${GREEN}✓ Nginx includes normalized (target=${target_count})${NC}"
 	else
-		echo -e "${GREEN}✓ Nginx include already present (1)${NC}"
+		echo -e "${GREEN}✓ Nginx include already present in all ${include_count} server blocks${NC}"
 	fi
 
-	if ! grep -Eq '^[[:space:]]*client_max_body_size[[:space:]]+0;' "${DEFAULT_SITE}"; then
+	cmbs_count=$(grep -cE '^[[:space:]]*client_max_body_size[[:space:]]+0;' "${DEFAULT_SITE}" 2>/dev/null || true)
+	cmbs_count=${cmbs_count:-0}
+	if [ "${cmbs_count}" -ne "${target_count}" ]; then
 		echo -e "${YELLOW}Adding client_max_body_size 0 to nginx default site...${NC}"
 		ensure_client_max_body_size "${DEFAULT_SITE}"
-		echo -e "${GREEN}✓ client_max_body_size configured for default site${NC}"
+		echo -e "${GREEN}✓ client_max_body_size configured in ${target_count} block(s)${NC}"
 	else
-		echo -e "${GREEN}✓ client_max_body_size already present in default site${NC}"
+		echo -e "${GREEN}✓ client_max_body_size already present in all server blocks${NC}"
 	fi
 fi
 
@@ -240,6 +249,13 @@ ExecStart=/usr/bin/env bash -c '[ -x /opt/albert-ai-sandbox-manager/venv/bin/pyt
 Restart=on-failure
 RestartSec=5
 Environment=MANAGER_PORT=5001
+# Bind only to loopback so the manager API is reachable exclusively via the
+# nginx /manager/ reverse proxy (TLS, rate limit, access log). To expose it
+# directly on a different interface, override with a drop-in:
+#   /etc/systemd/system/albert-container-manager.service.d/bind.conf
+#   [Service]
+#   Environment=MANAGER_BIND_HOST=0.0.0.0
+Environment=MANAGER_BIND_HOST=127.0.0.1
 Environment=MANAGER_DB_PATH=/opt/albert-ai-sandbox-manager/data/manager.db
 Environment=MANAGER_DATA_DIR=/opt/albert-ai-sandbox-manager/data/containers
 # Optional: restrict privileges a bit (comment out if causing issues)
@@ -304,7 +320,11 @@ if [ ! -f "$MANAGER_NGX_CONF" ]; then
 cat > "$MANAGER_NGX_CONF" <<'EOF'
 # Reverse proxy for ALBERT Container Manager REST API
 location /manager/ {
-	proxy_pass http://localhost:5001/;
+	# Rate-limit: zone defined in /etc/nginx/conf.d/albert-security.conf
+	# (setup-tls.sh installs it). If the zone is missing, nginx -t will fail;
+	# make sure setup-tls.sh ran before reloading nginx.
+	limit_req zone=albert_manager burst=20 nodelay;
+	proxy_pass http://127.0.0.1:5001/;
 	proxy_http_version 1.1;
 	proxy_set_header Upgrade $http_upgrade;
 	proxy_set_header Connection "upgrade";
@@ -350,16 +370,19 @@ else
 	echo -e "${RED}✗ Nginx is not running${NC}"
 fi
 
-# Check final nginx configuration
+# Check final nginx configuration: one include per relevant server block
+# (default '_' block plus any certbot-managed TLS block).
 echo -e "${YELLOW}Checking final nginx configuration...${NC}"
 include_count=$(grep -c "include.*albert-\*.conf;" /etc/nginx/sites-enabled/default 2>/dev/null || true)
 include_count=${include_count:-0}
-if [ "$include_count" -eq 1 ]; then
-	echo -e "${GREEN}✓ Nginx include correctly configured (1 include found)${NC}"
-elif [ "$include_count" -gt 1 ]; then
-	echo -e "${RED}⚠ Warning: Multiple includes found ($include_count)${NC}"
-	echo -e "${YELLOW}  Run: nano /etc/nginx/sites-enabled/default${NC}"
-	echo -e "${YELLOW}  and remove duplicate include lines${NC}"
+target_count=$(grep -cE 'server_name[[:space:]]+_;|server_name[[:space:]].*managed by Certbot' /etc/nginx/sites-enabled/default 2>/dev/null || true)
+target_count=${target_count:-0}
+if [ "$include_count" -eq "$target_count" ] && [ "$target_count" -gt 0 ]; then
+	echo -e "${GREEN}✓ Nginx include correctly configured (${include_count}/${target_count} blocks)${NC}"
+elif [ "$include_count" -lt "$target_count" ]; then
+	echo -e "${YELLOW}⚠ Missing include(s): ${include_count}/${target_count} blocks covered${NC}"
+elif [ "$include_count" -gt "$target_count" ]; then
+	echo -e "${YELLOW}⚠ Extra includes found: ${include_count} vs ${target_count} target blocks${NC}"
 else
 	echo -e "${YELLOW}⚠ No nginx include found${NC}"
 fi

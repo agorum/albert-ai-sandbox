@@ -42,6 +42,8 @@ add_to_registry() {
 	local mcphub_port=$4
 	local filesvc_port=${5:-}
 	local persistent=${6:-false}
+	local vnc_password=${7:-}
+	local filesvc_token=${8:-}
 
 	init_registry
 
@@ -53,17 +55,20 @@ add_to_registry() {
 			--arg vnc_port "$vnc_port" \
 			--arg mcphub_port "${mcphub_port:-}" \
 			--arg filesvc_port "${filesvc_port:-}" \
+			--arg vnc_password "$vnc_password" \
+			--arg filesvc_token "$filesvc_token" \
 			--arg created "$(date -Iseconds)" \
 			--argjson persistent "$persistent" \
-			'{name: $name, port: $port, vnc_port: $vnc_port, mcphub_port: $mcphub_port, filesvc_port: $filesvc_port, created: $created, persistent: $persistent}')
+			'{name: $name, port: $port, vnc_port: $vnc_port, mcphub_port: $mcphub_port, filesvc_port: $filesvc_port, vnc_password: $vnc_password, filesvc_token: $filesvc_token, created: $created, persistent: $persistent}')
 	else
 		local entry=$(jq -n \
 			--arg name "$name" \
 			--arg port "$port" \
 			--arg vnc_port "$vnc_port" \
+			--arg vnc_password "$vnc_password" \
 			--arg created "$(date -Iseconds)" \
 			--argjson persistent "$persistent" \
-			'{name: $name, port: $port, vnc_port: $vnc_port, created: $created, persistent: $persistent}')
+			'{name: $name, port: $port, vnc_port: $vnc_port, vnc_password: $vnc_password, created: $created, persistent: $persistent}')
 	fi
 
 	jq ". += [$entry]" "$REGISTRY_FILE" > "${REGISTRY_FILE}.tmp" && mv "${REGISTRY_FILE}.tmp" "$REGISTRY_FILE"

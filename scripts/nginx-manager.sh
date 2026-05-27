@@ -13,13 +13,22 @@ create_nginx_config() {
     local novnc_port="$2"
     local mcphub_port="${3:-}"
     local filesvc_port="${4:-}"
+    local vnc_password="${5:-}"
 
     local cfg="${NGINX_CONF_DIR}/albert-${container_name}.conf"
+
+    # URL-encode the VNC password for safe inclusion in the redirect query string.
+    local vnc_password_enc
+    if [ -n "$vnc_password" ] && command -v python3 >/dev/null 2>&1; then
+        vnc_password_enc=$(VNC_PW="$vnc_password" python3 -c 'import os,urllib.parse;print(urllib.parse.quote(os.environ["VNC_PW"],safe=""))')
+    else
+        vnc_password_enc="$vnc_password"
+    fi
 
     cat > "$cfg" <<EOF
 # Auto-redirect to noVNC with correct websocket path
 location = /${container_name}/ {
-    return 301 /${container_name}/vnc.html?path=${container_name}/websockify&password=albert&autoconnect=true&resize=scale;
+    return 301 /${container_name}/vnc.html?path=${container_name}/websockify&password=${vnc_password_enc}&autoconnect=true&resize=scale;
 }
 
 # Main proxy for noVNC interface
@@ -173,7 +182,9 @@ _ensure_include_and_reload() {
     nginx -t && systemctl reload nginx
 }
 
-# Internal: ensure exactly one include line exists after server_name _;
+# Internal: ensure the albert include line is present in every relevant
+# server block (default '_' block and any certbot-managed TLS block). This
+# mirrors the logic in install.sh so per-container nginx writes stay in sync.
 _ensure_single_include_line() {
     local file_path="$1"
     local include_line="$2"
@@ -183,36 +194,42 @@ _ensure_single_include_line() {
     sed -i '/# ALBERT Sandbox Configs/d' "$file_path"
     sed -i '/include .*albert-\*.conf;/d' "$file_path"
 
-    # Insert once after server_name _; using awk to avoid sed escape quirks
+    # Insert after every matching server_name line.
     awk -v inc_line="$include_line" '
-        BEGIN { inserted=0 }
         {
             print $0
-            if (!inserted && $0 ~ /server_name[[:space:]]+_;/) {
+            if ($0 ~ /server_name[[:space:]]+_;/ || $0 ~ /server_name[[:space:]].*managed by Certbot/) {
                 print "\t# Albert Sandbox Configs"
                 print "\t" inc_line
-                inserted=1
             }
         }
     ' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
 }
 
-# Tidies duplicate include lines in default site
+# Tidies include lines in the default site. After every operation we expect
+# exactly one include per target server block (1 for plain HTTP, 2 once TLS
+# is enabled). Only rewrite if the count diverges from that target. Warnings
+# are written to stderr so they do not contaminate JSON stdout consumed by
+# container_manager_service.
 cleanup_nginx_includes() {
     local config_file="${NGINX_ENABLED_DIR}/default"
-    # Generic regex pattern to match any albert-*.conf include lines
     local pattern='include .*albert-\*.conf;'
 
-    local count=$(grep -c "$pattern" "$config_file" 2>/dev/null || echo 0)
-    if [ "$count" -gt 1 ]; then
-        echo -e "${YELLOW}Cleaning up duplicate nginx includes (found: $count)...${NC}"
-        cp "$config_file" "${config_file}.backup.$(date +%Y%m%d_%H%M%S)"
-        # Remove all our include markers/lines
-        sed -i '/# Albert Sandbox Configs/d' "$config_file"
-        sed -i '/# ALBERT Sandbox Configs/d' "$config_file"
-        sed -i "/$pattern/d" "$config_file"
-        # Add a single include line back using helper
-        _ensure_single_include_line "$config_file" "include ${NGINX_CONF_DIR}/albert-*.conf;"
-        echo -e "${GREEN}✓ Nginx includes cleaned up${NC}"
+    local count
+    count=$(grep -c "$pattern" "$config_file" 2>/dev/null || echo 0)
+    local target
+    target=$(grep -cE 'server_name[[:space:]]+_;|server_name[[:space:]].*managed by Certbot' "$config_file" 2>/dev/null || echo 0)
+
+    if [ "$target" -eq 0 ]; then
+        return 0
     fi
+    if [ "$count" -eq "$target" ]; then
+        return 0
+    fi
+    echo "Reconciling nginx includes (have=$count, want=$target)..." >&2
+    # Never place backups inside sites-enabled: nginx globs that directory.
+    local backup_dir="/opt/albert-ai-sandbox-manager/nginx/backups"
+    mkdir -p "$backup_dir"
+    cp "$config_file" "$backup_dir/default.backup.$(date +%Y%m%d_%H%M%S)"
+    _ensure_single_include_line "$config_file" "include ${NGINX_CONF_DIR}/albert-*.conf;"
 }
