@@ -2,7 +2,7 @@
 
 
 ## Project Structure & Module Organization
-- `scripts/albert_sandbox/` is the manager core (Python package): `sandboxes.py` lifecycle, `clients.py` clients/quotas, `reconcile.py` cleanup, `watcher.py` housekeeping, `web.py` REST API + admin API, `cli.py` CLI, `storage.py` disk images, `nginxctl.py` routes, `dockerctl.py` docker CLI wrapper, `db.py` schema/migrations, `static/admin/` admin web UI (vanilla JS, no build step).
+- `scripts/albert_sandbox/` is the manager core (Python package): `sandboxes.py` lifecycle, `clients.py` clients/quotas, `reconcile.py` cleanup, `watcher.py` housekeeping, `web.py` REST API + admin API, `cli.py` CLI, `storage.py` disk images, `nginxctl.py` routes, `netctl.py` network isolation (sandbox network + iptables), `dockerctl.py` docker CLI wrapper, `db.py` schema/migrations, `static/admin/` admin web UI (vanilla JS, no build step).
 - `scripts/container_manager_service.py`, `scripts/inactivity_watcher.py`, `scripts/albert-ai-sandbox-manager.sh`, `scripts/api-key-manager.sh` are thin entry points kept for their historic names.
 - `docker/` holds the sandbox desktop image (Dockerfile, startup script, assets). Rebuild the image after any change here (`install.sh` does it automatically when `docker/` changed).
 - `nginx/` holds templates installed by `install.sh` / `setup-tls.sh`.
@@ -18,6 +18,8 @@
 - API payloads use lowerCamelCase keys (`autoStart`, `memoryMb`); keep schema additions backwards compatible — clients (ALBERT | AI) depend on the existing field names.
 - Database changes go through `db.py` (`init_db` must stay idempotent; bump `SCHEMA_VERSION` and add migration steps for existing installations).
 - Every operation that creates host resources must be covered by `reconcile.py` so leftovers are cleaned up.
+- Sandboxes must never run outside the isolated network or without the firewall rules: call `netctl.ensure_ready()` before creating or starting containers, and keep `sandboxes.HARDENING_ARGS` for every `docker run`.
+- `docker/Dockerfile` pins versions via `ARG`s; never reintroduce `@latest` or runtime `npx` downloads.
 
 ## Testing Guidelines
 - New tests live in `tests/test_<feature>.py` and use the fixtures in `tests/conftest.py` (`env`, `make_client`).

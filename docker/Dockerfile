@@ -1,5 +1,17 @@
 FROM ubuntu:22.04
 
+# Pinned versions of everything the sandbox runs on top of Ubuntu - tested
+# together. Bump deliberately, rebuild (install.sh rebuilds when this file
+# changes), test, commit. OS packages, Google Chrome and Firefox are not pinned:
+# they come from their vendors' repositories with security updates.
+ARG NODE_MAJOR=26
+ARG MCPHUB_VERSION=1.2.3
+ARG PLAYWRIGHT_MCP_VERSION=0.0.85
+ARG BASH_MCP_VERSION=1.1.0
+ARG I18NEXT_VERSION=27.1.1
+ARG I18NEXT_FS_BACKEND_VERSION=2.6.11
+ARG FLASK_VERSION=3.1.3
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:1
 ENV VNC_PORT=5901
@@ -35,29 +47,34 @@ RUN apt-get update && apt-get upgrade -y && \
 	&& apt-get clean
 
 # Python dependencies for the file service
-RUN pip3 install --no-cache-dir flask
+RUN pip3 install --no-cache-dir "flask==${FLASK_VERSION}"
 
-# Install Node.js (Latest LTS) and npm for MCP Hub
-RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && \
-	apt-get install -y nodejs && \
-	npm install -g npm@latest
+# Node.js (pinned major line) from NodeSource; npm as bundled with Node
+RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
+	apt-get install -y nodejs
 
-# Install MCP Hub and MCP Servers
-# NOTE: Work around missing runtime dep in mcphub by installing i18next into mcphub's own node_modules
-RUN npm install -g @samanhappy/mcphub@latest && \
-	( npm i -g --omit=dev i18next@latest i18next-fs-backend@latest || true ) && \
-    mkdir -p /app/frontend && \
+# MCP Hub and the MCP servers it starts - installed at build time so nothing is
+# downloaded when a sandbox starts (mcp_settings.json calls the global binaries).
+# i18next is a runtime dependency missing from mcphub's package.
+RUN npm install -g --no-fund --no-audit \
+		"@samanhappy/mcphub@${MCPHUB_VERSION}" \
+		"@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+		"bash-mcp@${BASH_MCP_VERSION}" \
+		"i18next@${I18NEXT_VERSION}" \
+		"i18next-fs-backend@${I18NEXT_FS_BACKEND_VERSION}" && \
+	mkdir -p /app/frontend && \
 	ln -s /usr/lib/node_modules/@samanhappy/mcphub/frontend/dist /app/frontend/dist && \
-	cd /app && \
-	git clone https://github.com/samanhappy/mcphub.git && \
-	cp mcphub/package.json . && \
-	npm install -g @playwright/mcp@latest
+	cp /usr/lib/node_modules/@samanhappy/mcphub/package.json /app/package.json && \
+	npm cache clean --force
 
 # Fallback: extend Node module resolution to global path
 ENV NODE_PATH=/usr/lib/node_modules
 
-# Install additional dependencies for Playwright MCP
-RUN npx playwright install --with-deps chromium
+# Browser system libraries plus Playwright's Chromium (fallback browser), using
+# exactly the Playwright version bundled with @playwright/mcp.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN node /usr/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js install --with-deps chromium && \
+	chmod -R a+rX /opt/ms-playwright
 
 # Install Firefox from Mozilla's official APT repository (not Snap). Unlike the
 # Launchpad PPA this needs no Launchpad API access during the build. The
@@ -72,16 +89,15 @@ RUN install -d -m 0755 /etc/apt/keyrings && \
 	apt-get update && \
 	apt-get install -y firefox
 
-# Install Google Chrome (directly from Google)
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && \
-	echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+# Install Google Chrome (directly from Google, key in its own keyring - apt-key is deprecated)
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg && \
+	echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
 	apt-get update && \
 	apt-get install -y google-chrome-stable
 
-# Chromium as alternative (without Snap)
-RUN echo "deb http://archive.ubuntu.com/ubuntu/ focal main universe" >> /etc/apt/sources.list && \
-	apt-get update && \
-	apt-get install -y chromium-browser || true
+# (No separate Chromium: Ubuntu 22.04 only ships it as a snap; Playwright's
+# Chromium above serves as fallback browser. The former step mixed focal
+# sources into this jammy system.)
 
 # Cleanup
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*

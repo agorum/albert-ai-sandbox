@@ -18,11 +18,14 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from albert_sandbox import config, db, dockerctl, ports, sandboxes, storage  # noqa: E402
+from albert_sandbox import config, db, dockerctl, netctl, ports, sandboxes, storage  # noqa: E402
 
 
 def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+CURRENT_IMAGE_ID = "sha256:currentimage"
 
 
 class FakeDocker:
@@ -31,20 +34,28 @@ class FakeDocker:
         self.volumes: set = set()
         self.run_calls: List[List[str]] = []
         self.fail_run: Optional[str] = None
+        self.fail_image: Optional[str] = None  # only runs with this image fail
         self.updates: List[tuple] = []
+        self.networks: Dict[str, Dict[str, Any]] = {}
+        self.copied_in: List[tuple] = []
+        self.files_tar: Dict[str, bytes] = {}
 
     def add_container(self, name: str, labels: Dict[str, str], running: bool = True,
                       created: Optional[float] = None, image: str = "albert-ai-sandbox:latest",
-                      host_config: Optional[Dict[str, Any]] = None) -> None:
+                      host_config: Optional[Dict[str, Any]] = None, networks: Optional[List[str]] = None,
+                      image_id: str = "sha256:oldimage") -> None:
         created = created if created is not None else time.time()
         self.containers[name] = {
             "Id": f"id-{name}",
             "Name": f"/{name}",
             "Created": _iso(created),
+            "Image": image_id,
             "State": {"Running": running, "Status": "running" if running else "exited",
                       "StartedAt": _iso(created), "FinishedAt": "0001-01-01T00:00:00Z"},
             "Config": {"Image": image, "Labels": dict(labels)},
-            "HostConfig": host_config or {},
+            "HostConfig": host_config if host_config is not None
+            else {"CapAdd": ["CAP_SYS_ADMIN"], "SecurityOpt": ["seccomp=unconfined"]},
+            "NetworkSettings": {"Networks": {n: {} for n in (networks or ["bridge"])}},
             "SizeRw": 1234,
         }
 
@@ -53,7 +64,7 @@ class FakeDocker:
         return True
 
     def image_id(self, image: str) -> Optional[str]:
-        return "sha256:fakeimage"
+        return CURRENT_IMAGE_ID
 
     def inspect(self, names, size: bool = False):
         return {n: self.containers[n] for n in names if n in self.containers}
@@ -69,18 +80,54 @@ class FakeDocker:
     def running_names(self):
         return set(self.managed_container_names(all_states=False))
 
-    def run_container(self, args):
+    def run_container(self, args, running: bool = True):
         self.run_calls.append(list(args))
-        if self.fail_run:
-            raise dockerctl.DockerError(self.fail_run)
+        if self.fail_run or (self.fail_image and args[-1] == self.fail_image):
+            raise dockerctl.DockerError(self.fail_run or "image broken")
         name = args[args.index("--name") + 1]
-        labels = {}
+        if name in self.containers:
+            raise dockerctl.DockerError(f"Conflict. The container name {name} is already in use")
+        labels: Dict[str, str] = {}
+        host_config: Dict[str, Any] = {"CapAdd": None, "SecurityOpt": None, "CapDrop": [], "Init": False}
+        network = "bridge"
         for i, a in enumerate(args):
             if a == "--label":
                 k, v = args[i + 1].split("=", 1)
                 labels[k] = v
-        self.add_container(name, labels, running=True, image=args[-1])
+            elif a == "--network":
+                network = args[i + 1]
+            elif a == "--cap-drop":
+                host_config["CapDrop"].append(args[i + 1])
+            elif a == "--cap-add":
+                host_config["CapAdd"] = (host_config["CapAdd"] or []) + [args[i + 1]]
+            elif a == "--init":
+                host_config["Init"] = True
+        image_id = CURRENT_IMAGE_ID if args[-1] == "albert-ai-sandbox:latest" else args[-1]
+        self.add_container(name, labels, running=running, image=args[-1], host_config=host_config,
+                           networks=[network], image_id=image_id)
         return f"id-{name}"
+
+    def create_container(self, args):
+        return self.run_container(args, running=False)
+
+    def network_inspect(self, name):
+        return self.networks.get(name)
+
+    def network_create(self, name, subnet, bridge, labels):
+        self.networks[name] = {"Name": name, "Options": {"com.docker.network.bridge.enable_icc": "false"},
+                               "IPAM": {"Config": [{"Subnet": subnet}]}}
+
+    def network_connect(self, network, container):
+        self.containers[container]["NetworkSettings"]["Networks"][network] = {}
+
+    def network_disconnect(self, network, container):
+        self.containers[container]["NetworkSettings"]["Networks"].pop(network, None)
+
+    def copy_out_tar(self, container, path):
+        return self.files_tar.get(container)
+
+    def copy_in_tar(self, container, dest, data):
+        self.copied_in.append((container, dest, data))
 
     def start(self, name):
         self.containers[name]["State"]["Running"] = True
@@ -171,9 +218,21 @@ def env(tmp_path, monkeypatch):
 
     fake = FakeDocker()
     for attr in ("available", "image_id", "inspect", "inspect_one", "managed_container_names", "running_names",
-                 "run_container", "start", "stop", "remove", "update_limits", "volume_names", "volume_remove",
-                 "volume_mountpoint", "stats"):
+                 "run_container", "create_container", "start", "stop", "remove", "update_limits", "volume_names",
+                 "volume_remove", "volume_mountpoint", "stats", "network_inspect", "network_create",
+                 "network_connect", "network_disconnect", "copy_out_tar", "copy_in_tar"):
         monkeypatch.setattr(dockerctl, attr, getattr(fake, attr))
+    firewall = {"ok": False, "applied": 0, "fail": None}
+
+    def fake_apply():
+        if firewall["fail"]:
+            raise netctl.NetworkError(firewall["fail"])
+        firewall["ok"] = True
+        firewall["applied"] += 1
+        return {"enabled": True, "applied": True}
+
+    monkeypatch.setattr(netctl, "firewall_status", lambda: {"enabled": True, "ok": firewall["ok"]})
+    monkeypatch.setattr(netctl, "apply_firewall", fake_apply)
     disks = FakeStorage()
     for attr in ("create", "populate_home", "remove", "mount", "umount", "is_mounted", "exists", "usage",
                  "resize", "list_names"):
@@ -184,7 +243,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(sandboxes, "host_memory_mb", lambda: 65536)
 
     db.init_db()
-    yield {"settings": s, "docker": fake, "disks": disks, "tmp": tmp_path}
+    yield {"settings": s, "docker": fake, "disks": disks, "tmp": tmp_path, "firewall": firewall}
     config.reset()
 
 

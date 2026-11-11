@@ -175,6 +175,13 @@ if [ ! -f "$ENV_FILE" ]; then
 #
 # Host port pool for sandbox services (bound to 127.0.0.1 only)
 #ALBERT_PORT_RANGE=20000-29999
+#
+# Network isolation: sandboxes reach the internet, but not each other, not
+# internal networks and not services on this host. Subnet of the sandbox network
+# (must not overlap your LAN), blocked destinations and explicit exceptions:
+#ALBERT_NETWORK_SUBNET=172.30.0.0/16
+#ALBERT_BLOCK_NETS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,198.18.0.0/15
+#ALBERT_ALLOW_NETS=
 EOF
 	chmod 640 "$ENV_FILE"
 fi
@@ -214,6 +221,14 @@ chmod 700 "${STORAGE_DIR}" "${STORAGE_DIR}"/{disks,mnt,skel}
 # ---------------------------------------------------------------------------
 say "Migrating database..."
 "$CLI" migrate
+
+# ---------------------------------------------------------------------------
+# Network isolation: dedicated sandbox network without inter-container
+# traffic + firewall rules (no internal networks, no host services).
+# Existing sandboxes are moved into the network by the reconcile below.
+# ---------------------------------------------------------------------------
+say "Applying sandbox network isolation..."
+"$CLI" firewall apply >/dev/null || die "Could not set up the sandbox network isolation (see: $CLI firewall status)"
 
 # ---------------------------------------------------------------------------
 # nginx
@@ -340,6 +355,24 @@ AccuracySec=15s
 WantedBy=timers.target
 EOF
 
+cat > /etc/systemd/system/albert-sandbox-firewall.service <<EOF
+[Unit]
+Description=ALBERT sandbox network isolation (firewall rules)
+DefaultDependencies=no
+After=local-fs.target
+Before=docker.service network-pre.target
+Wants=network-pre.target
+RequiresMountsFor=${INSTALL_DIR}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${CLI} firewall apply
+
+[Install]
+WantedBy=multi-user.target docker.service
+EOF
+
 cat > /etc/systemd/system/albert-sandbox-disks.service <<EOF
 [Unit]
 Description=Mount ALBERT sandbox disk images
@@ -362,6 +395,8 @@ rm -f "$OLD_DROPIN"
 rmdir /etc/systemd/system/albert-container-manager.service.d 2>/dev/null || true
 
 systemctl daemon-reload
+systemctl enable albert-sandbox-firewall.service >/dev/null 2>&1
+systemctl start albert-sandbox-firewall.service
 systemctl enable albert-sandbox-disks.service >/dev/null 2>&1
 systemctl start albert-sandbox-disks.service
 systemctl enable albert-container-manager.service >/dev/null 2>&1
@@ -396,6 +431,14 @@ fi
 systemctl is-active --quiet albert-inactivity-watcher.timer && say "✓ watcher timer active" || { warn "✗ watcher timer inactive"; ok=0; }
 docker image inspect "$IMAGE" >/dev/null 2>&1 && say "✓ Docker image ${IMAGE} present" || { warn "✗ Docker image missing"; ok=0; }
 systemctl is-active --quiet nginx && say "✓ nginx running" || { warn "✗ nginx not running"; ok=0; }
+"$CLI" firewall status >/dev/null 2>&1 && say "✓ sandbox network isolation active" || { warn "✗ sandbox network isolation incomplete ($CLI firewall status)"; ok=0; }
+
+OUTDATED="$("$CLI" list --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(sum(1 for s in json.load(sys.stdin) if s.get("outdated")))' 2>/dev/null || echo 0)"
+if [ "${OUTDATED:-0}" != "0" ]; then
+	warn "${OUTDATED} sandbox(es) run with an older image or without the current hardening."
+	warn "Rebuild them (data, ports and credentials are kept): $CLI recreate --outdated"
+	warn "or per sandbox in the admin UI (\"Neu aufbauen\")."
+fi
 
 PUBLIC_URL="$("$CLI" selfcheck --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(json.load(sys.stdin)["publicUrl"])')"
 echo -e "${GREEN}========================================${NC}"

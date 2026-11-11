@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import clients, db, dockerctl, nginxctl, ports, storage
+from . import clients, db, dockerctl, netctl, nginxctl, ports, storage
 from .config import settings
 from .errors import BadRequest, Conflict, NotFound, QuotaExceeded, SandboxError, Unavailable
 from .locking import host_lock
@@ -27,6 +27,8 @@ from .locking import host_lock
 STATE_CREATING = "creating"
 STATE_READY = "ready"
 STATE_REMOVING = "removing"
+STATE_ERROR = "error"  # rebuild failed; kept (with data) until an admin acts
+STATE_REBUILDING = "rebuilding"  # recreate in progress; never touched by reconcile
 
 CONTAINER_PORTS = {"novnc": 6081, "mcphub": 3000, "filesvc": 4000}
 LEGACY_VNC_PASSWORD = "albert"
@@ -163,15 +165,14 @@ def _docker_time(value: Optional[str]) -> Optional[str]:
 
 
 def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
-              include_secrets: bool = False, client_label: Optional[str] = None) -> Dict[str, Any]:
+              include_secrets: bool = False, client_label: Optional[str] = None,
+              current_image_id: Optional[str] = None) -> Dict[str, Any]:
     """Public representation; keeps the field names of the previous API."""
     name = row["name"]
     state = (info or {}).get("State") or {}
     running = bool(state.get("Running"))
-    if row["state"] == STATE_CREATING:
-        status = "creating"
-    elif row["state"] == STATE_REMOVING:
-        status = "removing"
+    if row["state"] in (STATE_CREATING, STATE_REMOVING, STATE_REBUILDING, STATE_ERROR):
+        status = row["state"]
     elif running:
         status = "running"
     else:
@@ -207,6 +208,9 @@ def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
         },
         "lastActivityAt": iso(row["last_activity_at"]),
         "clientId": row["api_key_id"],
+        # Non-empty: the container predates the current image/hardening/network
+        # setup; "recreate" rebuilds it with the same data, ports and credentials.
+        "outdated": outdated_reasons(info, current_image_id),
     }
     if client_label is not None:
         data["clientLabel"] = client_label
@@ -254,11 +258,17 @@ def wait_for_mcphub(port: Optional[int]) -> bool:
     return True
 
 
-def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row) -> List[str]:
+# Hardening applied to every sandbox container. Chrome runs with --no-sandbox,
+# so neither CAP_SYS_ADMIN nor an unconfined seccomp profile is needed.
+# --init gives the container a real PID 1 that forwards SIGTERM (fast, clean
+# stop); NET_RAW/MKNOD are not needed by the desktop and ease attacks on the
+# bridge (ARP/packet spoofing) or device creation.
+HARDENING_ARGS = ["--init", "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD"]
+
+
+def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row, image: Optional[str] = None) -> List[str]:
     s = settings()
     name = row["name"]
-    memory_mb = int(row["memory_mb"])
-    shm_mb = max(64, min(s.shm_max_mb, memory_mb // 2))
     args = [
         "--name", name,
         "--hostname", name[:63],
@@ -267,12 +277,17 @@ def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row) -> List[str]:
         "--label", f"{dockerctl.LABEL_CLIENT}={client['id']}",
         "--label", f"{dockerctl.LABEL_APIKEY_HASH}={client['key_hash']}",
         "--restart", "unless-stopped",
-        "--cap-add=SYS_ADMIN",
-        "--security-opt", "seccomp=unconfined",
-        "--cpus", f"{float(row['cpus']):g}",
-        "--memory", f"{memory_mb}m",
-        "--memory-swap", f"{memory_mb}m",
+        "--network", s.network_name,
+        *HARDENING_ARGS,
         "--pids-limit", str(s.pids_limit),
+    ]
+    if row["cpus"]:
+        args += ["--cpus", f"{float(row['cpus']):g}"]
+    memory_mb = int(row["memory_mb"]) if row["memory_mb"] else None
+    if memory_mb:
+        args += ["--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m"]
+    shm_mb = max(64, min(s.shm_max_mb, memory_mb // 2)) if memory_mb else s.shm_max_mb
+    args += [
         "--shm-size", f"{shm_mb}m",
         "-p", f"127.0.0.1:{row['novnc_port']}:{CONTAINER_PORTS['novnc']}",
         "-p", f"127.0.0.1:{row['mcphub_port']}:{CONTAINER_PORTS['mcphub']}",
@@ -282,11 +297,33 @@ def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row) -> List[str]:
         "-e", "MCP_HUB_PORT=3000",
         "-e", "FILE_SERVICE_PORT=4000",
         "-e", f"VNC_PASSWORD={row['vnc_password']}",
-        "-v", f"{storage.home_path(name)}:/home/ubuntu",
-        "-v", f"{storage.files_path(name)}:/tmp/albert-files",
-        row["image"],
     ]
+    if row["storage"] == "volume":
+        # Sandbox migrated from the former version: data stays in its docker volume.
+        args += ["-v", f"{name}_data:/home/ubuntu"]
+    else:
+        args += ["-v", f"{storage.home_path(name)}:/home/ubuntu",
+                 "-v", f"{storage.files_path(name)}:/tmp/albert-files"]
+    args.append(image or row["image"])
     return args
+
+
+def outdated_reasons(info: Optional[Dict[str, Any]], current_image_id: Optional[str]) -> List[str]:
+    """Why a container should be rebuilt ('recreate') to get the current setup."""
+    if not info:
+        return []
+    reasons: List[str] = []
+    host_cfg = info.get("HostConfig") or {}
+    if current_image_id and info.get("Image") and info.get("Image") != current_image_id:
+        reasons.append("image")
+    caps = [c.upper().replace("CAP_", "") for c in (host_cfg.get("CapAdd") or [])]
+    dropped = [c.upper().replace("CAP_", "") for c in (host_cfg.get("CapDrop") or [])]
+    if "SYS_ADMIN" in caps or any("unconfined" in o for o in (host_cfg.get("SecurityOpt") or [])) \
+            or not host_cfg.get("Init") or "NET_RAW" not in dropped:
+        reasons.append("hardening")
+    if not netctl.is_isolated(info):
+        reasons.append("network")
+    return reasons
 
 
 def _ensure_route(row: sqlite3.Row) -> None:
@@ -308,6 +345,8 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
         image = s.docker_image
         if not dockerctl.image_id(image):
             raise SandboxError(f"Docker image '{image}' not found. Run 'build' first.", code="image_missing")
+        # Never start a sandbox without its network isolation in place.
+        netctl.ensure_ready()
         with host_lock():
             running = _running()
             clients.check_quota(conn, client, running, add_cpus=res["cpus"], add_memory_mb=res["memory_mb"],
@@ -355,7 +394,8 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
 def describe(name: str, client_id: Optional[int] = None) -> Dict[str, Any]:
     with db.session() as conn:
         row = get_row(conn, name, client_id)
-        return serialize(row, dockerctl.inspect_one(name))
+        return serialize(row, dockerctl.inspect_one(name),
+                         current_image_id=dockerctl.image_id(settings().docker_image))
 
 
 def list_sandboxes(client_id: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -367,7 +407,9 @@ def list_sandboxes(client_id: Optional[int] = None) -> List[Dict[str, Any]]:
                                 (client_id,)).fetchall()
         labels = {r["id"]: r["label"] for r in conn.execute("SELECT id, label FROM api_keys")}
     infos = dockerctl.inspect([r["name"] for r in rows]) if rows else {}
-    return [serialize(r, infos.get(r["name"]), client_label=labels.get(r["api_key_id"]) or "")
+    image_id = dockerctl.image_id(settings().docker_image) if rows else None
+    return [serialize(r, infos.get(r["name"]), client_label=labels.get(r["api_key_id"]) or "",
+                      current_image_id=image_id)
             for r in rows]
 
 
@@ -381,11 +423,15 @@ def start(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dic
             raise NotFound(f"Container '{name}' is missing (will be cleaned up)", code="not_found")
         if not (info.get("State") or {}).get("Running"):
             client = clients.get(conn, row["api_key_id"])
+            netctl.ensure_ready()
             with host_lock():
                 clients.check_quota(conn, client, _running(), add_cpus=row["cpus"] or 0,
                                     add_memory_mb=row["memory_mb"] or 0, exclude=name)
                 if row["storage"] == "image":
                     storage.mount(name)
+                # Containers from older versions sit in the shared default
+                # bridge - move them into the isolated network first.
+                netctl.isolate(name, info)
                 dockerctl.start(name)
                 now = int(time.time())
                 conn.execute("UPDATE sandboxes SET last_started_at=?, last_activity_at=?, error=NULL "
@@ -401,8 +447,8 @@ def start(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dic
 def stop(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dict[str, Any]:
     with db.session() as conn:
         row = get_row(conn, name, client_id)
-        if row["state"] == STATE_CREATING:
-            raise Conflict(f"Sandbox '{name}' is still being created")
+        if row["state"] in (STATE_CREATING, STATE_REBUILDING):
+            raise Conflict(f"Sandbox '{name}' is {row['state']}")
         info = dockerctl.inspect_one(name)
         if info and (info.get("State") or {}).get("Running"):
             dockerctl.stop(name)
@@ -413,6 +459,92 @@ def stop(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dict
 def restart(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dict[str, Any]:
     stop(name, client_id, actor=actor)
     return start(name, client_id, actor=actor)
+
+
+def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
+             force: bool = False) -> Dict[str, Any]:
+    """Rebuild the container with the current image, hardening and network.
+
+    Data, ports, credentials and limits stay the same. Disk-image sandboxes keep
+    everything (home and uploads live on the disk image); sandboxes migrated
+    from the former version keep their home volume and get their upload
+    directory copied into the new container. A running sandbox is running
+    again afterwards, a stopped one stays stopped. If the rebuild fails, the
+    previous image is restored; if even that fails the sandbox is set to
+    state ``error`` (never removed automatically). ``force`` also allows a
+    sandbox stuck in ``rebuilding`` (interrupted run) to be rebuilt again.
+    """
+    s = settings()
+    image = s.docker_image
+    allowed = (STATE_READY, STATE_ERROR, STATE_REBUILDING) if force else (STATE_READY, STATE_ERROR)
+    with db.session() as conn:
+        row = get_row(conn, name, client_id)
+        if row["state"] not in allowed:
+            raise Conflict(f"Sandbox '{name}' is {row['state']}")
+        if not dockerctl.image_id(image):
+            raise SandboxError(f"Docker image '{image}' not found. Run 'build' first.", code="image_missing")
+        client = clients.get(conn, row["api_key_id"])
+        netctl.ensure_ready()
+        info = dockerctl.inspect_one(name)
+        was_running = bool(info and (info.get("State") or {}).get("Running"))
+        old_image = (info or {}).get("Image") or row["image"]
+        # 'rebuilding' keeps reconcile away while the sandbox has no container;
+        # the conditional update makes concurrent rebuilds of one sandbox impossible.
+        placeholders = ",".join("?" for _ in allowed)
+        claimed = conn.execute(f"UPDATE sandboxes SET state=? WHERE name=? AND state IN ({placeholders})",
+                               (STATE_REBUILDING, name, *allowed)).rowcount
+        if claimed != 1:
+            raise Conflict(f"Sandbox '{name}' is already being rebuilt")
+        try:
+            if was_running:
+                dockerctl.stop(name)
+            uploads = dockerctl.copy_out_tar(name, "/tmp/albert-files") \
+                if (info and row["storage"] == "volume") else None
+            if row["storage"] == "image":
+                storage.mount(name)
+        except Exception as exc:
+            conn.execute("UPDATE sandboxes SET state=? WHERE name=?", (row["state"], name))
+            raise SandboxError(f"Recreate of '{name}' aborted, nothing changed: {exc}", code="recreate_failed")
+
+        def build(img: str) -> str:
+            args = _docker_run_args(row, client, img)
+            return dockerctl.run_container(args) if was_running else dockerctl.create_container(args)
+
+        error: Optional[str] = None
+        try:
+            dockerctl.remove(name)
+            container_id = build(image)
+        except Exception as exc:
+            error = f"recreate with {image} failed: {exc}"
+            try:
+                dockerctl.remove(name)
+                container_id = build(old_image)
+                image = old_image
+            except Exception as exc2:
+                conn.execute("UPDATE sandboxes SET state=?, error=? WHERE name=?",
+                             (STATE_ERROR, f"{error}; restoring the old image failed: {exc2}"[:2000], name))
+                db.audit(conn, actor, "sandbox.recreate_failed", name, {"error": str(exc2)})
+                raise SandboxError(f"Recreate of '{name}' failed and the old container could not be "
+                                   f"restored: {exc2}", code="recreate_failed")
+        if uploads:
+            try:
+                dockerctl.copy_in_tar(name, "/tmp", uploads)
+            except dockerctl.DockerError as exc:
+                error = (error + "; " if error else "") + f"uploads not copied: {exc}"
+        now = int(time.time())
+        conn.execute(
+            "UPDATE sandboxes SET state=?, container_id=?, image=?, vnc_port=NULL, error=?, "
+            "last_started_at=CASE WHEN ? THEN ? ELSE last_started_at END WHERE name=?",
+            (STATE_READY, container_id, image, error, 1 if was_running else 0, now, name),
+        )
+        db.audit(conn, actor, "sandbox.recreate", name, {"image": image, "error": error})
+        if was_running:
+            wait_for_mcphub(row["mcphub_port"])
+        _ensure_route(get_row(conn, name))
+        if error:
+            raise SandboxError(f"Sandbox '{name}' was rebuilt with problems: {error}", code="recreate_partial")
+        return serialize(get_row(conn, name), dockerctl.inspect_one(name),
+                         current_image_id=dockerctl.image_id(s.docker_image))
 
 
 def set_persistent(name: str, persistent: bool, client_id: Optional[int] = None,
@@ -463,6 +595,8 @@ def remove(name: str, client_id: Optional[int] = None, actor: str = "api") -> No
         row = get_row(conn, name, client_id)
         if row["state"] == STATE_CREATING and time.time() - row["created_at"] < settings().orphan_grace_seconds:
             raise Conflict(f"Sandbox '{name}' is still being created")
+        if row["state"] == STATE_REBUILDING:
+            raise Conflict(f"Sandbox '{name}' is being rebuilt")
         _destroy(conn, row, actor=actor, reason="removed")
 
 
@@ -631,7 +765,22 @@ def host_overview() -> Dict[str, Any]:
     except dockerctl.DockerError:
         running, docker_ok = set(), False
     active = [r for r in rows if r["name"] in running]
+    try:
+        firewall = netctl.firewall_status()
+    except SandboxError as exc:
+        firewall = {"enabled": s.firewall, "ok": False, "error": exc.message}
+    net_info = dockerctl.network_inspect(s.network_name) if docker_ok else None
+    isolation = {
+        "network": s.network_name if net_info else None,
+        "subnet": netctl.network_subnet(net_info) if net_info else s.network_subnet,
+        "interContainerBlocked": ((net_info or {}).get("Options") or {}).get(
+            "com.docker.network.bridge.enable_icc") == "false",
+        "firewall": firewall,
+        "blockedNets": list(s.block_nets),
+        "allowedNets": list(s.allow_nets),
+    }
     return {
+        "isolation": isolation,
         "host": {
             "cpus": host_cpus(),
             "memoryMb": host_memory_mb(),

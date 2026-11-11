@@ -1012,6 +1012,14 @@
       out.push(notice("danger", "Docker ist nicht erreichbar.",
         "Laufzeitstatus und Zuteilungen laufender Sandboxen sind unvollständig."));
     }
+    const iso = ov.isolation || {};
+    const fw = iso.firewall || {};
+    const isolationOk = !!iso.network && iso.interContainerBlocked && (fw.enabled === false || fw.ok);
+    if (ov.isolation && !isolationOk) {
+      out.push(notice("danger", "Netz-Isolation der Sandboxen ist unvollständig.",
+        "Der Watcher repariert das innerhalb einer Minute automatisch. Bleibt der Hinweis, auf dem Host prüfen: "
+        + "albert-ai-sandbox-manager firewall status"));
+    }
 
     out.push(h("div", { class: "grid cols-4" + (out.length ? " mt-16" : "") },
       kpi("Clients", fmtNum(ov.clients, 0), null, "Mandanten mit API-Key", "#/clients"),
@@ -1086,6 +1094,26 @@
         "Gelten für Clients ohne eigenes Limit pro Sandbox (ALBERT_DEFAULT_CPUS / _MEMORY_MB / _DISK_GB).")));
 
     out.push(h("div", { class: "grid cols-2 mt-16" }, disks, defaults));
+
+    if (ov.isolation) {
+      const yesNo = (v) => h("span", { class: ["badge", v ? "ok" : "danger"] }, v ? "aktiv" : "fehlt");
+      const isolation = h("div", { class: "panel" }, h("div", { class: "panel-body" },
+        h("div", { class: "panel-title" }, "Netz-Isolation"),
+        h("dl", { class: "kv" },
+          h("dt", null, "Eigenes Sandbox-Netz"),
+          h("dd", null, yesNo(!!iso.network), " ", h("span", { class: "mono faint" }, iso.subnet || "")),
+          h("dt", null, "Sandbox ↔ Sandbox gesperrt"), h("dd", null, yesNo(!!iso.interContainerBlocked)),
+          h("dt", null, "Firewall (internes Netz, Host)"),
+          h("dd", null, fw.enabled === false ? h("span", { class: "badge warn" }, "abgeschaltet") : yesNo(!!fw.ok)),
+          h("dt", null, "Gesperrte Ziele"),
+          h("dd", { class: "mono small" }, (iso.blockedNets || []).join(", ") || "–"),
+          (iso.allowedNets || []).length ? h("dt", null, "Ausnahmen") : null,
+          (iso.allowedNets || []).length ? h("dd", { class: "mono small" }, iso.allowedNets.join(", ")) : null),
+        h("p", { class: "metric-note mt-12" },
+          "Sandboxen erreichen das Internet, aber weder andere Sandboxen noch interne Netze oder Dienste des Hosts "
+          + "(ALBERT_BLOCK_NETS / ALBERT_ALLOW_NETS).")));
+      out.push(h("div", { class: "grid cols-2 mt-16" }, isolation));
+    }
     return out;
   }
 
@@ -1392,10 +1420,28 @@
     stopped: ["gestoppt", ""],
     creating: ["wird erstellt", "accent busy"],
     removing: ["wird gelöscht", "danger busy"],
+    rebuilding: ["wird neu aufgebaut", "accent busy"],
+    error: ["Fehler", "danger"],
   };
   const PENDING_LABEL = {
     start: "startet …", stop: "stoppt …", restart: "startet neu …", delete: "wird gelöscht …",
+    recreate: "baut neu auf …",
   };
+  const OUTDATED_LABEL = {
+    image: "älteres Sandbox-Image",
+    hardening: "ohne aktuelle Container-Härtung",
+    network: "nicht im isolierten Netz",
+  };
+
+  function outdatedBadge(s) {
+    const reasons = (s.outdated || []).map((r) => OUTDATED_LABEL[r] || r);
+    if (!reasons.length) return null;
+    return h("div", null, h("span", {
+      class: "badge warn",
+      title: "Veraltet: " + reasons.join(", ") + ". „Neu aufbauen“ bringt die Sandbox auf den aktuellen Stand "
+        + "(Daten, Ports und Zugangsdaten bleiben erhalten).",
+    }, "veraltet"));
+  }
 
   function statusLabel(status) {
     return (STATUS[status] || [status || "unbekannt"])[0];
@@ -1477,7 +1523,7 @@
     return h("tr", null,
       nameCell,
       clientCell,
-      h("td", null, statusBadge(s.status, pending)),
+      h("td", null, statusBadge(s.status, pending), pending ? null : outdatedBadge(s)),
       h("td", null, timeEl(s.createdAt)),
       h("td", null, timeEl(s.lastActivityAt, true)),
       h("td", null, persistent),
@@ -1490,7 +1536,7 @@
 
   function sandboxActions(s, pending) {
     const busy = !!pending;
-    const transitional = s.status === "creating" || s.status === "removing";
+    const transitional = s.status === "creating" || s.status === "removing" || s.status === "rebuilding";
     const running = s.status === "running";
     const mk = (label, cls, onClick, { disabled = false, busyFor = null, title = null } = {}) => {
       const isBusy = busy && pending.action === busyFor;
@@ -1514,7 +1560,14 @@
     buttons.push(mk("Neustart", "", () => sandboxAction(s, "restart"), {
       disabled: transitional || !running, busyFor: "restart",
     }));
-    buttons.push(mk("Limits", "", () => openLimitsDialog(s), { disabled: transitional, title: "Limits ändern" }));
+    buttons.push(mk("Limits", "", () => openLimitsDialog(s), {
+      disabled: transitional || s.status === "error", title: "Limits ändern",
+    }));
+    buttons.push(mk("Neu aufbauen", (s.outdated || []).length || s.status === "error" ? "primary" : "",
+      () => recreateSandbox(s), {
+        disabled: transitional, busyFor: "recreate",
+        title: "Container mit aktuellem Image, Härtung und Netz neu erstellen – Daten, Ports und Zugangsdaten bleiben",
+      }));
     buttons.push(mk("Live", "", () => openStatsDialog(s), { title: "Live-Werte (docker stats)" }));
     buttons.push(mk("Löschen", "danger-outline", () => deleteSandbox(s), {
       disabled: s.status === "creating", busyFor: "delete",
@@ -1532,6 +1585,38 @@
       toast(`Sandbox ${s.name} ${done}.`, { type: "success" });
     } catch (err) {
       showError(err, `${{ start: "Start", stop: "Stopp", restart: "Neustart" }[action]} fehlgeschlagen`);
+    } finally {
+      state.pending.delete(s.name);
+      rerenderView();
+      refreshView();
+    }
+  }
+
+  async function recreateSandbox(s) {
+    if (state.pending.has(s.name)) return;
+    const reasons = (s.outdated || []).map((r) => OUTDATED_LABEL[r] || r);
+    const ok = await confirmDialog({
+      title: "Sandbox neu aufbauen",
+      message: [
+        h("p", null, "Der Container von ", h("strong", { class: "mono" }, s.name),
+          " wird mit dem aktuellen Sandbox-Image, der aktuellen Härtung und im isolierten Netz neu erstellt."),
+        reasons.length ? h("p", null, "Grund: " + reasons.join(", ") + ".") : null,
+        notice("ok", "Daten bleiben erhalten.",
+          "Home-Verzeichnis, Uploads, Ports, Desktop-URL und Zugangsdaten bleiben gleich. "
+          + (s.status === "running"
+            ? "Die Sandbox ist dabei kurz nicht erreichbar, laufende Programme im Desktop werden beendet."
+            : "Die Sandbox bleibt danach gestoppt.")),
+      ],
+      confirmLabel: "Neu aufbauen",
+    });
+    if (!ok) return;
+    state.pending.set(s.name, { action: "recreate", since: Date.now() });
+    rerenderView();
+    try {
+      await api(`sandboxes/${enc(s.name)}/recreate`, { method: "POST" });
+      toast(`Sandbox ${s.name} neu aufgebaut.`, { type: "success" });
+    } catch (err) {
+      showError(err, "Neu aufbauen fehlgeschlagen");
     } finally {
       state.pending.delete(s.name);
       rerenderView();

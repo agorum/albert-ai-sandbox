@@ -106,6 +106,12 @@ def run_container(args: Sequence[str]) -> str:
     return _text(proc).strip()
 
 
+def create_container(args: Sequence[str]) -> str:
+    """Like run_container, but the container is only created, not started."""
+    proc = _run(["create", *args], timeout=180)
+    return _text(proc).strip()
+
+
 def start(name: str) -> None:
     _run(["start", name], timeout=120)
 
@@ -154,6 +160,48 @@ def volume_mountpoint(name: str) -> Optional[str]:
     if proc.returncode != 0:
         return None
     return _text(proc).strip() or None
+
+
+def network_inspect(name: str) -> Optional[Dict[str, Any]]:
+    proc = _run(["network", "inspect", name], timeout=30, check=False)
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(_text(proc) or "[]")
+    except ValueError:
+        return None
+    return payload[0] if payload else None
+
+
+def network_create(name: str, subnet: str, bridge: str, labels: Dict[str, str]) -> None:
+    args = ["network", "create", "--driver", "bridge", "--subnet", subnet,
+            "-o", "com.docker.network.bridge.enable_icc=false",
+            "-o", f"com.docker.network.bridge.name={bridge}"]
+    for key, value in labels.items():
+        args += ["--label", f"{key}={value}"]
+    _run([*args, name], timeout=60)
+
+
+def network_connect(network: str, container: str) -> None:
+    _run(["network", "connect", network, container], timeout=60)
+
+
+def network_disconnect(network: str, container: str) -> None:
+    _run(["network", "disconnect", "-f", network, container], timeout=60)
+
+
+def network_remove(name: str) -> bool:
+    return _run(["network", "rm", name], timeout=60, check=False).returncode == 0
+
+
+def copy_out_tar(container: str, path: str) -> Optional[bytes]:
+    """Tar stream of a directory inside a (running or stopped) container."""
+    proc = _run(["cp", f"{container}:{path}", "-"], timeout=600, check=False)
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def copy_in_tar(container: str, dest_dir: str, data: bytes) -> None:
+    _run(["cp", "-", f"{container}:{dest_dir}"], timeout=600, input_bytes=data)
 
 
 def export_home_tar(image: str) -> bytes:

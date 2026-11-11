@@ -11,6 +11,8 @@ ALBERT | AI Sandbox provides isolated, browser-ready compute environments for AI
 - **Admin web UI** (`/manager/admin/`): manage admin users and clients, see every sandbox with status and disk usage, start/stop/resize/delete sandboxes or whole clients.
 - Auto-stop sandboxes after 10 minutes of inactivity, auto-delete non-persistent sandboxes after a maximum age (default 24 hours).
 - **Self-cleaning**: a reconcile step removes everything that has no sandbox any more (containers, disk images, volumes, nginx routes) and repairs missing routes and mounts.
+- **Network isolation**: sandboxes reach the internet, but neither each other nor internal networks nor services of the host.
+- **Hardened containers** without extra privileges; a one-click **rebuild** brings existing sandboxes to the current image and hardening while keeping their data.
 - Keep data and lifecycle operations isolated per API key, ensuring one tenant cannot touch another tenant's sandboxes.
 
 ## Architecture
@@ -57,6 +59,10 @@ Optional host hardening (TLS via Let's Encrypt, firewall, fail2ban, SSH): `sudo 
 | `ALBERT_MAX_AGE_SECONDS` | `86400` | Delete non-persistent sandboxes after this age (`0` = off) |
 | `ALBERT_PORT_RANGE` | `20000-29999` | Host ports for sandbox services (bound to 127.0.0.1) |
 | `ALBERT_STORAGE_DIR` | `/var/lib/albert-sandbox` | Disk images and mount points |
+| `ALBERT_NETWORK_SUBNET` | `172.30.0.0/16` | Subnet of the isolated sandbox network (must not overlap your LAN) |
+| `ALBERT_BLOCK_NETS` | private ranges, CGNAT, link-local, `198.18.0.0/15` | Destinations sandboxes must not reach |
+| `ALBERT_ALLOW_NETS` | – | Exceptions from `ALBERT_BLOCK_NETS` (e.g. an internal test system) |
+| `ALBERT_BLOCK_HOST_ACCESS` | `1` | Block connections from sandboxes to services on the host (ssh, nginx, …) |
 
 ## Clients, Limits and Quotas
 A client is an API key plus settings:
@@ -83,6 +89,19 @@ The plaintext key is shown once; only its SHA-256 hash is stored. `scripts/api-k
 - Disk: every sandbox gets its own sparse ext4 image file of the configured size, loop-mounted on the host and mounted into the container as `/home/ubuntu` and `/tmp/albert-files` (uploads). When it is full, writes inside the sandbox fail; the host disk cannot fill up. Files deleted inside the sandbox give space back to the host. The container's own layer (system directories) is measured and shown in the admin UI.
 - Sandboxes migrated from the former version keep their Docker volume and have no disk limit (shown as "ohne Limit"); CPU/RAM limits can be set for them in the admin UI.
 
+## Network Isolation and Hardening
+Sandboxes run code an AI agent controls, so they are isolated from everything but the internet:
+
+- **Own network without inter-container traffic**: all sandboxes live in the Docker network `albert-sandbox` (`enable_icc=false`). A sandbox cannot connect to another sandbox — not to its MCP Hub, file service or desktop.
+- **No internal networks**: iptables rules (chain `ALBERT-SANDBOX` in `DOCKER-USER`) drop connections from sandboxes to `ALBERT_BLOCK_NETS` — RFC 1918 networks, CGNAT, link-local including cloud metadata (169.254.169.254). Needed internal targets can be allowed with `ALBERT_ALLOW_NETS`.
+- **No host services**: chain `ALBERT-SANDBOX-IN` (in `INPUT`) drops connections from sandboxes to the host itself (ssh, nginx, …). nginx still reaches the sandboxes, so desktop, MCP Hub and file service work as before.
+- The rules are applied at boot before Docker starts (`albert-sandbox-firewall.service`), before every create/start, and checked by the watcher every minute; missing or outdated rules are restored automatically. A sandbox is never created or started without them. Status: `albert-ai-sandbox-manager firewall status`, also shown in the admin UI (Übersicht → Netz-Isolation).
+- **Container hardening**: no `CAP_SYS_ADMIN`, Docker's default seccomp profile, no `NET_RAW`/`MKNOD`, a real init process (`--init`, fast clean stops), process limit. Chrome runs with `--no-sandbox`, so it needs no extra privileges.
+- **Existing sandboxes**: containers in the old shared network are moved into the isolated network automatically (live, without restart). Hardening and a new image need a rebuild: `albert-ai-sandbox-manager recreate --outdated`, or "Neu aufbauen" in the admin UI. The rebuild keeps home directory, uploads, ports, URLs, credentials and limits; if it fails, the previous image is restored. Outdated sandboxes are marked "veraltet" in the admin UI and listed after every update by `install.sh`.
+
+## Sandbox Image
+`docker/Dockerfile` pins everything installed on top of Ubuntu (Node.js major line, MCP Hub, Playwright MCP, bash-mcp, Flask) via build arguments at the top of the file. MCP servers are installed at build time — nothing is downloaded when a sandbox starts. OS packages, Google Chrome and Firefox (from Mozilla's APT repository) are taken from their vendors with security updates. To update a component, change its version argument, run `install.sh` (rebuilds when `docker/` changed), test, then rebuild existing sandboxes with `recreate --outdated`.
+
 ## Admin Web UI
 Open `https://<host>/manager/admin/` and sign in. Pages:
 - **Übersicht**: host resources, allocated CPU/RAM of running sandboxes, disk usage.
@@ -98,6 +117,8 @@ Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove
 - `create [name] [--persistent] [--cpus N] [--memory-mb N] [--disk-gb N]`
 - `list` / `status [name]`, `start`, `stop`, `restart`, `remove <name>` (always deletes the data)
 - `resources <name> --cpus N --memory-mb N --disk-gb N`, `persistent <name> on|off`
+- `recreate <name>` / `recreate --outdated` – rebuild with current image and hardening, data is kept
+- `firewall apply|status|remove` – network isolation
 - `reconcile [--dry-run]` – clean up leftovers, `selfcheck`, `build` – rebuild the image
 
 Add `--json` for machine-readable output.

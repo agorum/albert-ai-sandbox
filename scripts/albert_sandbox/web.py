@@ -433,7 +433,8 @@ def admin_sandbox_stats(name: str) -> Any:
 @admin_bp.post("/api/sandboxes/<name>/<action>")
 @admin_required
 def admin_sandbox_action(name: str, action: str) -> Any:
-    handlers = {"start": sandboxes.start, "stop": sandboxes.stop, "restart": sandboxes.restart}
+    handlers = {"start": sandboxes.start, "stop": sandboxes.stop, "restart": sandboxes.restart,
+                "recreate": sandboxes.recreate}
     if action not in handlers:
         raise BadRequest(f"unknown action {action}")
     return jsonify({"sandbox": handlers[action](name, actor=g.actor)})

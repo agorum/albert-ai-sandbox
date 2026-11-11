@@ -44,6 +44,15 @@ def _read_env_file(path: Path) -> Dict[str, str]:
     return values
 
 
+# Destinations sandboxes must not reach: private/internal networks, carrier-grade
+# NAT, link-local (incl. cloud metadata 169.254.169.254) and benchmark ranges.
+DEFAULT_BLOCK_NETS = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,198.18.0.0/15"
+
+
+def _split_nets(value: str) -> Tuple[str, ...]:
+    return tuple(v.strip() for v in (value or "").replace(";", ",").split(",") if v.strip())
+
+
 def _parse_range(value: str, fallback: Tuple[int, int]) -> Tuple[int, int]:
     try:
         lo, hi = value.split("-", 1)
@@ -89,6 +98,13 @@ class Settings:
     bind_host: str
     port: int
     admin_session_hours: int
+    network_name: str = "albert-sandbox"
+    network_subnet: str = "172.30.0.0/16"
+    network_bridge: str = "br-albert"
+    firewall: bool = True
+    block_nets: Tuple[str, ...] = ()
+    allow_nets: Tuple[str, ...] = ()
+    block_host_access: bool = True
     extra: Dict[str, str] = field(default_factory=dict)
 
     @property
@@ -180,6 +196,13 @@ def load_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
         bind_host=get("MANAGER_BIND_HOST", "127.0.0.1"),
         port=get_int("MANAGER_PORT", 5001),
         admin_session_hours=get_int("ALBERT_ADMIN_SESSION_HOURS", 12),
+        network_name=get("ALBERT_NETWORK", "albert-sandbox"),
+        network_subnet=get("ALBERT_NETWORK_SUBNET", "172.30.0.0/16"),
+        network_bridge=get("ALBERT_NETWORK_BRIDGE", "br-albert")[:15],
+        firewall=get("ALBERT_FIREWALL", "1") not in ("0", "false", "no"),
+        block_nets=_split_nets(get("ALBERT_BLOCK_NETS", DEFAULT_BLOCK_NETS)),
+        allow_nets=_split_nets(get("ALBERT_ALLOW_NETS", "")),
+        block_host_access=get("ALBERT_BLOCK_HOST_ACCESS", "1") not in ("0", "false", "no"),
         extra=merged,
     )
 

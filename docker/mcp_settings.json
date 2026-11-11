@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "bash-mcp": {
-      "command": "npx",
-      "args": ["-y", "bash-mcp"],
+      "command": "bash-mcp",
+      "args": [],
       "env": {
       },
       "options": {
@@ -10,13 +10,13 @@
       }
     },
     "playwright": {
-      "command": "npx",
-      "args": ["@playwright/mcp@latest", "--no-sandbox", "--isolated"],
+      "command": "playwright-mcp",
+      "args": ["--no-sandbox", "--isolated"],
       "options": {
         "timeout": 300000
       },
       "env": {
-        "PLAYWRIGHT_BROWSERS_PATH": "/tmp/browsers"
+        "PLAYWRIGHT_BROWSERS_PATH": "/opt/ms-playwright"
       }
     }
   },

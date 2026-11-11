@@ -45,7 +45,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
   "clientId": 3
 }
 ```
-`status` is `running`, `stopped`, `creating` or `removing`. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
+`status` is `running`, `stopped`, `creating`, `removing`, `rebuilding` or `error` (a rebuild failed; the sandbox and its data are kept until an admin acts). `outdated` lists why the container should be rebuilt (`image`, `hardening`, `network`); empty when up to date. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
 
 ### `GET /health`
 `{"status": "ok", "docker": "up"}`
@@ -90,13 +90,13 @@ Used by the web UI under `/manager/admin/`; JSON under `/manager/admin/api/`. Se
 |---|---|---|
 | GET | `api/session` | current admin + CSRF token (401 if not logged in, `hasAdmins`) |
 | POST | `api/login`, `api/logout` | session |
-| GET | `api/overview` | host resources, totals, defaults |
+| GET | `api/overview` | host resources, totals, defaults, network isolation status |
 | GET/POST | `api/clients` | list (with usage) / create (returns `apiKey` once) |
 | GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes` (null = unset) / delete with all sandboxes |
 | POST | `api/clients/{id}/rotate-key` | new API key, sandboxes stay |
 | GET | `api/sandboxes[?client=id]` | all sandboxes |
 | PATCH/DELETE | `api/sandboxes/{name}` | `persistent`, `cpus`, `memoryMb`, `diskGb` (disk can only grow) / delete |
-| POST | `api/sandboxes/{name}/start|stop|restart` | lifecycle |
+| POST | `api/sandboxes/{name}/start|stop|restart|recreate` | lifecycle; `recreate` rebuilds the container with the current image/hardening/network, keeping data, ports and credentials |
 | GET | `api/sandboxes/{name}/stats` | live docker stats + disk usage |
 | GET/POST | `api/admins`, `api/admins/{id}/password`, DELETE `api/admins/{id}` | admin users |
 | GET/POST | `api/reconcile` | cleanup preview / run |

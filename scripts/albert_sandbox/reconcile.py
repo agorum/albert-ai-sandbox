@@ -11,11 +11,12 @@ import re
 import time
 from typing import Any, Dict, List
 
-from . import db, dockerctl, nginxctl, storage
+from . import db, dockerctl, netctl, nginxctl, storage
 from .config import settings
 from .errors import SandboxError
 from .locking import host_lock
-from .sandboxes import STATE_CREATING, STATE_READY, STATE_REMOVING, _destroy, parse_time
+from .sandboxes import (STATE_CREATING, STATE_ERROR, STATE_READY, STATE_REBUILDING, STATE_REMOVING, _destroy,
+                        parse_time)
 
 LEGACY_VOLUME_RE = re.compile(r"^(sbx-[a-z0-9.-]+)_data$")
 
@@ -36,6 +37,30 @@ def reconcile(dry_run: bool = False, actor: str = "reconcile") -> Dict[str, Any]
 
     docker_names = set(dockerctl.managed_container_names())
     infos = dockerctl.inspect(docker_names)
+
+    # 0: network isolation first (security): isolated network, firewall rules,
+    # and every managed container inside the isolated network only.
+    try:
+        if dockerctl.network_inspect(s.network_name) is None:
+            act("create-network", s.network_name, "isolated sandbox network missing")
+            if not dry_run:
+                netctl.ensure_network()
+        if s.firewall and not netctl.firewall_status()["ok"]:
+            act("apply-firewall", "iptables", "sandbox firewall rules missing or outdated")
+            if not dry_run:
+                netctl.apply_firewall()
+    except SandboxError as exc:
+        errors.append(exc.message)
+    for name in sorted(docker_names):
+        info = infos.get(name)
+        if info and not netctl.is_isolated(info):
+            act("isolate-network", name,
+                "container not (only) in the isolated network: " + ",".join(netctl.container_networks(info)))
+            if not dry_run:
+                try:
+                    netctl.isolate(name, info)
+                except dockerctl.DockerError as exc:
+                    errors.append(str(exc))
 
     with db.session() as conn:
         rows = conn.execute("SELECT * FROM sandboxes").fetchall()
@@ -162,8 +187,8 @@ def mount_all() -> Dict[str, Any]:
     """Mount all sandbox disks (used at boot, before Docker starts containers)."""
     mounted, failed = [], {}
     with db.session() as conn:
-        rows = conn.execute("SELECT name FROM sandboxes WHERE storage='image' AND state IN (?, ?)",
-                            (STATE_READY, STATE_CREATING)).fetchall()
+        rows = conn.execute("SELECT name FROM sandboxes WHERE storage='image' AND state IN (?, ?, ?, ?)",
+                            (STATE_READY, STATE_CREATING, STATE_REBUILDING, STATE_ERROR)).fetchall()
     for row in rows:
         name = row["name"]
         if storage.is_mounted(name) or not storage.exists(name):

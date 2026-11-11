@@ -42,6 +42,15 @@ if command -v docker >/dev/null 2>&1; then
 	done
 fi
 
+say "Removing sandbox network isolation..."
+if [ -x "${INSTALL_DIR}/scripts/albert-ai-sandbox-manager.sh" ]; then
+	"${INSTALL_DIR}/scripts/albert-ai-sandbox-manager.sh" firewall remove >/dev/null 2>&1 || true
+fi
+systemctl disable albert-sandbox-firewall.service >/dev/null 2>&1 || true
+if command -v docker >/dev/null 2>&1; then
+	docker network rm albert-sandbox >/dev/null 2>&1 || true
+fi
+
 say "Removing sandbox disks..."
 if [ -d "${STORAGE_DIR}/mnt" ]; then
 	for m in "${STORAGE_DIR}"/mnt/*; do
@@ -68,7 +77,8 @@ say "Removing systemd units, symlinks and ${INSTALL_DIR}..."
 rm -f /etc/systemd/system/albert-container-manager.service \
 	/etc/systemd/system/albert-inactivity-watcher.service \
 	/etc/systemd/system/albert-inactivity-watcher.timer \
-	/etc/systemd/system/albert-sandbox-disks.service
+	/etc/systemd/system/albert-sandbox-disks.service \
+	/etc/systemd/system/albert-sandbox-firewall.service
 rm -rf /etc/systemd/system/albert-container-manager.service.d
 systemctl daemon-reload
 rm -f /usr/local/bin/albert-ai-sandbox-manager /usr/local/bin/albert-api-key-manager

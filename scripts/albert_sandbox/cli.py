@@ -15,7 +15,7 @@ import secrets
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import admins, clients, db, dockerctl, reconcile, sandboxes, watcher
+from . import admins, clients, db, dockerctl, netctl, reconcile, sandboxes, watcher
 from .config import settings
 from .errors import NotFound, SandboxError
 
@@ -74,6 +74,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("persistent", "set or clear the persistent flag")
     p.add_argument("name")
     p.add_argument("value", choices=["on", "off"])
+
+    p = add("recreate", "rebuild sandbox containers with the current image, hardening and network "
+                        "(data, ports and credentials are kept)")
+    p.add_argument("name", nargs="?")
+    p.add_argument("--outdated", action="store_true", help="rebuild every outdated sandbox")
+    p.add_argument("--force", action="store_true", help="also rebuild sandboxes stuck in 'rebuilding'")
+
+    p = add("firewall", "network isolation of the sandboxes (apply is idempotent)")
+    p.add_argument("action", nargs="?", choices=["apply", "status", "remove"], default="apply")
 
     add("build", "rebuild the sandbox Docker image")
     p = add("reconcile", "remove leftovers and repair routes/mounts")
@@ -404,6 +413,53 @@ def cmd_admin(args: argparse.Namespace, out: Out) -> None:
             raise CliError("usage: admin {add,list,passwd,remove}", "usage", 2)
 
 
+def cmd_recreate(args: argparse.Namespace, out: Out) -> None:
+    client = _resolve_client(args, required=False)
+    client_id = client["id"] if client else None
+    if args.outdated:
+        names = [s["name"] for s in sandboxes.list_sandboxes(client_id)
+                 if s.get("outdated") and s["status"] in ("running", "stopped", "error")]
+    elif args.name:
+        names = [args.name]
+    else:
+        raise CliError("give a sandbox name or --outdated", "usage", 2)
+    results: Dict[str, str] = {}
+    for name in names:
+        if not out.json and not out.quiet:
+            print(f"{YELLOW}Rebuilding {name} ...{NC}", flush=True)
+        try:
+            sandboxes.recreate(name, client_id, actor="cli", force=args.force)
+            results[name] = "ok"
+        except SandboxError as exc:
+            results[name] = exc.message
+    failed = {k: v for k, v in results.items() if v != "ok"}
+    out.emit({"recreated": [k for k, v in results.items() if v == "ok"], "failed": failed},
+             "\n".join(f"{GREEN if v == 'ok' else RED}{k}: {v}{NC}" for k, v in results.items())
+             or "Nothing to rebuild - all sandboxes are up to date.")
+    if failed:
+        raise CliError(f"{len(failed)} sandbox(es) could not be rebuilt", "recreate_failed", 1)
+
+
+def cmd_firewall(args: argparse.Namespace, out: Out) -> None:
+    if args.action == "remove":
+        netctl.remove_firewall()
+        out.emit({"removed": True}, "Sandbox firewall rules removed.")
+        return
+    if args.action == "apply":
+        # At boot this runs before dockerd (rules must exist before containers
+        # come back); the network is then created by the manager/watcher later.
+        if dockerctl.available():
+            netctl.ensure_network()
+        netctl.apply_firewall()
+    status = netctl.firewall_status()
+    net = dockerctl.network_inspect(settings().network_name)
+    status["network"] = settings().network_name if net else None
+    status["icc"] = ((net or {}).get("Options") or {}).get("com.docker.network.bridge.enable_icc")
+    out.emit(status, "\n".join(f"{k}: {v}" for k, v in status.items()))
+    if status.get("enabled") and not status.get("ok"):
+        raise CliError("sandbox firewall is not complete", "firewall", 1)
+
+
 def cmd_reconcile(args: argparse.Namespace, out: Out) -> None:
     report = reconcile.reconcile(dry_run=args.dry_run, actor="cli")
     lines = [f"{'[dry-run] ' if args.dry_run else ''}{a['action']:16} {a['target']}  ({a['detail']})"
@@ -432,7 +488,12 @@ def cmd_selfcheck(args: argparse.Namespace, out: Out) -> None:
             "sandboxes": conn.execute("SELECT COUNT(*) FROM sandboxes").fetchone()[0],
             "admins": admins.count(conn),
         }
+    try:
+        firewall_ok = netctl.firewall_status()["ok"]
+    except SandboxError:
+        firewall_ok = False
     info.update({
+        "isolationOk": firewall_ok and dockerctl.network_inspect(s.network_name) is not None,
         "dockerReachable": dockerctl.available(),
         "image": s.docker_image,
         "imagePresent": bool(dockerctl.image_id(s.docker_image)),
@@ -467,6 +528,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd_admin(args, out)
         elif command == "reconcile":
             cmd_reconcile(args, out)
+        elif command == "recreate":
+            cmd_recreate(args, out)
+        elif command == "firewall":
+            cmd_firewall(args, out)
         elif command == "migrate":
             cmd_migrate(args, out)
         elif command == "mount-disks":
