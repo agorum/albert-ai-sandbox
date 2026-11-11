@@ -1,392 +1,408 @@
 #!/bin/bash
-set -e
+# ALBERT | AI Sandbox manager - install and update.
+#
+#   sudo bash install.sh [--skip-build] [--force-build] [--system-upgrade]
+#
+# The script is idempotent and doubles as the update procedure: run it again
+# from a newer checkout. Running sandboxes keep running during an update;
+# only the manager service restarts briefly. Updates from the former
+# Bash/JSON-registry versions are migrated automatically (sandboxes, routes,
+# API keys stay valid).
+#
+#   --skip-build      never rebuild the sandbox Docker image
+#   --force-build     always rebuild the sandbox Docker image
+#   --system-upgrade  also run "apt-get upgrade" (off by default)
+set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+say()  { echo -e "${GREEN}[install]${NC} $*"; }
+warn() { echo -e "${YELLOW}[install]${NC} $*" >&2; }
+die()  { echo -e "${RED}[install]${NC} $*" >&2; exit 1; }
 
-# Base variables
+SKIP_BUILD=0; FORCE_BUILD=0; SYSTEM_UPGRADE=0
+for arg in "$@"; do
+	case "$arg" in
+		--skip-build) SKIP_BUILD=1 ;;
+		--force-build) FORCE_BUILD=1 ;;
+		--system-upgrade) SYSTEM_UPGRADE=1 ;;
+		-h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		*) die "Unknown argument: $arg" ;;
+	esac
+done
+
+[[ $EUID -eq 0 ]] || die "This script must be run as root"
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 INSTALL_DIR="/opt/albert-ai-sandbox-manager"
-NGINX_CONF_DIR="/etc/nginx/sites-available"
-NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
+STORAGE_DIR="/var/lib/albert-sandbox"
+NGINX_ALBERT_DIR="/etc/nginx/albert"
+NGINX_SITES_AVAILABLE="/etc/nginx/sites-available"
+DEFAULT_SITE="/etc/nginx/sites-enabled/default"
+CONFD="/etc/nginx/conf.d"
+ENV_FILE="${INSTALL_DIR}/config/albert.env"
+CLI="${INSTALL_DIR}/scripts/albert-ai-sandbox-manager.sh"
+BACKUP_DIR="${INSTALL_DIR}/backups/$(date +%Y%m%d_%H%M%S)"
+IMAGE="albert-ai-sandbox:latest"
 
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}ALBERT Sandbox Manager Installation${NC}"
-echo -e "${GREEN}========================================${NC}"
-
-# Root check
-if [[ $EUID -ne 0 ]]; then
-	echo -e "${RED}This script must be run as root${NC}" 
-	exit 1
+UPGRADE=0
+if [ -d "${INSTALL_DIR}/scripts" ] || systemctl list-unit-files 2>/dev/null | grep -q '^albert-container-manager.service'; then
+	UPGRADE=1
 fi
 
-# System update
-echo -e "${YELLOW}Updating system...${NC}"
-apt-get update
-apt-get upgrade -y
-
-# Install dependencies
-echo -e "${YELLOW}Installing dependencies...${NC}"
-apt-get install -y \
-	apt-transport-https \
-	ca-certificates \
-	curl \
-	gnupg \
-	lsb-release \
-	nginx \
-	jq \
-	git \
-	python3 \
-	python3-pip \
-	python3-venv \
-	net-tools
-
-# (Will set up Python virtualenv after copying files)
-
-# Docker installation
-echo -e "${YELLOW}Installing Docker...${NC}"
-if ! command -v docker &> /dev/null; then
-        TMP_DOCKER_SCRIPT="$(mktemp /tmp/get-docker.XXXXXX.sh)"
-        curl -fsSL https://get.docker.com -o "${TMP_DOCKER_SCRIPT}"
-        sh "${TMP_DOCKER_SCRIPT}"
-        rm -f "${TMP_DOCKER_SCRIPT}"
-	systemctl enable docker
-	systemctl start docker
+echo -e "${GREEN}========================================${NC}"
+if [ "$UPGRADE" -eq 1 ]; then
+	echo -e "${GREEN}ALBERT Sandbox Manager - Update${NC}"
 else
-	echo -e "${GREEN}Docker is already installed${NC}"
+	echo -e "${GREEN}ALBERT Sandbox Manager - Installation${NC}"
+fi
+echo -e "${GREEN}========================================${NC}"
+
+# ---------------------------------------------------------------------------
+# Packages + Docker
+# ---------------------------------------------------------------------------
+say "Installing packages..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+if [ "$SYSTEM_UPGRADE" -eq 1 ]; then
+	apt-get upgrade -y
+fi
+apt-get install -y -qq \
+	ca-certificates curl gnupg lsb-release \
+	nginx jq git sqlite3 \
+	python3 python3-venv python3-pip \
+	iproute2 e2fsprogs util-linux tar >/dev/null
+
+if ! command -v docker >/dev/null 2>&1; then
+	say "Installing Docker..."
+	TMP_DOCKER_SCRIPT="$(mktemp /tmp/get-docker.XXXXXX.sh)"
+	curl -fsSL https://get.docker.com -o "${TMP_DOCKER_SCRIPT}"
+	sh "${TMP_DOCKER_SCRIPT}"
+	rm -f "${TMP_DOCKER_SCRIPT}"
+	systemctl enable --now docker
+else
+	say "Docker is already installed ($(docker version --format '{{.Server.Version}}' 2>/dev/null || echo '?'))"
 fi
 
-# Create directory structure
-echo -e "${YELLOW}Creating directory structure...${NC}"
-mkdir -p ${INSTALL_DIR}/{scripts,docker,config,nginx}
+# ---------------------------------------------------------------------------
+# Sandbox Docker image - built from this checkout BEFORE anything on the
+# running system changes, so a failed build leaves the installation untouched.
+# Rebuilt only when docker/ changed (or the image is missing).
+# ---------------------------------------------------------------------------
+mkdir -p "${INSTALL_DIR}/data"
+chmod 700 "${INSTALL_DIR}/data"
+DOCKER_HASH="$(cd "${SCRIPT_DIR}/docker" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+HASH_FILE="${INSTALL_DIR}/data/image-build.sha256"
+NEED_BUILD=0
+if [ "$FORCE_BUILD" -eq 1 ]; then
+	NEED_BUILD=1
+elif ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	NEED_BUILD=1
+elif [ "$(cat "$HASH_FILE" 2>/dev/null || true)" != "$DOCKER_HASH" ]; then
+	NEED_BUILD=1
+fi
+if [ "$SKIP_BUILD" -eq 1 ]; then
+	NEED_BUILD=0
+	docker image inspect "$IMAGE" >/dev/null 2>&1 || warn "Image ${IMAGE} missing and --skip-build given: sandboxes cannot be created until it is built."
+fi
+if [ "$NEED_BUILD" -eq 1 ]; then
+	say "Building Docker image ${IMAGE} (takes a while; running sandboxes are not affected)..."
+	if ! docker build -t "$IMAGE" "${SCRIPT_DIR}/docker"; then
+		die "Docker image build failed - nothing was changed on this system. Fix the build (network access?) and run install.sh again, or use --skip-build to keep the current image."
+	fi
+	echo "$DOCKER_HASH" > "$HASH_FILE"
+else
+	say "Docker image ${IMAGE} is up to date"
+fi
 
-# Copy all files
-echo -e "${YELLOW}Copying files...${NC}"
-cp -r ${SCRIPT_DIR}/scripts/* ${INSTALL_DIR}/scripts/ 2>/dev/null || {
-	echo -e "${YELLOW}Scripts directory not found, skipping...${NC}"
-}
-cp -r ${SCRIPT_DIR}/docker/* ${INSTALL_DIR}/docker/ 2>/dev/null || {
-	echo -e "${YELLOW}Docker directory not found, skipping...${NC}"
-}
-cp -r ${SCRIPT_DIR}/config/* ${INSTALL_DIR}/config/ 2>/dev/null || true
-cp -r ${SCRIPT_DIR}/requirements.txt ${INSTALL_DIR}/ 2>/dev/null || true
+# ---------------------------------------------------------------------------
+# Stop manager + watcher during the update (sandboxes keep running)
+# ---------------------------------------------------------------------------
+if [ "$UPGRADE" -eq 1 ]; then
+	say "Pausing manager service and watcher (sandboxes keep running)..."
+	systemctl stop albert-inactivity-watcher.timer 2>/dev/null || true
+	systemctl stop albert-inactivity-watcher.service 2>/dev/null || true
+	systemctl stop albert-container-manager.service 2>/dev/null || true
+fi
 
-# Python dependencies for manager service (use dedicated venv to avoid PEP 668 issues)
-echo -e "${YELLOW}Setting up Python virtual environment...${NC}"
+# ---------------------------------------------------------------------------
+# Files
+# ---------------------------------------------------------------------------
+say "Copying files to ${INSTALL_DIR}..."
+mkdir -p "${INSTALL_DIR}"/{scripts,docker,config,data,nginx,backups} "$BACKUP_DIR"
+chmod 700 "${INSTALL_DIR}/data" "${INSTALL_DIR}/backups"
+# Files of the former Bash implementation (replaced by scripts/albert_sandbox).
+for legacy in common.sh port-manager.sh nginx-manager.sh manager_db.py api_key_manager.py; do
+	rm -f "${INSTALL_DIR}/scripts/${legacy}"
+done
+rm -rf "${INSTALL_DIR}/scripts/albert_sandbox"
+cp -r "${SCRIPT_DIR}/scripts/." "${INSTALL_DIR}/scripts/"
+cp -r "${SCRIPT_DIR}/docker/." "${INSTALL_DIR}/docker/"
+cp -r "${SCRIPT_DIR}/nginx/." "${INSTALL_DIR}/nginx/"
+cp "${SCRIPT_DIR}/requirements.txt" "${INSTALL_DIR}/"
+find "${INSTALL_DIR}/scripts" -name '__pycache__' -type d -prune -exec rm -rf {} +
+chmod +x "${INSTALL_DIR}"/scripts/*.sh "${INSTALL_DIR}"/scripts/*.py "${INSTALL_DIR}/docker/startup.sh"
+
+# ---------------------------------------------------------------------------
+# Python environment
+# ---------------------------------------------------------------------------
+say "Setting up Python virtual environment..."
 VENV_DIR="${INSTALL_DIR}/venv"
-if [ ! -d "${VENV_DIR}" ]; then
-	python3 -m venv "${VENV_DIR}" 2>/dev/null || {
-		echo -e "${YELLOW}First venv attempt failed, ensuring python3-venv & ensurepip...${NC}";
-		apt-get install -y python3-venv >/dev/null 2>&1 || true
-		python3 -m ensurepip --upgrade 2>/dev/null || true
-		python3 -m venv "${VENV_DIR}" 2>/dev/null || {
-			echo -e "${RED}Virtualenv creation failed twice – falling back to system Python with --break-system-packages${NC}";
-			USE_SYSTEM_PIP=1
-		};
-	}
+[ -x "${VENV_DIR}/bin/python" ] || python3 -m venv "${VENV_DIR}"
+"${VENV_DIR}/bin/pip" install --quiet --upgrade pip
+"${VENV_DIR}/bin/pip" install --quiet --no-cache-dir -r "${INSTALL_DIR}/requirements.txt"
+
+# ---------------------------------------------------------------------------
+# Configuration file (operators edit this; never overwritten)
+# ---------------------------------------------------------------------------
+if [ ! -f "$ENV_FILE" ]; then
+	say "Creating ${ENV_FILE}..."
+	cat > "$ENV_FILE" <<'EOF'
+# ALBERT | AI Sandbox manager configuration (KEY=VALUE).
+# Read by the manager service, the watcher and the CLI. Restart the manager
+# after changes: systemctl restart albert-container-manager
+#
+# Public base URL used in API responses (set by scripts/setup-tls.sh):
+#ALBERT_PUBLIC_URL=https://sandbox.example.com
+#
+# Global per-sandbox defaults (used when a client has no own limit):
+#ALBERT_DEFAULT_CPUS=1
+#ALBERT_DEFAULT_MEMORY_MB=1024
+#ALBERT_DEFAULT_DISK_GB=10
+#
+# Housekeeping: stop after inactivity, remove non-persistent sandboxes after max age (0 = off)
+#ALBERT_INACTIVITY_SECONDS=600
+#ALBERT_MAX_AGE_SECONDS=86400
+#
+# Host port pool for sandbox services (bound to 127.0.0.1 only)
+#ALBERT_PORT_RANGE=20000-29999
+EOF
+	chmod 640 "$ENV_FILE"
 fi
-
-if [ -z "${USE_SYSTEM_PIP:-}" ]; then
-	# Inside venv
-	"${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel --quiet || true
-	echo -e "${YELLOW}Installing Python requirements in venv...${NC}"
-	if [ -f "${INSTALL_DIR}/requirements.txt" ]; then
-		"${VENV_DIR}/bin/pip" install --no-cache-dir -r "${INSTALL_DIR}/requirements.txt" || {
-			echo -e "${RED}Failed to install Python requirements in venv${NC}"; exit 1; }
-	else
-		echo -e "${YELLOW}requirements.txt not found, skipping Python deps (manager service may fail)${NC}"
-	fi
-else
-	echo -e "${YELLOW}Using system Python (no venv). Installing requirements with --break-system-packages (PEP 668 override).${NC}"
-	if [ -f "${INSTALL_DIR}/requirements.txt" ]; then
-		pip3 install --no-cache-dir --break-system-packages -r "${INSTALL_DIR}/requirements.txt" || {
-			echo -e "${RED}Failed to install Python requirements system-wide${NC}"; exit 1; }
-	fi
-fi
-
-# Set permissions
-echo -e "${YELLOW}Setting permissions...${NC}"
-chmod +x ${INSTALL_DIR}/scripts/*.sh 2>/dev/null || true
-chmod +x ${INSTALL_DIR}/docker/startup.sh 2>/dev/null || true
-chmod +x ${INSTALL_DIR}/docker/*.sh 2>/dev/null || true
-
-# Initialize registry
-if [ ! -f "${INSTALL_DIR}/config/container-registry.json" ]; then
-	echo "[]" > ${INSTALL_DIR}/config/container-registry.json
-fi
-
-# Check if Dockerfile exists
-if [ ! -f "${INSTALL_DIR}/docker/Dockerfile" ]; then
-	echo -e "${RED}Error: Dockerfile not found!${NC}"
-	echo -e "${YELLOW}Please ensure all files are copied correctly.${NC}"
-	exit 1
-fi
-
-# Build Docker image
-echo -e "${YELLOW}Building Docker image...${NC}"
-cd ${INSTALL_DIR}/docker
-docker build -t albert-ai-sandbox:latest . || {
-	echo -e "${RED}Error building Docker image!${NC}"
-	echo -e "${YELLOW}Please check Docker installation and Dockerfile.${NC}"
-	exit 1
+# Carry over settings that older versions kept in systemd units/drop-ins.
+set_env_if_missing() {
+	local key="$1" value="$2"
+	[ -n "$value" ] || return 0
+	grep -qE "^${key}=" "$ENV_FILE" && return 0
+	echo "${key}=${value}" >> "$ENV_FILE"
+	say "Migrated ${key}=${value} into ${ENV_FILE}"
 }
+OLD_DROPIN="/etc/systemd/system/albert-container-manager.service.d/public-url.conf"
+if [ -f "$OLD_DROPIN" ]; then
+	set_env_if_missing ALBERT_PUBLIC_URL "$(sed -n 's/^Environment=ALBERT_PUBLIC_URL=//p' "$OLD_DROPIN" | tail -n1)"
+fi
+OLD_WATCHER_UNIT="/etc/systemd/system/albert-inactivity-watcher.service"
+if [ -f "$OLD_WATCHER_UNIT" ]; then
+	for key in ALBERT_INACTIVITY_SECONDS ALBERT_MAX_AGE_SECONDS; do
+		value="$(systemctl show albert-inactivity-watcher.service -p Environment --value 2>/dev/null \
+			| tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n1)"
+		# Only carry over values that differ from the defaults.
+		case "${key}:${value}" in
+			ALBERT_INACTIVITY_SECONDS:600|ALBERT_MAX_AGE_SECONDS:86400|*:) ;;
+			*) set_env_if_missing "$key" "$value" ;;
+		esac
+	done
+fi
 
-# Configure nginx (idempotent include handling)
-echo -e "${YELLOW}Configuring nginx...${NC}"
+# ---------------------------------------------------------------------------
+# Storage for sandbox disk images
+# ---------------------------------------------------------------------------
+mkdir -p "${STORAGE_DIR}"/{disks,mnt,skel}
+chmod 700 "${STORAGE_DIR}" "${STORAGE_DIR}"/{disks,mnt,skel}
 
-DEFAULT_SITE="${NGINX_ENABLED_DIR}/default"
-INCLUDE_LINE="include ${NGINX_CONF_DIR}/albert-*.conf;"
+# ---------------------------------------------------------------------------
+# Database migration (schema + import of the legacy JSON registry)
+# ---------------------------------------------------------------------------
+say "Migrating database..."
+"$CLI" migrate
 
-# Helper to ensure the albert include line is present after every relevant
-# server_name directive. "Relevant" = the default HTTP block (server_name _;)
-# AND any certbot-managed TLS block (server_name ...; # managed by Certbot).
-# Both must include albert-*.conf so /<container>/ and /manager/ work over
-# HTTPS as well as HTTP.
-ensure_single_include_line() {
-	local file_path="$1"
-	local include_line="$2"
+# ---------------------------------------------------------------------------
+# nginx
+# ---------------------------------------------------------------------------
+say "Configuring nginx..."
+mkdir -p "$BACKUP_DIR/nginx"
+cp -a "$DEFAULT_SITE" "$BACKUP_DIR/nginx/default" 2>/dev/null || true
+cp -a "${NGINX_SITES_AVAILABLE}"/albert-*.conf "$BACKUP_DIR/nginx/" 2>/dev/null || true
+cp -a "${CONFD}"/albert-*.conf "$BACKUP_DIR/nginx/" 2>/dev/null || true
 
-	# Backup original to a separate directory (not sites-enabled, which nginx auto-loads)
-	mkdir -p "${INSTALL_DIR}/nginx"
-	cp "$file_path" "${INSTALL_DIR}/nginx/$(basename "$file_path").backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+mkdir -p "${NGINX_ALBERT_DIR}/sandboxes"
+install -m 0644 "${INSTALL_DIR}/nginx/albert-ratelimit.conf" "${CONFD}/albert-ratelimit.conf"
+if [ -f "${CONFD}/albert-security.conf" ]; then
+	# Installed by setup-tls.sh; refresh it (rate-limit zones moved to albert-ratelimit.conf).
+	install -m 0644 "${INSTALL_DIR}/nginx/albert-security.conf" "${CONFD}/albert-security.conf"
+fi
+install -m 0644 "${INSTALL_DIR}/nginx/manager.conf" "${NGINX_ALBERT_DIR}/manager.conf"
+cat > "${NGINX_ALBERT_DIR}/sandboxes.conf" <<EOF
+# Managed by albert-ai-sandbox install.sh - one file per sandbox, written by the manager.
+include ${NGINX_ALBERT_DIR}/sandboxes/*.conf;
+EOF
 
-	# Remove all old markers and include lines (also catches stray variants)
-	sed -i '/# Albert Sandbox Configs/d' "$file_path"
-	sed -i '/# ALBERT Sandbox Configs/d' "$file_path"
-	sed -i '/include .*albert-\*.conf;/d' "$file_path"
+# Write routes for all sandboxes (incl. migrated ones) before switching over.
+ALBERT_NGINX_RELOAD=0 "$CLI" reconcile || warn "reconcile reported errors (see above)"
 
-	# Insert an include block after each matching server_name line.
-	awk -v inc_line="$include_line" '
+INCLUDE_LINE="include ${NGINX_ALBERT_DIR}/*.conf;"
+if [ -f "$DEFAULT_SITE" ]; then
+	# Drop old include lines (incl. the former sites-available/albert-*.conf glob)
+	# and add exactly one include + upload limit per relevant server block.
+	sed -i '/# Albert Sandbox Configs/d; /# ALBERT Sandbox Configs/d' "$DEFAULT_SITE"
+	sed -i '/include .*albert-\*\.conf;/d; /include .*\/etc\/nginx\/albert\/\*\.conf;/d' "$DEFAULT_SITE"
+	sed -i '/^[[:space:]]*client_max_body_size[[:space:]]\+0;/d' "$DEFAULT_SITE"
+	awk -v inc_line="$INCLUDE_LINE" '
 		{
 			print $0
 			if ($0 ~ /server_name[[:space:]]+_;/ || $0 ~ /server_name[[:space:]].*managed by Certbot/) {
-				print "\t# Albert Sandbox Configs"
+				print "\t# ALBERT Sandbox Configs"
 				print "\t" inc_line
+				print "\tclient_max_body_size 0;"
 			}
 		}
-	' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
-}
+	' "$DEFAULT_SITE" > "${DEFAULT_SITE}.tmp" && mv "${DEFAULT_SITE}.tmp" "$DEFAULT_SITE"
+else
+	warn "${DEFAULT_SITE} not found - add '${INCLUDE_LINE}' to your server block manually."
+fi
+# Files of the former layout (per-sandbox routes, global /mcphub route, manager route).
+rm -f "${NGINX_SITES_AVAILABLE}"/albert-*.conf
 
-ensure_client_max_body_size() {
-	local file_path="$1"
-	local setting_line="client_max_body_size 0;"
-
-	# Backup original to a separate directory (not sites-enabled, which nginx auto-loads)
-	mkdir -p "${INSTALL_DIR}/nginx"
-	cp "$file_path" "${INSTALL_DIR}/nginx/$(basename "$file_path").backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-
-	# Drop prior occurrences so this is idempotent across re-runs.
-	sed -i '/^[[:space:]]*client_max_body_size[[:space:]]\+0;/d' "$file_path"
-
-	awk -v cfg_line="$setting_line" '
-		{
-			print $0
-			if ($0 ~ /server_name[[:space:]]+_;/ || $0 ~ /server_name[[:space:]].*managed by Certbot/) {
-				print "\t" cfg_line
-			}
-		}
-	' "$file_path" > "${file_path}.tmp" && mv "${file_path}.tmp" "$file_path"
-}
-
-if [ -f "${DEFAULT_SITE}" ]; then
-	echo -e "${YELLOW}Reconciling nginx default site includes...${NC}"
-
-	# Count target server_name lines (the plain default + any certbot TLS block).
-	target_count=$(grep -cE 'server_name[[:space:]]+_;|server_name[[:space:]].*managed by Certbot' "${DEFAULT_SITE}" 2>/dev/null || true)
-	target_count=${target_count:-0}
-	include_count=$(grep -c "include .*albert-\\*.conf;" "${DEFAULT_SITE}" 2>/dev/null || true)
-	include_count=${include_count:-0}
-
-	if [ "${include_count}" -ne "${target_count}" ] || [ "${target_count}" -eq 0 ]; then
-		ensure_single_include_line "${DEFAULT_SITE}" "${INCLUDE_LINE}"
-		echo -e "${GREEN}✓ Nginx includes normalized (target=${target_count})${NC}"
-	else
-		echo -e "${GREEN}✓ Nginx include already present in all ${include_count} server blocks${NC}"
-	fi
-
-	cmbs_count=$(grep -cE '^[[:space:]]*client_max_body_size[[:space:]]+0;' "${DEFAULT_SITE}" 2>/dev/null || true)
-	cmbs_count=${cmbs_count:-0}
-	if [ "${cmbs_count}" -ne "${target_count}" ]; then
-		echo -e "${YELLOW}Adding client_max_body_size 0 to nginx default site...${NC}"
-		ensure_client_max_body_size "${DEFAULT_SITE}"
-		echo -e "${GREEN}✓ client_max_body_size configured in ${target_count} block(s)${NC}"
-	else
-		echo -e "${GREEN}✓ client_max_body_size already present in all server blocks${NC}"
-	fi
+systemctl enable nginx >/dev/null 2>&1 || true
+if nginx -t 2>/dev/null; then
+	systemctl reload nginx 2>/dev/null || systemctl restart nginx
+	say "nginx reloaded"
+else
+	warn "nginx configuration test failed - restoring previous configuration"
+	nginx -t || true
+	cp -a "$BACKUP_DIR/nginx/default" "$DEFAULT_SITE" 2>/dev/null || true
+	for f in "$BACKUP_DIR"/nginx/albert-*.conf; do
+		[ -e "$f" ] || continue
+		case "$(basename "$f")" in
+			albert-ratelimit.conf|albert-security.conf) cp -a "$f" "${CONFD}/" ;;
+			*) cp -a "$f" "${NGINX_SITES_AVAILABLE}/" ;;
+		esac
+	done
+	[ -f "$BACKUP_DIR/nginx/albert-ratelimit.conf" ] || rm -f "${CONFD}/albert-ratelimit.conf"
+	nginx -t && systemctl reload nginx || true
+	die "nginx update failed, previous configuration restored (backup: $BACKUP_DIR/nginx)"
 fi
 
-# Start/restart nginx
-systemctl enable nginx
-nginx -t && systemctl reload nginx || {
-	echo -e "${YELLOW}Nginx could not be reloaded, trying restart...${NC}"
-	systemctl restart nginx
-}
-
-# Create symlink for easy access
-echo -e "${YELLOW}Creating symlink for global access...${NC}"
-ln -sf ${INSTALL_DIR}/scripts/albert-ai-sandbox-manager.sh /usr/local/bin/albert-ai-sandbox-manager
-ln -sf ${INSTALL_DIR}/scripts/api-key-manager.sh /usr/local/bin/albert-api-key-manager 2>/dev/null || true
+# ---------------------------------------------------------------------------
+# CLI symlinks
+# ---------------------------------------------------------------------------
+ln -sf "${INSTALL_DIR}/scripts/albert-ai-sandbox-manager.sh" /usr/local/bin/albert-ai-sandbox-manager
+ln -sf "${INSTALL_DIR}/scripts/api-key-manager.sh" /usr/local/bin/albert-api-key-manager
 
 # ---------------------------------------------------------------------------
-# Container Manager Service (systemd setup)
+# systemd units
 # ---------------------------------------------------------------------------
-MANAGER_SERVICE_FILE="/etc/systemd/system/albert-container-manager.service"
-echo -e "${YELLOW}Installing/Updating manager systemd unit...${NC}"
-cat > "$MANAGER_SERVICE_FILE" <<'EOF'
+say "Installing systemd units..."
+cat > /etc/systemd/system/albert-container-manager.service <<EOF
 [Unit]
-Description=ALBERT Container Manager REST Service
-After=network-online.target docker.service
-Wants=network-online.target
+Description=ALBERT Sandbox Manager (REST API + admin UI)
+After=network-online.target docker.service albert-sandbox-disks.service
+Wants=network-online.target albert-sandbox-disks.service
+Requires=docker.service
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/albert-ai-sandbox-manager
-ExecStartPre=/usr/bin/bash -c 'for i in {1..15}; do docker info >/dev/null 2>&1 && exit 0; echo "[manager] waiting for docker ($i)"; sleep 2; done; echo "Docker daemon not ready after wait" >&2; exit 1'
-ExecStart=/usr/bin/env bash -c '[ -x /opt/albert-ai-sandbox-manager/venv/bin/python ] && exec /opt/albert-ai-sandbox-manager/venv/bin/python /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py || exec python3 /opt/albert-ai-sandbox-manager/scripts/container_manager_service.py'
+WorkingDirectory=${INSTALL_DIR}
+Environment=PYTHONUNBUFFERED=1
+# Listen on loopback only; clients reach the API through nginx (/manager/).
+Environment=MANAGER_BIND_HOST=127.0.0.1
+Environment=MANAGER_PORT=5001
+Environment=MANAGER_DB_PATH=${INSTALL_DIR}/data/manager.db
+ExecStart=${VENV_DIR}/bin/python ${INSTALL_DIR}/scripts/container_manager_service.py
 Restart=on-failure
 RestartSec=5
-Environment=MANAGER_PORT=5001
-# Bind only to loopback so the manager API is reachable exclusively via the
-# nginx /manager/ reverse proxy (TLS, rate limit, access log). To expose it
-# directly on a different interface, override with a drop-in:
-#   /etc/systemd/system/albert-container-manager.service.d/bind.conf
-#   [Service]
-#   Environment=MANAGER_BIND_HOST=0.0.0.0
-Environment=MANAGER_BIND_HOST=127.0.0.1
-Environment=MANAGER_DB_PATH=/opt/albert-ai-sandbox-manager/data/manager.db
-Environment=MANAGER_DATA_DIR=/opt/albert-ai-sandbox-manager/data/containers
-# Optional: restrict privileges a bit (comment out if causing issues)
-# NoNewPrivileges=true
-# ProtectSystem=full
-# ProtectHome=true
-# PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable albert-container-manager.service
-systemctl restart albert-container-manager.service || echo -e "${YELLOW}Warning: Manager service failed to (re)start; check logs with: journalctl -u albert-container-manager -e${NC}"
 
-# ---------------------------------------------------------------------------
-# Inactivity watcher (systemd setup)
-# ---------------------------------------------------------------------------
-INACTIVITY_SERVICE_FILE="/etc/systemd/system/albert-inactivity-watcher.service"
-INACTIVITY_TIMER_FILE="/etc/systemd/system/albert-inactivity-watcher.timer"
-cat > "$INACTIVITY_SERVICE_FILE" <<'EOF'
+cat > /etc/systemd/system/albert-inactivity-watcher.service <<EOF
 [Unit]
-Description=ALBERT Sandbox Inactivity Watcher
-After=network-online.target nginx.service albert-container-manager.service
-Wants=nginx.service
+Description=ALBERT Sandbox housekeeping (idle stop, expiry, cleanup)
+After=docker.service nginx.service albert-sandbox-disks.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/albert-ai-sandbox-manager
-Environment=ALBERT_INACTIVITY_STATE=/opt/albert-ai-sandbox-manager/data/container-activity.json
-Environment=ALBERT_MANAGER_SCRIPT=/opt/albert-ai-sandbox-manager/scripts/albert-ai-sandbox-manager.sh
-Environment=ALBERT_NGINX_ACCESS_LOG=/var/log/nginx/access.log
-Environment=ALBERT_INACTIVITY_SECONDS=600
-Environment=ALBERT_MAX_AGE_SECONDS=86400
-ExecStart=/usr/bin/env bash -c '[ -x /opt/albert-ai-sandbox-manager/venv/bin/python ] && exec /opt/albert-ai-sandbox-manager/venv/bin/python /opt/albert-ai-sandbox-manager/scripts/inactivity_watcher.py || exec python3 /opt/albert-ai-sandbox-manager/scripts/inactivity_watcher.py'
-
-[Install]
-WantedBy=multi-user.target
+WorkingDirectory=${INSTALL_DIR}
+Environment=PYTHONUNBUFFERED=1
+ExecStart=${VENV_DIR}/bin/python ${INSTALL_DIR}/scripts/inactivity_watcher.py
 EOF
 
-cat > "$INACTIVITY_TIMER_FILE" <<'EOF'
+cat > /etc/systemd/system/albert-inactivity-watcher.timer <<'EOF'
 [Unit]
-Description=Run ALBERT inactivity watcher periodically
+Description=Run ALBERT sandbox housekeeping every minute
 
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=1min
-AccuracySec=30s
+AccuracySec=15s
 
 [Install]
 WantedBy=timers.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now albert-inactivity-watcher.timer
+cat > /etc/systemd/system/albert-sandbox-disks.service <<EOF
+[Unit]
+Description=Mount ALBERT sandbox disk images
+DefaultDependencies=no
+After=local-fs.target
+Before=docker.service
+RequiresMountsFor=${STORAGE_DIR} ${INSTALL_DIR}
 
-# ---------------------------------------------------------------------------
-# Nginx routing for manager service under /manager/
-# ---------------------------------------------------------------------------
-MANAGER_NGX_CONF="${NGINX_CONF_DIR}/albert-manager.conf"
-if [ ! -f "$MANAGER_NGX_CONF" ]; then
-cat > "$MANAGER_NGX_CONF" <<'EOF'
-# Reverse proxy for ALBERT Container Manager REST API
-location /manager/ {
-	# Rate-limit: zone defined in /etc/nginx/conf.d/albert-security.conf
-	# (setup-tls.sh installs it). If the zone is missing, nginx -t will fail;
-	# make sure setup-tls.sh ran before reloading nginx.
-	limit_req zone=albert_manager burst=20 nodelay;
-	proxy_pass http://127.0.0.1:5001/;
-	proxy_http_version 1.1;
-	proxy_set_header Upgrade $http_upgrade;
-	proxy_set_header Connection "upgrade";
-	proxy_set_header Host $host;
-	proxy_set_header X-Real-IP $remote_addr;
-	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-	proxy_set_header X-Forwarded-Proto $scheme;
-	proxy_read_timeout 86400;
-	proxy_buffering off;
-	proxy_request_buffering off;
-	proxy_cache off;
-}
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${CLI} mount-disks
+
+[Install]
+WantedBy=multi-user.target docker.service
 EOF
-	echo -e "${GREEN}✓ Nginx manager route installed (/manager/)${NC}"
+
+# Settings now live in ${ENV_FILE}; the old drop-in would override it.
+rm -f "$OLD_DROPIN"
+rmdir /etc/systemd/system/albert-container-manager.service.d 2>/dev/null || true
+
+systemctl daemon-reload
+systemctl enable albert-sandbox-disks.service >/dev/null 2>&1
+systemctl start albert-sandbox-disks.service
+systemctl enable albert-container-manager.service >/dev/null 2>&1
+systemctl restart albert-container-manager.service
+systemctl enable --now albert-inactivity-watcher.timer >/dev/null 2>&1
+
+# ---------------------------------------------------------------------------
+# First admin user for the web UI
+# ---------------------------------------------------------------------------
+ADMIN_COUNT="$("$CLI" selfcheck --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(json.load(sys.stdin)["admins"])')"
+if [ "$ADMIN_COUNT" = "0" ]; then
+	say "Creating first admin user 'admin' for the web UI..."
+	"$CLI" admin add admin --generate
+	warn "Store this password now - it is not shown again. Change it in the web UI (Admins)."
+fi
+
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+say "Verifying..."
+ok=1
+for i in $(seq 1 20); do
+	code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5001/admin/api/session || true)"
+	[ "$code" = "401" ] || [ "$code" = "200" ] && break
+	sleep 1
+done
+if [ "${code:-}" = "401" ] || [ "${code:-}" = "200" ]; then
+	say "✓ manager service answers on 127.0.0.1:5001"
 else
-	echo -e "${YELLOW}Nginx manager route already exists, skipping${NC}"
+	warn "✗ manager service not reachable (journalctl -u albert-container-manager -e)"; ok=0
 fi
+systemctl is-active --quiet albert-inactivity-watcher.timer && say "✓ watcher timer active" || { warn "✗ watcher timer inactive"; ok=0; }
+docker image inspect "$IMAGE" >/dev/null 2>&1 && say "✓ Docker image ${IMAGE} present" || { warn "✗ Docker image missing"; ok=0; }
+systemctl is-active --quiet nginx && say "✓ nginx running" || { warn "✗ nginx not running"; ok=0; }
 
-# Ensure include line exists (reuse logic already applied earlier)
-if systemctl is-active --quiet nginx; then
-	nginx -t && systemctl reload nginx || systemctl restart nginx || true
-fi
-
-# Verify installation
-echo -e "${YELLOW}Verifying installation...${NC}"
-if [ -f "/usr/local/bin/albert-ai-sandbox-manager" ] && [ -x "/usr/local/bin/albert-ai-sandbox-manager" ]; then
-	echo -e "${GREEN}✓ albert-ai-sandbox-manager successfully installed${NC}"
-else
-	echo -e "${RED}✗ albert-ai-sandbox-manager installation failed${NC}"
-	exit 1
-fi
-
-if docker images | grep -q "albert-ai-sandbox"; then
-	echo -e "${GREEN}✓ Docker image successfully built${NC}"
-else
-	echo -e "${RED}✗ Docker image not found${NC}"
-	exit 1
-fi
-
-if systemctl is-active --quiet nginx; then
-	echo -e "${GREEN}✓ Nginx is running${NC}"
-else
-	echo -e "${RED}✗ Nginx is not running${NC}"
-fi
-
-# Check final nginx configuration: one include per relevant server block
-# (default '_' block plus any certbot-managed TLS block).
-echo -e "${YELLOW}Checking final nginx configuration...${NC}"
-include_count=$(grep -c "include.*albert-\*.conf;" /etc/nginx/sites-enabled/default 2>/dev/null || true)
-include_count=${include_count:-0}
-target_count=$(grep -cE 'server_name[[:space:]]+_;|server_name[[:space:]].*managed by Certbot' /etc/nginx/sites-enabled/default 2>/dev/null || true)
-target_count=${target_count:-0}
-if [ "$include_count" -eq "$target_count" ] && [ "$target_count" -gt 0 ]; then
-	echo -e "${GREEN}✓ Nginx include correctly configured (${include_count}/${target_count} blocks)${NC}"
-elif [ "$include_count" -lt "$target_count" ]; then
-	echo -e "${YELLOW}⚠ Missing include(s): ${include_count}/${target_count} blocks covered${NC}"
-elif [ "$include_count" -gt "$target_count" ]; then
-	echo -e "${YELLOW}⚠ Extra includes found: ${include_count} vs ${target_count} target blocks${NC}"
-else
-	echo -e "${YELLOW}⚠ No nginx include found${NC}"
-fi
-
+PUBLIC_URL="$("$CLI" selfcheck --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(json.load(sys.stdin)["publicUrl"])')"
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}Installation completed!${NC}"
+if [ "$ok" -eq 1 ]; then
+	echo -e "${GREEN}Done. Admin UI: ${PUBLIC_URL}/manager/admin/${NC}"
+else
+	echo -e "${YELLOW}Done with warnings. Admin UI: ${PUBLIC_URL}/manager/admin/${NC}"
+fi
+echo -e "${GREEN}Backups of replaced configuration: ${BACKUP_DIR}${NC}"
 echo -e "${GREEN}========================================${NC}"

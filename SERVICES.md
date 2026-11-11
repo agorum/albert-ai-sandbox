@@ -1,256 +1,106 @@
-# Albert Sandbox Manager Services
+# Albert Sandbox Manager – REST API
 
-This document captures the host-side services that were verified after installing the sandbox manager with `bash install.sh`. The installation copies the runtime into `/opt/albert-ai-sandbox-manager`, enables the `albert-container-manager.service` systemd unit, and exposes the REST API locally on port `5001` by default.
+The manager service (`albert-container-manager.service`) listens on `127.0.0.1:5001` and is published by nginx under `/manager/` (e.g. `https://<host>/manager/containers`). Payloads keep the field names of the former versions; new fields were only added.
 
-## Service Configuration
-- **Base URL**: `http://127.0.0.1:5001`
-- **Environment overrides**: `MANAGER_PORT`, `MANAGER_DB_PATH`, `MANAGER_DATA_DIR`, `MANAGER_ALLOWED_IMAGES`
-- **Authentication**: every endpoint except `/health` expects `Authorization: Bearer <PLAINTEXT_API_KEY>`
+## Client API
+Every endpoint expects `Authorization: Bearer <PLAINTEXT_API_KEY>`. Sandboxes of other clients are reported as `404`.
 
-## Managing API Keys (`api-key-manager.sh`)
-API keys gate access to every container operation. The install drops a helper at `/opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh`, which wraps the Python CLI and pins the correct SQLite/database paths.
+Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 
-Create a key (the plaintext value is only printed once):
-```bash
-sudo /opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh create --label "My team"
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad_request` | invalid input (e.g. non-numeric resources) |
+| 401 | – | missing/invalid API key |
+| 404 | `not_found` | unknown sandbox (or owned by another client) |
+| 409 | `quota_exceeded` | client quota (CPU/RAM of running sandboxes, disk, count) would be exceeded; details: `resource`, `limit`, `used`, `requested` |
+| 409 | `sandbox_limit_exceeded` | requested resources above the client's per-sandbox limit |
+| 409 | `conflict` | sandbox is being created/removed |
+| 500 | `create_failed`, `mcphub_timeout`, `image_missing`, `remove_incomplete` | operation failed (creations are rolled back; incomplete removals are finished by the watcher) |
+| 502 | `docker` | Docker CLI error |
+
+### Sandbox object
+```json
+{
+  "id": "4f2c…",
+  "name": "sbx-agent-lab-01-3f9a0c1d2e4b5a67",
+  "sandboxName": "sbx-agent-lab-01-3f9a0c1d2e4b5a67",
+  "image": "albert-ai-sandbox:latest",
+  "status": "running",
+  "running": true,
+  "startedAt": "2026-11-11T15:02:01.123Z",
+  "finishedAt": null,
+  "createdAt": "2026-11-11T16:02:01+01:00",
+  "persistent": false,
+  "ports": {"novnc": "20000", "vnc": "", "mcphub": "20001", "filesvc": "20002"},
+  "urls": {
+    "desktop": "https://<host>/<name>/",
+    "mcphub": "https://<host>/<name>/mcphub/mcp",
+    "files": "https://<host>/<name>/files/",
+    "filesUpload": "https://<host>/<name>/files/upload",
+    "filesDownloadPattern": "https://<host>/<name>/files/download?path=/tmp/albert-files/<uuid.ext>"
+  },
+  "resources": {"cpus": 1.0, "memoryMb": 1024, "diskGb": 10, "storage": "image"},
+  "usage": {"diskUsedBytes": 52428800, "rootfsUsedBytes": 1048576, "updatedAt": "2026-11-11T16:10:00+01:00"},
+  "lastActivityAt": "2026-11-11T16:09:12+01:00",
+  "clientId": 3
+}
 ```
-Sample output:
-```text
-API Key created:
-  label: My team
-  key:   55kHw2qOisk_aTJycVpJqcLWUA0kEgQZdeXcwCoHV2w
-Store this key now; it will not be shown again.
-```
-
-List registered keys (prints label, timestamp, and hash prefix):
-```bash
-sudo /opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh list
-```
-
-Revoke a key and clean up its sandboxes:
-```bash
-sudo /opt/albert-ai-sandbox-manager/scripts/api-key-manager.sh revoke --key 55kHw2qOisk_aTJycVpJqcLWUA0kEgQZdeXcwCoHV2w
-```
-
-All CLI commands honor `MANAGER_DB_PATH` / `MANAGER_DATA_DIR` if you need to target a non-default database.
-
-## REST API Endpoints
-All examples below were executed against the running service that was installed and verified during this session. Replace `<API_KEY>` with a plaintext key from the manager above.
+`status` is `running`, `stopped`, `creating` or `removing`. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
 
 ### `GET /health`
-Checks the Flask service and Docker connectivity (best-effort ping).
+`{"status": "ok", "docker": "up"}`
 
-```bash
-curl -s http://127.0.0.1:5001/health
-```
-Response observed:
-```json
-{"status":"ok","docker":"down"}
-```
-`docker` flips to `up` when the service can reach the Docker socket; if the Python Docker client cannot negotiate (for example when `requests-unixsocket` is unavailable), it reports `down` while the rest of the API continues to function.
-
-### `GET /containers`
-Returns all sandboxes owned by the calling API key. Each entry merges scheduler metadata and real-time Docker state (when available).
-
-```bash
-curl -s \
-  -H "Authorization: Bearer <API_KEY>" \
-  http://127.0.0.1:5001/containers
-```
-Sample response while three sandboxes were running:
+### `GET /quota` (new)
 ```json
 {
-  "containers": [
-    {
-      "name": "sbx-2bce0e02",
-      "sandboxName": "sbx-2bce0e02",
-      "ownerHash": "c030c7356b35f09989ccec9e0b3b04c1f74f20eee9c5ba9b93a2e9b5e27e0455",
-      "status": "running",
-      "ports": {
-        "vnc": "5900",
-        "novnc": "6080",
-        "mcphub": "7080",
-        "filesvc": "7280"
-      }
-    },
-    {
-      "name": "sbx-a4b86fd1",
-      "sandboxName": "sbx-a4b86fd1",
-      "ownerHash": "c030c7356b35f09989ccec9e0b3b04c1f74f20eee9c5ba9b93a2e9b5e27e0455",
-      "status": "running",
-      "ports": {
-        "vnc": "5901",
-        "novnc": "6081",
-        "mcphub": "7081",
-        "filesvc": "7281"
-      }
-    }
-  ]
+  "quota": {"cpus": 10, "memoryMb": 20480, "diskGb": 200, "sandboxes": null},
+  "usage": {"cpus": 2.0, "memoryMb": 2048, "diskGb": 30, "sandboxes": 3, "running": 2},
+  "defaults": {"cpus": null, "memoryMb": null, "diskGb": null,
+               "effective": {"cpus": 1.0, "memoryMb": 1024, "diskGb": 10}}
 }
 ```
+`null` quota = unlimited; `defaults.effective` is the per-sandbox limit that applies.
 
 ### `POST /containers`
-Creates a new sandbox using the default `albert-ai-sandbox:latest` image and returns JSON describing the provisioned resources.
-
-```bash
-curl -s \
-  -H "Authorization: Bearer <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  http://127.0.0.1:5001/containers
-```
-Observed response (HTTP 201):
+Body (all optional):
 ```json
-{
-  "container": {
-    "name": "sbx-cdf4e078",
-    "sandboxName": "sbx-cdf4e078",
-    "error": "Could not inspect container: Error while fetching server API version: Not supported URL scheme http+docker",
-    "script": {
-      "result": "created",
-      "name": "sbx-cdf4e078",
-      "ownerHash": "c030c7356b35f09989ccec9e0b3b04c1f74f20eee9c5ba9b93a2e9b5e27e0455",
-      "ports": {
-        "vnc": "5902",
-        "novnc": "6082",
-        "mcphub": "7082",
-        "filesvc": "7282"
-      },
-      "urls": {
-        "desktop": "http://10.0.1.61/sbx-cdf4e078/",
-        "filesUpload": "http://10.0.1.61/sbx-cdf4e078/files/upload",
-        "filesDownloadPattern": "http://10.0.1.61/sbx-cdf4e078/files/download?path=/tmp/albert-files/<uuid.ext>",
-        "mcphub": "http://10.0.1.61/sbx-cdf4e078/mcphub/mcp"
-      }
-    }
-  }
-}
+{"name": "agent-lab-01", "persistent": false, "resources": {"cpus": 1, "memoryMb": 1024, "diskGb": 10}}
 ```
-The `error` field appears when Docker inspection fails; the container is still created and accessible through the URLs that the `script` block reports. Normal deployments with `requests-unixsocket` available return runtime metadata in place of the `error` field.
+`name` is a hint; the final name gets a random suffix. Missing resources default to the client's per-sandbox limit; larger values are refused (`sandbox_limit_exceeded`). Response `201 {"container": {…sandbox object…, "vncPassword": "…", "fileServiceToken": "…", "result": "created"}}`. The secrets are only returned here. The call returns when MCP Hub inside the sandbox answers (up to ~2 minutes).
 
-Optional body fields:
-- `name`: request a friendly sandbox name; auto-generated when omitted.
-- `autoStart`: defaults to `true`.
-- `env` / `cmd`: reserved for future use (currently ignored by the wrapper script).
+### `GET /containers`
+`{"containers": [ …sandbox objects… ]}`
 
 ### `GET /containers/{name}`
-Fetches detailed status for a specific sandbox.
+`{"container": { … }}`
 
-```bash
-curl -s \
-  -H "Authorization: Bearer <API_KEY>" \
-  http://127.0.0.1:5001/containers/sbx-cdf4e078
-```
-Sample output while the sandbox was running:
-```json
-{
-  "container": {
-    "name": "sbx-cdf4e078",
-    "sandboxName": "sbx-cdf4e078",
-    "error": "Could not inspect: Error while fetching server API version: Not supported URL scheme http+docker",
-    "script": {
-      "status": "running",
-      "created": "2025-09-22T15:02:01+02:00",
-      "resources": "CPU: 0.03% | RAM: 432.5MiB / 7.753GiB",
-      "ports": {
-        "vnc": "5902",
-        "novnc": "6082",
-        "mcphub": "7082",
-        "filesvc": "7282"
-      },
-      "urls": {
-        "desktop": "http://10.0.1.61/sbx-cdf4e078/",
-        "files": "http://10.0.1.61/sbx-cdf4e078/files/",
-        "mcphub": "http://10.0.1.61/sbx-cdf4e078/mcphub/mcp"
-      }
-    }
-  }
-}
-```
-A `404` is returned if the sandbox cannot be located via the manager wrapper.
+### `POST /containers/{name}/start` · `/stop` · `/restart`
+`{"container": { … }}`. Start checks the CPU/RAM quota and waits for MCP Hub.
 
-### `POST /containers/{name}/stop`
-Gracefully stops the sandbox and echoes updated status metadata.
-
-```bash
-curl -s \
-  -X POST \
-  -H "Authorization: Bearer <API_KEY>" \
-  http://127.0.0.1:5001/containers/sbx-cdf4e078/stop
-```
-Response:
-```json
-{
-  "container": {
-    "name": "sbx-cdf4e078",
-    "sandboxName": "sbx-cdf4e078",
-    "error": "Could not inspect: Error while fetching server API version: Not supported URL scheme http+docker",
-    "script": {
-      "status": "stopped",
-      "ports": {
-        "vnc": "5902",
-        "novnc": "6082",
-        "mcphub": "7082",
-        "filesvc": "7282"
-      },
-      "urls": {
-        "desktop": "http://10.0.1.61/sbx-cdf4e078/",
-        "files": "http://10.0.1.61/sbx-cdf4e078/files/",
-        "mcphub": "http://10.0.1.61/sbx-cdf4e078/mcphub/mcp"
-      }
-    }
-  }
-}
-```
-
-### `POST /containers/{name}/start`
-Restarts a stopped sandbox.
-
-```bash
-curl -s \
-  -X POST \
-  -H "Authorization: Bearer <API_KEY>" \
-  http://127.0.0.1:5001/containers/sbx-cdf4e078/start
-```
-Response mirrors the stop payload with `status: "running"` and fresh resource metrics.
-
-### `POST /containers/{name}/restart`
-Convenience action that issues a stop followed by start.
-
-```bash
-curl -s \
-  -X POST \
-  -H "Authorization: Bearer <API_KEY>" \
-  http://127.0.0.1:5001/containers/sbx-cdf4e078/restart
-```
-Response: same shape as `start`, with resource usage reflecting the new run.
+### `PATCH|POST /containers/{name}/persistent`
+Body `{"persistent": true}` → `{"name": "…", "persistent": true}`
 
 ### `DELETE /containers/{name}`
-Destroys the sandbox and its associated reverse-proxy routing.
+Removes container, disk image, nginx route and database entry → `{"deleted": "…"}`
 
-```bash
-curl -s \
-  -X DELETE \
-  -H "Authorization: Bearer <API_KEY>" \
-  http://127.0.0.1:5001/containers/sbx-cdf4e078
-```
-Response:
-```json
-{"deleted":"sbx-cdf4e078"}
-```
+## Admin API
+Used by the web UI under `/manager/admin/`; JSON under `/manager/admin/api/`. Session cookie after `POST api/login {"username","password"}` (returns a CSRF token); every non-GET request needs the header `X-CSRF-Token`. Failed logins are throttled per IP.
 
-## Under-the-hood CLI (`albert-ai-sandbox-manager.sh`)
-The REST API delegates to `/opt/albert-ai-sandbox-manager/scripts/albert-ai-sandbox-manager.sh`. The script accepts commands such as `create`, `list`, `status`, `start`, `stop`, `restart`, `remove`, and `build`, and it surfaces JSON when `ALBERT_JSON=1` (set automatically by the REST layer). Direct CLI usage is helpful for debugging:
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `api/session` | current admin + CSRF token (401 if not logged in, `hasAdmins`) |
+| POST | `api/login`, `api/logout` | session |
+| GET | `api/overview` | host resources, totals, defaults |
+| GET/POST | `api/clients` | list (with usage) / create (returns `apiKey` once) |
+| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes` (null = unset) / delete with all sandboxes |
+| POST | `api/clients/{id}/rotate-key` | new API key, sandboxes stay |
+| GET | `api/sandboxes[?client=id]` | all sandboxes |
+| PATCH/DELETE | `api/sandboxes/{name}` | `persistent`, `cpus`, `memoryMb`, `diskGb` (disk can only grow) / delete |
+| POST | `api/sandboxes/{name}/start|stop|restart` | lifecycle |
+| GET | `api/sandboxes/{name}/stats` | live docker stats + disk usage |
+| GET/POST | `api/admins`, `api/admins/{id}/password`, DELETE `api/admins/{id}` | admin users |
+| GET/POST | `api/reconcile` | cleanup preview / run |
+| GET | `api/audit?limit=200` | audit log |
 
-```bash
-sudo ALBERT_JSON=1 /opt/albert-ai-sandbox-manager/scripts/albert-ai-sandbox-manager.sh list --api-key-hash $(python3 -c 'import hashlib;print(hashlib.sha256(b"<API_KEY>").hexdigest())')
-```
-
-## Validation Performed
-- Installation via `bash install.sh`
-- Confirmed `albert-container-manager.service` active on port 5001
-- Created API key with `api-key-manager.sh`
-- Exercised `GET /health`, `GET /containers`, `POST /containers`, `GET /containers/{name}`
-- Verified lifecycle actions: stop, start, restart, delete
-- Observed Docker inspection warnings; container lifecycle succeeded regardless
-
+## CLI
+`albert-ai-sandbox-manager help` lists all commands; see README. The REST service no longer shells out to the CLI; both use the same Python package (`scripts/albert_sandbox`).

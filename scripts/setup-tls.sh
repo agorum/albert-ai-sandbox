@@ -173,19 +173,20 @@ APT::Periodic::AutocleanInterval "7";
 AU
 systemctl enable --now unattended-upgrades >/dev/null
 
-# --- Step h: ALBERT_PUBLIC_URL drop-in -------------------------------------
-# Make the public FQDN available to the manager service so REST responses
-# carry https://<fqdn>/... URLs instead of http://<ip>/... . install.sh
-# doesn't know the FQDN, so we place the override here as a systemd drop-in.
+# --- Step h: ALBERT_PUBLIC_URL ---------------------------------------------
+# Make the public FQDN available to the manager (service, watcher and CLI) so
+# REST responses carry https://<fqdn>/... URLs instead of http://<ip>/... .
+# The value goes into the shared config file read by all components.
 say "Configuring ALBERT_PUBLIC_URL for manager service..."
-DROPIN_DIR="/etc/systemd/system/albert-container-manager.service.d"
-DROPIN_FILE="${DROPIN_DIR}/public-url.conf"
-mkdir -p "$DROPIN_DIR"
-backup "$DROPIN_FILE"
-cat > "$DROPIN_FILE" <<EOF
-[Service]
-Environment=ALBERT_PUBLIC_URL=https://${FQDN}
-EOF
+ENV_FILE="/opt/albert-ai-sandbox-manager/config/albert.env"
+mkdir -p "$(dirname "$ENV_FILE")"
+touch "$ENV_FILE"
+backup "$ENV_FILE"
+sed -i '/^ALBERT_PUBLIC_URL=/d' "$ENV_FILE"
+echo "ALBERT_PUBLIC_URL=https://${FQDN}" >> "$ENV_FILE"
+chmod 640 "$ENV_FILE"
+# Older versions used a systemd drop-in; it would override the config file.
+rm -f /etc/systemd/system/albert-container-manager.service.d/public-url.conf
 systemctl daemon-reload
 if systemctl is-active --quiet albert-container-manager.service; then
 	systemctl restart albert-container-manager.service
