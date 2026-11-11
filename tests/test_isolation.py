@@ -170,6 +170,33 @@ def test_rebuilding_sandbox_is_protected(env, make_client):
     assert name in env["docker"].containers
 
 
+def test_boot_firewall_never_touches_docker(env, monkeypatch):
+    from albert_sandbox import cli, dockerctl
+    calls = {}
+
+    def fake_apply(use_docker=True):
+        calls["use_docker"] = use_docker
+        return {"enabled": True, "applied": True, "subnet": "172.30.0.0/16"}
+
+    def docker_forbidden(*_a, **_k):
+        raise AssertionError("docker must not be contacted at boot (socket activation deadlock)")
+
+    monkeypatch.setattr(netctl, "apply_firewall", fake_apply)
+    for attr in ("network_inspect", "available", "network_create", "managed_container_names"):
+        monkeypatch.setattr(dockerctl, attr, docker_forbidden)
+    assert cli.main(["firewall", "apply", "--boot"]) == 0
+    assert calls["use_docker"] is False
+
+
+def test_network_subnet_mismatch_is_reported(env, make_client):
+    client, _ = make_client()
+    env["docker"].networks[NET] = {"Options": {"com.docker.network.bridge.enable_icc": "false"},
+                                   "IPAM": {"Config": [{"Subnet": "172.31.0.0/16"}]}}
+    with pytest.raises(netctl.NetworkError) as exc:
+        sandboxes.create(client["id"])
+    assert "ALBERT_NETWORK_SUBNET" in exc.value.message
+
+
 def test_firewall_rules_follow_configuration(env):
     config.configure(block_nets=("10.0.0.0/8", "169.254.0.0/16"), allow_nets=("10.0.5.0/24",))
     fwd, inp, fp1 = netctl.desired_rules("172.30.0.0/16")

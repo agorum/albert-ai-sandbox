@@ -347,7 +347,7 @@ cat > /etc/systemd/system/albert-inactivity-watcher.timer <<'EOF'
 Description=Run ALBERT sandbox housekeeping every minute
 
 [Timer]
-OnBootSec=2min
+OnBootSec=1min
 OnUnitActiveSec=1min
 AccuracySec=15s
 
@@ -367,7 +367,7 @@ RequiresMountsFor=${INSTALL_DIR}
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=${CLI} firewall apply
+ExecStart=${CLI} firewall apply --boot
 
 [Install]
 WantedBy=multi-user.target docker.service

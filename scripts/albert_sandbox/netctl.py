@@ -57,14 +57,30 @@ def ensure_network() -> Dict[str, Any]:
         raise NetworkError(
             f"docker network {s.network_name} allows inter-container traffic; "
             "remove it (docker network rm) so the manager can recreate it isolated")
+    actual = _subnet_of(info)
+    if actual and actual != s.network_subnet:
+        # The boot-time firewall uses ALBERT_NETWORK_SUBNET, so both must agree.
+        raise NetworkError(
+            f"docker network {s.network_name} uses subnet {actual}, but ALBERT_NETWORK_SUBNET is "
+            f"{s.network_subnet}; set ALBERT_NETWORK_SUBNET={actual} or recreate the network")
     return info
 
 
-def network_subnet(info: Optional[Dict[str, Any]] = None) -> str:
-    info = info or dockerctl.network_inspect(settings().network_name) or {}
+def _subnet_of(info: Dict[str, Any]) -> Optional[str]:
     for cfg in ((info.get("IPAM") or {}).get("Config") or []):
         if cfg.get("Subnet") and ":" not in cfg["Subnet"]:
             return cfg["Subnet"]
+    return None
+
+
+def network_subnet(info: Optional[Dict[str, Any]] = None, use_docker: bool = True) -> str:
+    """Subnet of the sandbox network. ``use_docker=False`` (boot, before dockerd
+    runs - asking docker would deadlock on socket activation) uses the configured value."""
+    if use_docker:
+        info = info or dockerctl.network_inspect(settings().network_name) or {}
+        actual = _subnet_of(info)
+        if actual:
+            return actual
     return settings().network_subnet
 
 
@@ -131,11 +147,11 @@ def _marker(fingerprint: str) -> List[str]:
             "-j", "RETURN"]
 
 
-def firewall_status() -> Dict[str, Any]:
+def firewall_status(use_docker: bool = True) -> Dict[str, Any]:
     s = settings()
     if not s.firewall:
         return {"enabled": False, "ok": True}
-    subnet = network_subnet()
+    subnet = network_subnet(use_docker=use_docker)
     _, _, fingerprint = desired_rules(subnet)
     checks = {
         "forwardChain": _iptables(["-C", CHAIN_FWD, *_marker(fingerprint)], check=False).returncode == 0,
@@ -146,12 +162,15 @@ def firewall_status() -> Dict[str, Any]:
     return {"enabled": True, "ok": all(checks.values()), "subnet": subnet, "fingerprint": fingerprint, **checks}
 
 
-def apply_firewall() -> Dict[str, Any]:
-    """(Re)build both chains and make sure they are hooked in. Idempotent."""
+def apply_firewall(use_docker: bool = True) -> Dict[str, Any]:
+    """(Re)build both chains and make sure they are hooked in. Idempotent.
+
+    ``use_docker=False`` is used at boot (before dockerd starts) and never talks to docker.
+    """
     s = settings()
     if not s.firewall:
         return {"enabled": False, "applied": False}
-    subnet = network_subnet()
+    subnet = network_subnet(use_docker=use_docker)
     fwd, inp, fingerprint = desired_rules(subnet)
     for chain, rules in ((CHAIN_FWD, fwd), (CHAIN_IN, inp)):
         if _iptables(["-n", "-L", chain], check=False).returncode != 0:

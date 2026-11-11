@@ -83,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("firewall", "network isolation of the sandboxes (apply is idempotent)")
     p.add_argument("action", nargs="?", choices=["apply", "status", "remove"], default="apply")
+    p.add_argument("--boot", action="store_true",
+                   help="apply the rules without contacting docker (boot, before dockerd starts)")
 
     add("build", "rebuild the sandbox Docker image")
     p = add("reconcile", "remove leftovers and repair routes/mounts")
@@ -445,11 +447,15 @@ def cmd_firewall(args: argparse.Namespace, out: Out) -> None:
         netctl.remove_firewall()
         out.emit({"removed": True}, "Sandbox firewall rules removed.")
         return
+    if args.action == "apply" and args.boot:
+        # Runs before dockerd so the rules exist before containers come back.
+        # Must not touch docker at all: the docker socket is socket-activated
+        # and dockerd is ordered after this unit -> it would deadlock.
+        result = netctl.apply_firewall(use_docker=False)
+        out.emit(result, f"Sandbox firewall applied for {result.get('subnet', '-')} (boot mode).")
+        return
     if args.action == "apply":
-        # At boot this runs before dockerd (rules must exist before containers
-        # come back); the network is then created by the manager/watcher later.
-        if dockerctl.available():
-            netctl.ensure_network()
+        netctl.ensure_network()
         netctl.apply_firewall()
     status = netctl.firewall_status()
     net = dockerctl.network_inspect(settings().network_name)

@@ -601,6 +601,13 @@ def create_app() -> Flask:
 def serve() -> None:
     s = settings()
     app = create_app()
+    # Second line of defence after boot (the manager starts right after dockerd):
+    # network + firewall rules must be in place for containers docker restarted.
+    try:
+        from . import netctl
+        netctl.ensure_ready()
+    except Exception as exc:  # keep serving; create/start refuse without isolation anyway
+        print(f"[WARN] network isolation not ready at startup: {exc}", flush=True)
     try:
         from waitress import serve as waitress_serve
     except ImportError:  # pragma: no cover - fallback for dev setups
