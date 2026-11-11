@@ -8,15 +8,15 @@ def _arg(args, flag):
     return args[args.index(flag) + 1]
 
 
-def test_create_uses_global_defaults_1cpu_1gb(env, make_client):
+def test_create_uses_global_defaults_1cpu_2gb(env, make_client):
     client, _ = make_client()
     result = sandboxes.create(client["id"])
     args = env["docker"].run_calls[-1]
     assert _arg(args, "--cpus") == "1"
-    assert _arg(args, "--memory") == "1024m"
-    assert _arg(args, "--memory-swap") == "1024m"
+    assert _arg(args, "--memory") == "2048m"
+    assert _arg(args, "--memory-swap") == "2048m"
     assert "--pids-limit" in args
-    assert result["resources"] == {"cpus": 1.0, "memoryMb": 1024, "diskGb": 10, "storage": "image"}
+    assert result["resources"] == {"cpus": 1.0, "memoryMb": 2048, "diskGb": 10, "storage": "image"}
     assert env["disks"].disks[result["name"]]["size"] == 10
     # ports only on loopback, no VNC port published
     published = [args[i + 1] for i, a in enumerate(args) if a == "-p"]

@@ -166,7 +166,7 @@ if [ ! -f "$ENV_FILE" ]; then
 #
 # Global per-sandbox defaults (used when a client has no own limit):
 #ALBERT_DEFAULT_CPUS=1
-#ALBERT_DEFAULT_MEMORY_MB=1024
+#ALBERT_DEFAULT_MEMORY_MB=2048
 #ALBERT_DEFAULT_DISK_GB=10
 #
 # Housekeeping: stop after inactivity, remove non-persistent sandboxes after max age (0 = off)

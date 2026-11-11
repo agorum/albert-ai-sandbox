@@ -62,7 +62,7 @@ def test_client_api_quota_errors_and_quota_endpoint(env, make_client, http):
     assert too_big.status_code == 409 and too_big.get_json()["error"] == "sandbox_limit_exceeded"
     quota = http.get("/quota", headers=auth(key)).get_json()
     assert quota["quota"]["sandboxes"] == 1 and quota["usage"]["sandboxes"] == 1
-    assert quota["defaults"]["effective"]["memoryMb"] == 1024
+    assert quota["defaults"]["effective"]["memoryMb"] == 2048
 
 
 def test_foreign_sandbox_is_404(env, make_client, http):

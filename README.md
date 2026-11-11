@@ -6,7 +6,7 @@ ALBERT | AI Sandbox provides isolated, browser-ready compute environments for AI
 - Spin up dedicated desktop sandboxes per API request, preloaded with browser automation and shell tooling.
 - Share desktops securely over noVNC so users can supervise or intervene without local software.
 - Run MCP Hub with Playwright inside every container to orchestrate browser sessions for the AI agent.
-- **Resource limits per sandbox**: CPU cores, RAM and a hard disk limit (default: 1 core, 1 GB RAM, 10 GB disk).
+- **Resource limits per sandbox**: CPU cores, RAM and a hard disk limit (default: 1 core, 2 GB RAM, 10 GB disk).
 - **Clients with quotas**: every API key is a client with its own per-sandbox limit and an overall quota (cores and RAM used at the same time, total disk, number of sandboxes).
 - **Admin web UI** (`/manager/admin/`): manage admin users and clients, see every sandbox with status and disk usage, start/stop/resize/delete sandboxes or whole clients.
 - Auto-stop sandboxes after 10 minutes of inactivity, auto-delete non-persistent sandboxes after a maximum age (default 24 hours).
@@ -51,7 +51,7 @@ Optional host hardening (TLS via Let's Encrypt, firewall, fail2ban, SSH): `sudo 
 |---|---|---|
 | `ALBERT_PUBLIC_URL` | `http://<primary IP>` | Base URL used in API responses (set by `setup-tls.sh`) |
 | `ALBERT_DEFAULT_CPUS` | `1` | Global per-sandbox CPU limit (if the client has none) |
-| `ALBERT_DEFAULT_MEMORY_MB` | `1024` | Global per-sandbox RAM limit |
+| `ALBERT_DEFAULT_MEMORY_MB` | `2048` | Global per-sandbox RAM limit (an idle desktop needs ~450 MB, one browser page ~900 MB) |
 | `ALBERT_DEFAULT_DISK_GB` | `10` | Global per-sandbox disk size |
 | `ALBERT_INACTIVITY_SECONDS` | `600` | Stop sandboxes after inactivity (data is kept, `0` = off) |
 | `ALBERT_MAX_AGE_SECONDS` | `86400` | Delete non-persistent sandboxes after this age (`0` = off) |
@@ -106,7 +106,7 @@ Add `--json` for machine-readable output.
 Integrators talk to the manager through nginx (`https://<host>/manager/`) or locally (`http://127.0.0.1:5001`) with Bearer authentication. See [SERVICES.md](SERVICES.md) for all endpoints.
 ```bash
 curl -X POST -H "Authorization: Bearer $ALBERT_API_KEY" -H "Content-Type: application/json" \
-     -d '{"name": "agent-lab-01", "resources": {"cpus": 1, "memoryMb": 1024}}' \
+     -d '{"name": "agent-lab-01", "resources": {"cpus": 1, "memoryMb": 2048}}' \
      https://<host>/manager/containers
 ```
 Responses include the noVNC desktop URL, the MCP Hub endpoint, the file service URLs, limits and usage.

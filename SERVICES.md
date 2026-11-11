@@ -39,7 +39,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
     "filesUpload": "https://<host>/<name>/files/upload",
     "filesDownloadPattern": "https://<host>/<name>/files/download?path=/tmp/albert-files/<uuid.ext>"
   },
-  "resources": {"cpus": 1.0, "memoryMb": 1024, "diskGb": 10, "storage": "image"},
+  "resources": {"cpus": 1.0, "memoryMb": 2048, "diskGb": 10, "storage": "image"},
   "usage": {"diskUsedBytes": 52428800, "rootfsUsedBytes": 1048576, "updatedAt": "2026-11-11T16:10:00+01:00"},
   "lastActivityAt": "2026-11-11T16:09:12+01:00",
   "clientId": 3
@@ -56,7 +56,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
   "quota": {"cpus": 10, "memoryMb": 20480, "diskGb": 200, "sandboxes": null},
   "usage": {"cpus": 2.0, "memoryMb": 2048, "diskGb": 30, "sandboxes": 3, "running": 2},
   "defaults": {"cpus": null, "memoryMb": null, "diskGb": null,
-               "effective": {"cpus": 1.0, "memoryMb": 1024, "diskGb": 10}}
+               "effective": {"cpus": 1.0, "memoryMb": 2048, "diskGb": 10}}
 }
 ```
 `null` quota = unlimited; `defaults.effective` is the per-sandbox limit that applies.
@@ -64,7 +64,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 ### `POST /containers`
 Body (all optional):
 ```json
-{"name": "agent-lab-01", "persistent": false, "resources": {"cpus": 1, "memoryMb": 1024, "diskGb": 10}}
+{"name": "agent-lab-01", "persistent": false, "resources": {"cpus": 1, "memoryMb": 2048, "diskGb": 10}}
 ```
 `name` is a hint; the final name gets a random suffix. Missing resources default to the client's per-sandbox limit; larger values are refused (`sandbox_limit_exceeded`). Response `201 {"container": {…sandbox object…, "vncPassword": "…", "fileServiceToken": "…", "result": "created"}}`. The secrets are only returned here. The call returns when MCP Hub inside the sandbox answers (up to ~2 minutes).
 

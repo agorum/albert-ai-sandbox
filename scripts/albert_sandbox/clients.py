@@ -3,7 +3,7 @@ overall quotas.
 
 Per-sandbox limit (``default_*`` columns): CPU, RAM and disk every sandbox of
 the client gets. Unset values fall back to the global defaults
-(ALBERT_DEFAULT_CPUS / _MEMORY_MB / _DISK_GB; 1 core, 1 GB RAM, 10 GB disk).
+(ALBERT_DEFAULT_CPUS / _MEMORY_MB / _DISK_GB; 1 core, 2 GB RAM, 10 GB disk).
 Through the client API a sandbox may request *less*, never more; admins can
 raise the limits of a single sandbox afterwards.
 
