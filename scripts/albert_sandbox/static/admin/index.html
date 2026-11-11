@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="same-origin">
+  <meta name="robots" content="noindex, nofollow">
+  <title>ALBERT | AI Sandbox – Admin</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="static/app.css">
+  <script src="static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar" id="topbar" hidden>
+    <div class="topbar-inner">
+      <a class="brand" href="#/overview">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <span class="brand-name">ALBERT <span class="brand-sep">|</span> AI Sandbox <span class="brand-sub">– Admin</span></span>
+      </a>
+      <nav class="mainnav" aria-label="Hauptnavigation">
+        <a href="#/overview" data-nav="overview">Übersicht</a>
+        <a href="#/clients" data-nav="clients">Clients</a>
+        <a href="#/sandboxes" data-nav="sandboxes">Sandboxen</a>
+        <a href="#/admins" data-nav="admins">Admins</a>
+        <a href="#/maintenance" data-nav="maintenance">Wartung</a>
+      </nav>
+      <div class="userbox">
+        <span class="userbox-name" id="current-user"></span>
+        <button type="button" class="btn small ghost" id="logout-btn">Abmelden</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="view" class="view" tabindex="-1">
+    <div class="boot">Lade …</div>
+  </main>
+
+  <section id="login" class="login" hidden>
+    <form class="login-card" id="login-form" autocomplete="on">
+      <div class="login-brand">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <div>
+          <div class="login-title">ALBERT | AI Sandbox</div>
+          <div class="login-sub">Administration</div>
+        </div>
+      </div>
+      <div class="notice warn" id="login-noadmins" hidden>
+        <strong>Noch kein Admin-Benutzer vorhanden.</strong>
+        <p>Den ersten Admin bitte direkt auf dem Host anlegen:</p>
+        <code class="cmd">albert-ai-sandbox-manager admin add &lt;username&gt;</code>
+      </div>
+      <label class="field">
+        <span class="field-label">Benutzername</span>
+        <input type="text" name="username" id="login-username" autocomplete="username" required autocapitalize="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">Passwort</span>
+        <input type="password" name="password" id="login-password" autocomplete="current-password" required>
+      </label>
+      <div class="form-error" id="login-error" role="alert" hidden></div>
+      <button type="submit" class="btn primary block" id="login-submit">Anmelden</button>
+    </form>
+  </section>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>
