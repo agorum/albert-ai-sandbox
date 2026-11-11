@@ -1756,14 +1756,14 @@
   const USERNAME_PATTERN = "[A-Za-z0-9._@\\-]{3,64}";
 
   function passwordPair() {
-    const pw = h("input", { type: "password", required: true, minlength: "10", maxlength: "256", autocomplete: "new-password" });
-    const pw2 = h("input", { type: "password", required: true, minlength: "10", maxlength: "256", autocomplete: "new-password" });
+    const pw = h("input", { type: "password", required: true, minlength: "8", maxlength: "256", autocomplete: "new-password" });
+    const pw2 = h("input", { type: "password", required: true, minlength: "8", maxlength: "256", autocomplete: "new-password" });
     const check = () => pw2.setCustomValidity(pw2.value && pw.value !== pw2.value ? "Die Passwörter stimmen nicht überein." : "");
     pw.addEventListener("input", check);
     pw2.addEventListener("input", check);
     return {
       pw, pw2,
-      nodes: [field("Neues Passwort", pw, "mindestens 10 Zeichen"), field("Passwort wiederholen", pw2)],
+      nodes: [field("Neues Passwort", pw, "mindestens 8 Zeichen"), field("Passwort wiederholen", pw2)],
       valid() {
         check();
         if (!pw2.checkValidity()) {

@@ -168,6 +168,12 @@ def test_admin_input_validation(env, http):
     assert body["message"] and body["error"]
 
 
+def test_admin_password_min_length_is_8(env, http):
+    h = {"X-CSRF-Token": _login(http)}
+    assert http.post("/admin/api/admins", headers=h, json={"username": "sieben", "password": "1234567"}).status_code == 400
+    assert http.post("/admin/api/admins", headers=h, json={"username": "acht", "password": "12345678"}).status_code == 201
+
+
 def test_login_throttle(env, http):
     _login(http)
     for _ in range(5):

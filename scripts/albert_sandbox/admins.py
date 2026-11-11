@@ -12,7 +12,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from .errors import BadRequest, Conflict, NotFound
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._@-]{3,64}$")
-MIN_PASSWORD_LENGTH = 10
+MIN_PASSWORD_LENGTH = 8
 # Constant-time dummy check for unknown users (avoid user enumeration by timing).
 _DUMMY_HASH = generate_password_hash(secrets.token_urlsafe(16))
 
