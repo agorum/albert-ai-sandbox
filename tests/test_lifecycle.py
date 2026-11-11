@@ -40,7 +40,7 @@ def test_client_limit_is_default_and_ceiling(env, make_client):
 
 
 def test_cpu_and_ram_quota_count_running_sandboxes_only(env, make_client):
-    client, _ = make_client(quota_cpus=2, quota_memory_mb=2048)
+    client, _ = make_client(quota_cpus=2, quota_memory_mb=4096)  # two sandboxes à 1 core / 2 GB
     a = sandboxes.create(client["id"])
     sandboxes.create(client["id"])
     with pytest.raises(QuotaExceeded) as exc:
@@ -50,6 +50,16 @@ def test_cpu_and_ram_quota_count_running_sandboxes_only(env, make_client):
     sandboxes.create(client["id"])  # a is stopped -> capacity free again
     with pytest.raises(QuotaExceeded):
         sandboxes.start(a["name"])
+
+
+def test_ram_quota(env, make_client):
+    client, _ = make_client(quota_memory_mb=4096)
+    sandboxes.create(client["id"])
+    sandboxes.create(client["id"])
+    with pytest.raises(QuotaExceeded) as exc:
+        sandboxes.create(client["id"])
+    assert exc.value.details["resource"] == "memoryMb"
+    assert exc.value.details["used"] == 4096
 
 
 def test_disk_quota_counts_stopped_sandboxes(env, make_client):
