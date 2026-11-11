@@ -35,7 +35,7 @@ def http(method, path, token=None, data=None):
         body = json.dumps(data).encode("utf-8")
     req = urlrequest.Request(url, data=body, method=method, headers=headers)
     try:
-        with urlrequest.urlopen(req, timeout=30) as resp:
+        with urlrequest.urlopen(req, timeout=300) as resp:
             return resp.getcode(), json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
         try:
@@ -47,21 +47,23 @@ def http(method, path, token=None, data=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--key", help="Plaintext API key (if omitted, tries SMOKE_KEY env)")
-    ap.add_argument("--image", default="hello-world", help="Image to run (default hello-world)")
     args = ap.parse_args()
     key = args.key or os.environ.get("SMOKE_KEY")
     if not key:
         print("Provide --key or set SMOKE_KEY env with a valid API key", file=sys.stderr)
         sys.exit(2)
 
+    print("Quota...")
+    print(*http("GET", "/quota", key))
+
     # Create container
     print("Creating container...")
-    code, data = http("POST", "/containers", key, {"image": args.image, "autoStart": True})
+    code, data = http("POST", "/containers", key, {"name": "smoke-test"})
     print(code, data)
     if code != 201:
         print("Create failed")
         return 1
-    cid = data['container']['id']
+    cid = data['container']['name']
 
     print("Listing containers...")
     code, data = http("GET", "/containers", key)
