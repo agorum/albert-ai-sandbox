@@ -725,7 +725,9 @@
     state.view = null;
     state.routeSeq += 1;
     closeAllDialogs();
-    $("#topbar").hidden = true;
+    showVersion(data);
+    $("#mainnav").hidden = true;
+    $("#userbox").hidden = true;
     $("#view").hidden = true;
     $("#view").replaceChildren();
     $("#login").hidden = false;
@@ -741,6 +743,30 @@
     }, 0);
   }
 
+  function showVersion(data) {
+    if (data && data.version) $("#app-version").textContent = data.version;
+  }
+
+  // Colour scheme: auto (follow the OS) -> light -> dark -> auto. static/theme.js
+  // applies the stored choice before the first paint.
+  const THEME_KEY = "albert-admin-theme";
+  const THEME_NEXT = { auto: "light", light: "dark", dark: "auto" };
+  const THEME_LABEL = { auto: "automatisch wie das Betriebssystem", light: "hell", dark: "dunkel" };
+
+  function currentTheme() {
+    const t = document.documentElement.getAttribute("data-theme");
+    return THEME_NEXT[t] ? t : "auto";
+  }
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* storage blocked */ }
+    const btn = $("#theme-toggle");
+    const label = `Darstellung: ${THEME_LABEL[theme]} – klicken für ${THEME_LABEL[THEME_NEXT[theme]]}`;
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+
   function handleUnauthorized(data) {
     if (!state.user) return;
     showLogin(data || { hasAdmins: true });
@@ -751,8 +777,10 @@
     state.user = data.user;
     state.csrf = data.csrf;
     state.refreshFailed = false;
+    showVersion(data);
     $("#login").hidden = true;
-    $("#topbar").hidden = false;
+    $("#mainnav").hidden = false;
+    $("#userbox").hidden = false;
     $("#view").hidden = false;
     $("#current-user").replaceChildren("Angemeldet als ", h("strong", null, data.user.username));
     if (!location.hash || location.hash === "#" || location.hash === "#/") {
@@ -2079,6 +2107,8 @@
   async function boot() {
     $("#login-form").addEventListener("submit", onLoginSubmit);
     $("#logout-btn").addEventListener("click", logout);
+    applyTheme(currentTheme());
+    $("#theme-toggle").addEventListener("click", () => applyTheme(THEME_NEXT[currentTheme()]));
     window.addEventListener("hashchange", () => {
       if (state.user) render();
     });

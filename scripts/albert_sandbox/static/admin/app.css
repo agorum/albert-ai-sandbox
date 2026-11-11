@@ -1,64 +1,107 @@
-/* ALBERT | AI Sandbox - Admin UI
-   Plain CSS, no external resources (strict CSP). Light/dark via prefers-color-scheme. */
+/* agorum ALBERT | AI Sandbox - Admin UI
+   Plain CSS, no external resources (strict CSP).
+   Colours follow the agorum palette (www.agorum.com / agorum webinar):
+   blue #006bff (brand, links, navigation, bars), orange #eb4d27 (primary actions).
+   Theme: <html data-theme="auto|light|dark">, auto follows the OS (static/theme.js). */
 
 :root {
   color-scheme: light;
-  --bg: #f5f6f8;
+  --brand-blue: #006bff;
+  --bg: #f3f5f8;
   --surface: #ffffff;
-  --surface-2: #f0f2f5;
-  --surface-3: #e7eaee;
-  --border: #dde1e6;
-  --border-strong: #c5ccd4;
-  --text: #1b2128;
-  --text-muted: #5b6672;
-  --text-faint: #8a939d;
-  --accent: #2456c9;
-  --accent-hover: #1c46a8;
+  --surface-2: #f2f4f7;
+  --surface-3: #e6e9ee;
+  --border: #dcdfe4;
+  --border-strong: #b9c0c9;
+  --text: #3b3b3b;
+  --text-muted: #646a73;
+  --text-faint: #8a8a8a;
+  --accent: #006bff;
+  --accent-hover: #0057d6;
   --accent-contrast: #ffffff;
-  --accent-soft: #e6edfb;
-  --ok: #1d7a4b;
-  --ok-soft: #e1f3e8;
+  --accent-soft: #e5efff;
+  --cta: #eb4d27;
+  --cta-hover: #d13f1c;
+  --cta-contrast: #ffffff;
+  --ok: #1e7a3c;
+  --ok-soft: #e3f4e8;
   --warn: #9a5b00;
-  --warn-fill: #d48a12;
+  --warn-fill: #e0a100;
   --warn-soft: #fcf0d9;
-  --danger: #c22e2e;
-  --danger-hover: #a52424;
-  --danger-soft: #fbe5e5;
+  --danger: #b3261e;
+  --danger-hover: #951f19;
+  --danger-soft: #fde7e3;
   --neutral-dot: #98a1ab;
-  --shadow-1: 0 1px 2px rgba(16, 24, 32, .06);
-  --shadow-2: 0 12px 32px rgba(16, 24, 32, .18), 0 2px 6px rgba(16, 24, 32, .08);
-  --backdrop: rgba(18, 22, 28, .45);
+  --shadow-1: 0 1px 2px rgba(11, 29, 58, .06);
+  --shadow-2: 0 12px 32px rgba(11, 29, 58, .18), 0 2px 6px rgba(11, 29, 58, .08);
+  --backdrop: rgba(11, 29, 58, .45);
   --radius: 8px;
   --radius-sm: 6px;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --font: "New Science", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
+/* Dark palette: explicit choice, or "auto" while the OS is in dark mode.
+   (Same values in both blocks - CSS cannot share them between a selector and a media query.) */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f1216;
+  --surface: #16191e;
+  --surface-2: #1b1f26;
+  --surface-3: #252a32;
+  --border: #2c323b;
+  --border-strong: #3b424d;
+  --text: #e4e6ea;
+  --text-muted: #a3a9b3;
+  --text-faint: #6b7380;
+  --accent: #6aaaff;
+  --accent-hover: #8dbfff;
+  --accent-contrast: #0b1d3a;
+  --accent-soft: rgba(106, 170, 255, .16);
+  --cta: #eb4d27;
+  --cta-hover: #ff6a45;
+  --cta-contrast: #ffffff;
+  --ok: #6fdc95;
+  --ok-soft: rgba(111, 220, 149, .14);
+  --warn: #e6aa4e;
+  --warn-fill: #d99a3a;
+  --warn-soft: rgba(230, 170, 78, .14);
+  --danger: #ff7a6e;
+  --danger-hover: #ff978d;
+  --danger-soft: rgba(255, 122, 110, .14);
+  --neutral-dot: #6b7380;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .3);
+  --shadow-2: 0 16px 40px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .4);
+  --backdrop: rgba(0, 0, 0, .6);
+}
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root[data-theme="auto"] {
     color-scheme: dark;
-    --bg: #111317;
-    --surface: #181b20;
-    --surface-2: #1f2329;
-    --surface-3: #272c33;
-    --border: #2c3138;
-    --border-strong: #3b424b;
-    --text: #e3e6ea;
-    --text-muted: #9aa3ad;
-    --text-faint: #6e7781;
-    --accent: #6f9bff;
-    --accent-hover: #8fb2ff;
-    --accent-contrast: #0c1220;
-    --accent-soft: #1c2740;
-    --ok: #55c58e;
-    --ok-soft: #16301f;
+    --bg: #0f1216;
+    --surface: #16191e;
+    --surface-2: #1b1f26;
+    --surface-3: #252a32;
+    --border: #2c323b;
+    --border-strong: #3b424d;
+    --text: #e4e6ea;
+    --text-muted: #a3a9b3;
+    --text-faint: #6b7380;
+    --accent: #6aaaff;
+    --accent-hover: #8dbfff;
+    --accent-contrast: #0b1d3a;
+    --accent-soft: rgba(106, 170, 255, .16);
+    --cta: #eb4d27;
+    --cta-hover: #ff6a45;
+    --cta-contrast: #ffffff;
+    --ok: #6fdc95;
+    --ok-soft: rgba(111, 220, 149, .14);
     --warn: #e6aa4e;
     --warn-fill: #d99a3a;
-    --warn-soft: #36280f;
-    --danger: #f27777;
-    --danger-hover: #ff9393;
-    --danger-soft: #3a1b1d;
-    --neutral-dot: #6e7781;
+    --warn-soft: rgba(230, 170, 78, .14);
+    --danger: #ff7a6e;
+    --danger-hover: #ff978d;
+    --danger-soft: rgba(255, 122, 110, .14);
+    --neutral-dot: #6b7380;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, .3);
     --shadow-2: 0 16px 40px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .4);
     --backdrop: rgba(0, 0, 0, .6);
@@ -119,31 +162,30 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
   padding: 0 24px;
   min-height: 54px;
 }
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   color: var(--text);
-  font-weight: 600;
   white-space: nowrap;
 }
 .brand:hover { text-decoration: none; }
-.brand-mark {
-  display: inline-grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  background: var(--accent);
-  color: var(--accent-contrast);
-  font-weight: 700;
-  font-size: 14px;
-  flex: none;
-}
+.brand-logo { width: 30px; height: 30px; flex: none; display: block; }
+.wordmark { height: 16px; width: 67px; flex: none; fill: currentColor; color: var(--text); display: block; }
+.brand-app { font-weight: 500; font-size: 1.05rem; }
 .brand-sep { color: var(--text-faint); font-weight: 400; }
-.brand-sub { color: var(--text-muted); font-weight: 500; }
+.brand-meta { color: var(--text-faint); font-size: .8rem; align-self: flex-end; margin-bottom: 9px; }
+#app-version:not(:empty)::before { content: " · Version "; }
 
-.mainnav { display: flex; gap: 2px; flex: 1; flex-wrap: wrap; }
+.mainnav { display: flex; gap: 2px; flex-wrap: wrap; }
+.topbar-spacer { flex: 1; }
+
+.theme-toggle { display: inline-grid; place-items: center; padding: 5px 8px; }
+.theme-toggle .ti { display: none; }
+:root[data-theme="auto"] .theme-toggle .ti-auto,
+:root[data-theme="light"] .theme-toggle .ti-light,
+:root[data-theme="dark"] .theme-toggle .ti-dark { display: block; }
 .mainnav a {
   color: var(--text-muted);
   padding: 7px 12px;
@@ -342,9 +384,9 @@ dl.kv dd { margin: 0; font-variant-numeric: tabular-nums; min-width: 0; overflow
 .btn:hover { background: var(--surface-2); text-decoration: none; }
 .btn:disabled { cursor: not-allowed; opacity: .55; }
 .btn:disabled:hover { background: var(--surface); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
-.btn.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-.btn.primary:disabled:hover { background: var(--accent); }
+.btn.primary { background: var(--cta); border-color: var(--cta); color: var(--cta-contrast); font-weight: 600; }
+.btn.primary:hover:not(:disabled) { background: var(--cta-hover); border-color: var(--cta-hover); }
+.btn.primary:disabled:hover { background: var(--cta); }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.danger:hover:not(:disabled) { background: var(--danger-hover); border-color: var(--danger-hover); }
 .btn.danger:disabled:hover { background: var(--danger); }
@@ -682,26 +724,32 @@ details.json pre {
 /* ---------- login ---------- */
 
 .login {
-  min-height: 100vh;
   display: grid;
-  place-items: center;
-  padding: 24px 16px;
+  justify-items: center;
+  padding: 48px 16px 64px;
 }
+.login-wrap { width: min(420px, 100%); }
+.login-kicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent);
+  font-weight: 500;
+}
+.login-kicker .wordmark { color: var(--accent); height: 14px; width: 59px; }
+.login-logo { width: 44px; height: 44px; margin-right: 4px; }
+.login-heading { font-size: 1.9rem; font-weight: 300; margin: 6px 0 14px; letter-spacing: -.01em; }
 .login-card {
-  width: min(380px, 100%);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: var(--shadow-2);
-  padding: 26px 26px 24px;
+  box-shadow: var(--shadow-1);
+  padding: 22px 22px 24px;
   display: grid;
   gap: 14px;
 }
+.login-intro { color: var(--text-muted); font-size: .92rem; }
 .login-card .field + .field { margin-top: 0; }
-.login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
-.login-brand .brand-mark { width: 36px; height: 36px; font-size: 18px; border-radius: 8px; }
-.login-title { font-weight: 600; font-size: 1.1rem; }
-.login-sub { color: var(--text-muted); font-size: .9rem; }
 .login .notice p { margin-top: 4px; }
 
 /* ---------- toasts ---------- */
@@ -755,12 +803,18 @@ details.json pre {
 .over-note { color: var(--danger); font-weight: 600; }
 .warn-note { color: var(--warn); font-weight: 600; }
 
+@media (max-width: 1240px) {
+  .brand-meta { display: none; }
+}
 @media (max-width: 1100px) {
   .topbar-inner { gap: 14px; padding: 0 16px; }
-  .brand-sub { display: none; }
   .view { padding: 20px 16px 56px; }
 }
-@media (max-width: 760px) {
-  .topbar-inner { flex-wrap: wrap; padding: 8px 16px; }
-  .mainnav { order: 3; flex-basis: 100%; }
+/* Narrow: brand + user/theme in the first row, navigation as a second row. */
+@media (max-width: 1180px) {
+  .topbar-inner { flex-wrap: wrap; row-gap: 0; padding: 6px 16px 0; }
+  .mainnav { order: 10; flex-basis: 100%; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; }
+}
+@media (max-width: 620px) {
+  .brand-app, .userbox-name { display: none; }
 }

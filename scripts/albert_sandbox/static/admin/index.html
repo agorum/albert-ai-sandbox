@@ -1,34 +1,50 @@
 <!doctype html>
-<html lang="de">
+<html lang="de" data-theme="auto">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="same-origin">
   <meta name="robots" content="noindex, nofollow">
-  <title>ALBERT | AI Sandbox – Admin</title>
-  <link rel="icon" href="data:,">
+  <title>agorum ALBERT | AI Sandbox – Admin</title>
+  <link rel="icon" href="static/logo.svg" type="image/svg+xml">
+  <script src="static/theme.js"></script>
   <link rel="stylesheet" href="static/app.css">
   <script src="static/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar" id="topbar" hidden>
+  <!-- agorum® wordmark (paths from the agorum.com logo), coloured via currentColor -->
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="agorum-wordmark" viewBox="64 11 160 38">
+      <path d="M78.79 29.813c-.726.247-1.858.522-3.412.856-1.554.333-2.585.652-3.064.971-.726.522-1.103 1.175-1.103 1.972 0 .797.29 1.465.885 2.03.581.566 1.336.855 2.237.855 1.016 0 1.975-.333 2.904-1 .682-.508 1.132-1.131 1.336-1.856.145-.478.218-1.392.218-2.74v-1.088ZM71.27 25.26l-5.097-.914c.566-2.044 1.554-3.567 2.962-4.552 1.394-.986 3.485-1.48 6.244-1.48 2.512 0 4.37.29 5.605.885 1.22.595 2.091 1.348 2.585 2.262.494.914.755 2.581.755 5.017l-.058 6.554c0 1.87.087 3.234.276 4.118.174.885.523 1.827 1.016 2.842h-5.561a18.821 18.821 0 0 1-.537-1.653 5.296 5.296 0 0 0-.204-.652c-.958.928-1.99 1.623-3.078 2.102a8.869 8.869 0 0 1-3.5.696c-2.192 0-3.906-.594-5.17-1.783-1.263-1.19-1.887-2.683-1.887-4.495 0-1.204.29-2.262.857-3.205.566-.942 1.38-1.653 2.41-2.16 1.031-.493 2.527-.928 4.473-1.305 2.628-.493 4.443-.957 5.46-1.378v-.566c0-1.073-.262-1.841-.8-2.305-.536-.464-1.538-.696-3.02-.696-1.001 0-1.785.203-2.337.595-.596.405-1.046 1.087-1.394 2.073ZM94.343 28.957c0 2.247.435 3.9 1.307 4.944.87 1.044 1.945 1.566 3.223 1.566 1.38 0 2.527-.536 3.485-1.61.944-1.072 1.423-2.653 1.423-4.755 0-2.103-.45-3.828-1.365-4.887-.9-1.058-2.047-1.595-3.441-1.595-1.394 0-2.454.522-3.325 1.566-.872 1.03-1.307 2.625-1.307 4.77Zm-5.024 12.44 6.418.784c.101.74.348 1.261.74 1.537.538.406 1.38.594 2.513.594 1.466 0 2.57-.217 3.296-.652.493-.29.871-.769 1.118-1.421.174-.464.261-1.32.261-2.581v-3.089c-1.684 2.291-3.804 3.437-6.36 3.437-2.846 0-5.111-1.204-6.781-3.61-1.307-1.9-1.96-4.278-1.96-7.106 0-3.552.856-6.264 2.57-8.149 1.713-1.87 3.848-2.813 6.389-2.813 2.541 0 4.792 1.146 6.505 3.451v-2.972h5.257V37.83c0 2.508-.204 4.379-.625 5.611-.406 1.233-.987 2.204-1.742 2.915-.741.71-1.743 1.261-2.991 1.653-1.249.406-2.818.594-4.734.594-3.601 0-6.157-.609-7.653-1.841-1.51-1.233-2.265-2.799-2.265-4.684.029-.188.029-.42.044-.681ZM119.318 29.392c0 2.102.494 3.712 1.496 4.828 1.002 1.117 2.236 1.682 3.703 1.682 1.467 0 2.701-.565 3.688-1.682.988-1.116 1.496-2.74 1.496-4.872 0-2.131-.494-3.668-1.496-4.785-.987-1.116-2.221-1.682-3.688-1.682s-2.701.566-3.703 1.682c-1.002 1.117-1.496 2.726-1.496 4.829Zm-5.764-.29c0-1.87.464-3.669 1.379-5.409.915-1.74 2.222-3.074 3.906-3.987 1.685-.914 3.572-1.378 5.649-1.378 3.209 0 5.852 1.044 7.899 3.118 2.048 2.088 3.079 4.712 3.079 7.902 0 3.19-1.031 5.873-3.108 7.975-2.076 2.117-4.675 3.161-7.827 3.161-1.945 0-3.804-.435-5.561-1.32-1.772-.884-3.107-2.16-4.022-3.856-.915-1.697-1.394-3.77-1.394-6.206ZM145.252 39.992h-5.619V18.793h5.213v3.016c.886-1.421 1.699-2.364 2.41-2.813a4.463 4.463 0 0 1 2.425-.681c1.278 0 2.512.348 3.703 1.058l-1.742 4.886c-.944-.608-1.83-.913-2.643-.913-.813 0-1.452.218-2.004.652-.552.435-.973 1.218-1.292 2.35-.32 1.13-.465 3.494-.465 7.105v6.539h.014ZM169.779 39.993v-3.176a8.15 8.15 0 0 1-3.05 2.683 8.546 8.546 0 0 1-3.993.971c-1.409 0-2.701-.319-3.834-.942-1.132-.624-1.945-1.508-2.454-2.64-.508-1.13-.755-2.696-.755-4.697V18.779h5.62v9.744c0 2.987.102 4.814.305 5.481a2.956 2.956 0 0 0 1.133 1.595c.551.392 1.234.595 2.076.595.958 0 1.815-.261 2.585-.783.755-.522 1.278-1.175 1.553-1.958.276-.783.422-2.682.422-5.713v-8.946h5.619v21.199h-5.227ZM180.393 18.793h5.184v2.9c1.858-2.248 4.065-3.379 6.621-3.379 1.365 0 2.541.276 3.543.841 1.002.566 1.815 1.407 2.454 2.538.929-1.131 1.946-1.972 3.02-2.538a7.336 7.336 0 0 1 3.456-.84c1.554 0 2.876.319 3.965.942 1.074.638 1.887 1.566 2.425 2.784.392.899.58 2.363.58 4.393v13.558h-5.619V27.885c0-2.103-.189-3.466-.581-4.075-.523-.797-1.321-1.203-2.396-1.203-.784 0-1.525.246-2.222.724-.697.479-1.19 1.175-1.495 2.103-.305.928-.465 2.392-.465 4.379v10.179h-5.619V28.378c0-2.06-.102-3.393-.305-3.988-.204-.595-.509-1.044-.93-1.334-.421-.29-.987-.435-1.713-.435-.871 0-1.641.232-2.338.696-.697.464-1.191 1.131-1.496 2.015-.305.885-.45 2.335-.45 4.38V40.02h-5.619V18.793ZM217.559 16.644h.438c.619 0 1.001-.025 1.155-.072a.705.705 0 0 0 .357-.253.653.653 0 0 0 .131-.406.609.609 0 0 0-.131-.39.68.68 0 0 0-.357-.243c-.154-.05-.537-.073-1.147-.073h-.439v1.437h-.009.002Zm-1.073 2.996v-5.27h1.073c1.008 0 1.57.01 1.692.016.357.032.634.098.829.212.194.113.357.276.496.503.131.228.195.479.195.756 0 .381-.122.706-.375.974-.252.268-.601.438-1.048.503.163.057.284.13.375.195.09.072.203.203.357.405.04.05.171.269.39.641l.626 1.065h-1.326l-.438-.853c-.301-.577-.545-.934-.741-1.087a1.192 1.192 0 0 0-.74-.228h-.276v2.168h-1.089Zm2.261-6.659c-.683 0-1.342.171-1.968.512a3.73 3.73 0 0 0-1.48 1.47 4.079 4.079 0 0 0-.544 2.014c0 .707.179 1.356.528 1.99a3.75 3.75 0 0 0 1.48 1.478 3.979 3.979 0 0 0 1.984.527c.691 0 1.357-.178 1.992-.527a3.855 3.855 0 0 0 1.48-1.478 4.01 4.01 0 0 0-.016-4.003 3.661 3.661 0 0 0-1.489-1.47 4.09 4.09 0 0 0-1.967-.513Zm-.009-.965c.854 0 1.676.211 2.455.64a4.6 4.6 0 0 1 1.846 1.836c.447.796.675 1.624.675 2.493 0 .868-.219 1.689-.659 2.476a4.638 4.638 0 0 1-1.838 1.836 5.028 5.028 0 0 1-2.48.658c-.87 0-1.692-.219-2.481-.658a4.644 4.644 0 0 1-1.838-1.836 5.012 5.012 0 0 1-.659-2.476c0-.869.228-1.705.675-2.493a4.667 4.667 0 0 1 1.846-1.836 5.013 5.013 0 0 1 2.455-.64"/>
+    </symbol>
+  </svg>
+
+  <header class="topbar" id="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="#/overview">
-        <span class="brand-mark" aria-hidden="true">A</span>
-        <span class="brand-name">ALBERT <span class="brand-sep">|</span> AI Sandbox <span class="brand-sub">– Admin</span></span>
+      <a class="brand" href="#/overview" aria-label="agorum ALBERT | AI Sandbox – Admin">
+        <img class="brand-logo" src="static/logo.svg" alt="" width="30" height="30">
+        <svg class="wordmark" aria-hidden="true" focusable="false"><use href="#agorum-wordmark"></use></svg>
+        <span class="brand-app">ALBERT <span class="brand-sep">|</span> AI Sandbox</span>
+        <span class="brand-meta">Admin<span id="app-version"></span></span>
       </a>
-      <nav class="mainnav" aria-label="Hauptnavigation">
+      <nav class="mainnav" id="mainnav" aria-label="Hauptnavigation" hidden>
         <a href="#/overview" data-nav="overview">Übersicht</a>
         <a href="#/clients" data-nav="clients">Clients</a>
         <a href="#/sandboxes" data-nav="sandboxes">Sandboxen</a>
         <a href="#/admins" data-nav="admins">Admins</a>
         <a href="#/maintenance" data-nav="maintenance">Wartung</a>
       </nav>
-      <div class="userbox">
+      <div class="topbar-spacer"></div>
+      <div class="userbox" id="userbox" hidden>
         <span class="userbox-name" id="current-user"></span>
         <button type="button" class="btn small ghost" id="logout-btn">Abmelden</button>
       </div>
+      <button type="button" class="btn small theme-toggle" id="theme-toggle">
+        <svg class="ti ti-auto" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg>
+        <svg class="ti ti-light" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg>
+        <svg class="ti ti-dark" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+      </button>
     </div>
   </header>
 
@@ -37,30 +53,32 @@
   </main>
 
   <section id="login" class="login" hidden>
-    <form class="login-card" id="login-form" autocomplete="on">
-      <div class="login-brand">
-        <span class="brand-mark" aria-hidden="true">A</span>
-        <div>
-          <div class="login-title">ALBERT | AI Sandbox</div>
-          <div class="login-sub">Administration</div>
+    <div class="login-wrap">
+      <div class="login-kicker">
+        <img class="login-logo" src="static/logo.svg" alt="" width="44" height="44">
+        <svg class="wordmark" aria-hidden="true" focusable="false"><use href="#agorum-wordmark"></use></svg>
+        <span>ALBERT | AI Sandbox</span>
+      </div>
+      <h1 class="login-heading">Anmelden</h1>
+      <form class="login-card" id="login-form" autocomplete="on">
+        <p class="login-intro">Melden Sie sich mit Benutzername und Passwort an.</p>
+        <div class="notice warn" id="login-noadmins" hidden>
+          <strong>Noch kein Admin-Benutzer vorhanden.</strong>
+          <p>Den ersten Admin bitte direkt auf dem Host anlegen:</p>
+          <code class="cmd">albert-ai-sandbox-manager admin add &lt;username&gt;</code>
         </div>
-      </div>
-      <div class="notice warn" id="login-noadmins" hidden>
-        <strong>Noch kein Admin-Benutzer vorhanden.</strong>
-        <p>Den ersten Admin bitte direkt auf dem Host anlegen:</p>
-        <code class="cmd">albert-ai-sandbox-manager admin add &lt;username&gt;</code>
-      </div>
-      <label class="field">
-        <span class="field-label">Benutzername</span>
-        <input type="text" name="username" id="login-username" autocomplete="username" required autocapitalize="off" spellcheck="false">
-      </label>
-      <label class="field">
-        <span class="field-label">Passwort</span>
-        <input type="password" name="password" id="login-password" autocomplete="current-password" required>
-      </label>
-      <div class="form-error" id="login-error" role="alert" hidden></div>
-      <button type="submit" class="btn primary block" id="login-submit">Anmelden</button>
-    </form>
+        <label class="field">
+          <span class="field-label">Benutzername</span>
+          <input type="text" name="username" id="login-username" autocomplete="username" required autocapitalize="off" spellcheck="false">
+        </label>
+        <label class="field">
+          <span class="field-label">Passwort</span>
+          <input type="password" name="password" id="login-password" autocomplete="current-password" required>
+        </label>
+        <div class="form-error" id="login-error" role="alert" hidden></div>
+        <div><button type="submit" class="btn primary" id="login-submit">Anmelden</button></div>
+      </form>
+    </div>
   </section>
 
   <div class="toasts" id="toasts" aria-live="polite"></div>

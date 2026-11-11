@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 1400 1400">
+  <title>agorum ALBERT | AI Sandbox</title>
+  <!-- agorum frame (as in the agorum sync / webinar logo), centre: sandbox cube (line weight 54 like the webinar centre) -->
+  <path fill="#006bff" fill-rule="evenodd" d="M658.9,49l-183.1,188.7,112.8,116.2L884.8,49h-225.9ZM738.3,1347.8h-219.9l293-302,110,113.3-183.1,188.7h0ZM139.9,583.5l-69.9,72.4v84.8l405.9,418.6,111.2-114.9-334-344.5,224.4-230.9-113.1-116.6-224.4,231.2h0ZM1147.3,699.7l-335.9-345.8,111.5-114.6,407.4,419.5v81.8l-71.8,74-222.8,229.6-111.2-114.6,222.8-229.9h0Z"/>
+  <g fill="none" stroke="#006bff" stroke-width="54" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M700 516 870 614 870 810 700 908 530 810 530 614Z"/>
+    <path d="M530 614 700 712 870 614M700 712V908"/>
+  </g>
+</svg>

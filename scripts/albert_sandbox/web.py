@@ -27,7 +27,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from flask import Blueprint, Flask, g, jsonify, redirect, request, send_from_directory, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import admins, clients, db, dockerctl, reconcile, sandboxes, storage
+from . import __version__, admins, clients, db, dockerctl, reconcile, sandboxes, storage
 from .config import settings
 from .errors import BadRequest, SandboxError
 
@@ -279,7 +279,8 @@ def admin_login() -> Any:
     session["admin_id"] = user["id"]
     session["epoch"] = user["session_epoch"]
     session["csrf"] = secrets.token_urlsafe(32)
-    return jsonify({"user": {"id": user["id"], "username": user["username"]}, "csrf": session["csrf"]})
+    return jsonify({"user": {"id": user["id"], "username": user["username"]}, "csrf": session["csrf"],
+                    "version": __version__})
 
 
 @admin_bp.post("/api/logout")
@@ -294,10 +295,11 @@ def admin_session() -> Any:
     if not admin:
         with db.session() as conn:
             has_admins = admins.count(conn) > 0
-        return jsonify({"error": "unauthorized", "hasAdmins": has_admins}), 401
+        return jsonify({"error": "unauthorized", "hasAdmins": has_admins, "version": __version__}), 401
     if "csrf" not in session:
         session["csrf"] = secrets.token_urlsafe(32)
-    return jsonify({"user": {"id": admin["id"], "username": admin["username"]}, "csrf": session["csrf"]})
+    return jsonify({"user": {"id": admin["id"], "username": admin["username"]}, "csrf": session["csrf"],
+                    "version": __version__})
 
 
 # --------------------------------------------------------------------------
