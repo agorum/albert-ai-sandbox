@@ -21,7 +21,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 | 403 | `persistent_not_allowed` | the client may not have persistent sandboxes (`POST /containers` with `"persistent": true`, or switching a sandbox to persistent) |
 | 404 | `not_found` | unknown sandbox (or owned by another client) |
 | 503 | `profile_not_ready` | the software profile assigned to the client has not been built yet (an admin has to build it) |
-| 409 | `running_limit_exceeded` | the client already runs as many sandboxes as allowed (create or start); details: `limit`, `used`, `runningSandboxes` – stop one of them first |
+| 409 | `running_limit_exceeded` | the client already runs as many sandboxes as allowed (create or start); details: `limit`, `used`, `runningSandboxes` (only the asking user's own) – stop one of them first |
 | 409 | `quota_exceeded` | client quota (CPU/RAM of running sandboxes, disk, count) would be exceeded; details: `resource`, `limit`, `used`, `requested` |
 | 409 | `sandbox_limit_exceeded` | requested resources above the client's per-sandbox limit |
 | 409 | `conflict` | sandbox is being created/removed |
@@ -63,7 +63,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 `status` is `running`, `stopped`, `creating`, `removing`, `rebuilding` or `error` (a rebuild failed; the sandbox and its data are kept until an admin acts). `outdated` lists why the container should be rebuilt (`image`, `hardening`, `network`, `auth` = container from before the internal tokens of MCP Hub and file service); empty when up to date. `user` is the ALBERT user the sandbox is bound to (`null` = no binding). `urls.desktop` without a one-time link only works for legacy clients; use `POST /containers/{name}/desktop`. `persistentAllowed` tells whether the owning client may switch the sandbox to persistent. `internet` is false for clients without internet access (no outgoing connections, no name resolution). `profile` is the client's software profile (`null` = standard image); `outdated` contains `image` while the sandbox still runs an older image than the client's current one and `network` while its network does not match the internet setting. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
 
 ### `GET /health`
-`{"status": "ok", "docker": "up"}`
+`{"status": "ok", "docker": "up", "api": 3, "features": ["quota", "profiles", "user-binding", "service-auth", "desktop-link", "no-secrets"], "legacyAccess": false, "https": true}` (API key needed, `X-Albert-User` not). `api`/`features` tell this server from older ones (no `api` field: former interface, MCP with the fixed key, no user binding). Every client API response also carries the header `X-Albert-Sandbox-Api: 3`. `legacyAccess`: the client still has the former access; `https`: HTTPS is active (API only over HTTPS).
 
 ### `GET /quota` (new)
 ```json
@@ -78,7 +78,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
   "profile": null
 }
 ```
-`null` quota = unlimited; `quota.running` limits the sandboxes running at the same time; `defaults.effective` is the per-sandbox limit that applies; `persistentAllowed` tells whether persistent sandboxes may be created; `internetAccess` false means the sandboxes cannot reach the internet (install nothing at runtime, use the software of `profile`).
+`null` quota = unlimited; quota and usage totals cover the whole client (all users), `usage.runningNames` only lists the asking user's sandboxes (`X-Albert-User`); `quota.running` limits the sandboxes running at the same time; `defaults.effective` is the per-sandbox limit that applies; `persistentAllowed` tells whether persistent sandboxes may be created; `internetAccess` false means the sandboxes cannot reach the internet (install nothing at runtime, use the software of `profile`).
 
 ### `POST /containers`
 Body (all optional):

@@ -100,6 +100,30 @@ def test_legacy_client_works_without_user_and_hands_sandboxes_over(env, make_cli
     assert "sandbox.claim" in actions
 
 
+def test_health_announces_the_interface(env, make_client, http):
+    _, key = make_client()
+    data = http.get("/health", headers=auth(key))  # no user needed here
+    assert data.status_code == 200 and data.headers["X-Albert-Sandbox-Api"] == "3"
+    body = data.get_json()
+    assert body["api"] == 3 and {"user-binding", "service-auth", "desktop-link"} <= set(body["features"])
+    assert body["legacyAccess"] is False and body["https"] is False
+    assert http.get("/health").status_code == 401  # still needs the API key
+
+
+def test_quota_and_limits_name_only_own_sandboxes(env, make_client, http):
+    _, key = make_client(quota_running=2)
+    a = http.post("/containers", json={}, headers=auth(key, "alice")).get_json()["container"]["name"]
+    b = http.post("/containers", json={}, headers=auth(key, "bob")).get_json()["container"]["name"]
+    usage = http.get("/quota", headers=auth(key, "alice")).get_json()["usage"]
+    assert usage["running"] == 2 and usage["runningNames"] == [a]
+    refused = http.post("/containers", json={}, headers=auth(key, "carol"))
+    assert refused.status_code == 409 and refused.get_json()["error"] == "running_limit_exceeded"
+    body = refused.get_json()
+    assert body["runningSandboxes"] == [] and a not in body["message"] and b not in body["message"]
+    refused = http.post("/containers", json={}, headers=auth(key, "alice")).get_json()
+    assert refused["runningSandboxes"] == [a] and b not in refused["message"]
+
+
 def test_strict_client_does_not_take_over_unbound_sandboxes(env, make_client, http):
     client, key = make_client()
     name = sandboxes.create(client["id"])["name"]  # operator/CLI: no user

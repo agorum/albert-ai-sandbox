@@ -220,14 +220,19 @@ def legacy_access(client: sqlite3.Row) -> bool:
 
 
 def usage(conn: sqlite3.Connection, client_id: int, running: Iterable[str],
-          exclude: Optional[str] = None) -> Dict[str, Any]:
-    """Current consumption of a client against its quotas."""
+          exclude: Optional[str] = None, owner: Optional[str] = None) -> Dict[str, Any]:
+    """Current consumption of a client against its quotas.
+
+    The totals always cover the whole client; with ``owner`` (ALBERT user)
+    ``runningNames`` only lists that user's sandboxes - names of other users'
+    sandboxes are none of their business.
+    """
     running_set = set(running)
     totals: Dict[str, Any] = {"cpus": 0.0, "memoryMb": 0, "diskGb": 0, "sandboxes": 0, "running": 0,
                               "persistent": 0}
     names = []
     for row in conn.execute(
-        "SELECT name, state, persistent, cpus, memory_mb, disk_gb FROM sandboxes WHERE api_key_id=?",
+        "SELECT name, state, persistent, cpus, memory_mb, disk_gb, owner FROM sandboxes WHERE api_key_id=?",
         (client_id,)
     ):
         if exclude and row["name"] == exclude:
@@ -240,7 +245,8 @@ def usage(conn: sqlite3.Connection, client_id: int, running: Iterable[str],
             totals["running"] += 1
             totals["cpus"] += row["cpus"] or 0
             totals["memoryMb"] += row["memory_mb"] or 0
-            names.append(row["name"])
+            if owner is None or row["owner"] == owner:
+                names.append(row["name"])
     totals["cpus"] = round(totals["cpus"], 2)
     totals["runningNames"] = sorted(names)
     return totals
@@ -248,8 +254,11 @@ def usage(conn: sqlite3.Connection, client_id: int, running: Iterable[str],
 
 def check_quota(conn: sqlite3.Connection, client: sqlite3.Row, running: Iterable[str], *,
                 add_cpus: float = 0, add_memory_mb: int = 0, add_disk_gb: int = 0,
-                add_sandboxes: int = 0, add_running: int = 0, exclude: Optional[str] = None) -> None:
-    current = usage(conn, client["id"], running, exclude=exclude)
+                add_sandboxes: int = 0, add_running: int = 0, exclude: Optional[str] = None,
+                owner: Optional[str] = None) -> None:
+    """Refuse an operation that would exceed the client's quotas. ``owner``: the
+    ALBERT user asking - the error then only names that user's own sandboxes."""
+    current = usage(conn, client["id"], running, exclude=exclude, owner=owner)
     limits = quotas(client)
     # Checked first: it is the most specific answer when a sandbox cannot start.
     limit = limits["running"]
@@ -259,9 +268,13 @@ def check_quota(conn: sqlite3.Connection, client: sqlite3.Row, running: Iterable
             message = "This client is not allowed to run sandboxes (limit of running sandboxes is 0)."
         else:
             used = current["running"]
+            if owner is not None and not names:
+                which = "none of them yours. Ask the other users or an administrator to stop one"
+            else:
+                which = (("yours: " if owner is not None else "") + ", ".join(names)
+                         + ". Stop one of them first (POST /containers/<name>/stop)")
             message = (f"This client may run at most {limit} sandbox{'' if limit == 1 else 'es'} at the same "
-                       f"time and {used} {'is' if used == 1 else 'are'} already running: {', '.join(names)}. "
-                       "Stop one of them first (POST /containers/<name>/stop), then try again.")
+                       f"time and {used} {'is' if used == 1 else 'are'} already running ({which}), then try again.")
         raise QuotaExceeded(message, code="running_limit_exceeded",
                             details={"resource": "running", "limit": limit, "used": current["running"],
                                      "requested": add_running, "runningSandboxes": names})

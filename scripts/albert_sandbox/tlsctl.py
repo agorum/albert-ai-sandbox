@@ -382,6 +382,13 @@ def import_existing() -> Optional[Dict[str, Any]]:
 # status for UI / CLI
 # --------------------------------------------------------------------------
 
+def status_brief() -> Dict[str, Any]:
+    """Cheap HTTPS state (no certificate parsing), e.g. for /health."""
+    with db.session() as conn:
+        state = load(conn)
+    return {"active": bool(state.get("active")), "host": state.get("fqdn") if state.get("active") else None}
+
+
 def status() -> Dict[str, Any]:
     s = settings()
     with db.session() as conn:

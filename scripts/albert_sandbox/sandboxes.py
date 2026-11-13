@@ -435,7 +435,8 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
         netctl.ensure_ready(_offline(client))
         with host_lock():
             running = _running()
-            clients.check_quota(conn, client, running, add_cpus=res["cpus"], add_memory_mb=res["memory_mb"],
+            clients.check_quota(conn, client, running, owner=owner, add_cpus=res["cpus"],
+                                add_memory_mb=res["memory_mb"],
                                 add_disk_gb=res["disk_gb"], add_sandboxes=1, add_running=1)
             name = generate_name(conn, requested_name)
             novnc, mcphub, filesvc = ports.allocate(conn, 3)
@@ -513,7 +514,7 @@ def start(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dic
             offline = _offline(client)
             netctl.ensure_ready(offline)
             with host_lock():
-                clients.check_quota(conn, client, _running(), add_cpus=row["cpus"] or 0,
+                clients.check_quota(conn, client, _running(), owner=row["owner"], add_cpus=row["cpus"] or 0,
                                     add_memory_mb=row["memory_mb"] or 0, add_running=1, exclude=name)
                 # The DNS setting is fixed when a container is created: after the
                 # client's internet access changed, rebuild it (data is kept).

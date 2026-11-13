@@ -124,10 +124,33 @@ def _own_sandbox(name: str) -> None:
         access.check_sandbox(conn, name, g.client, g.albert_user, g.client_actor)
 
 
+# Version of the client interface. Clients (ALBERT | AI) use it to tell this
+# server from older ones (no "api" field) and switch their behaviour.
+API_VERSION = 3
+API_FEATURES = (
+    "quota",          # GET /quota
+    "profiles",       # software profiles, internetAccess/profile in /quota
+    "user-binding",   # X-Albert-User; lists and actions limited to the user's sandboxes
+    "service-auth",   # MCP Hub and file service need the API key (+ user)
+    "desktop-link",   # POST /containers/<name>/desktop, one-time links
+    "no-secrets",     # create returns neither VNC password nor file token
+)
+
+
+@client_api.after_request
+def api_version_header(response: Any) -> Any:
+    response.headers["X-Albert-Sandbox-Api"] = str(API_VERSION)
+    return response
+
+
 @client_api.get("/health")
 @client_required
 def health() -> Any:
-    return jsonify({"status": "ok", "docker": "up" if dockerctl.available() else "down"})
+    tls = tlsctl.status_brief()
+    return jsonify({"status": "ok", "docker": "up" if dockerctl.available() else "down",
+                    "api": API_VERSION, "features": list(API_FEATURES),
+                    # The client's own settings, so it can tell which access it gets.
+                    "legacyAccess": clients.legacy_access(g.client), "https": tls["active"]})
 
 
 @client_api.get("/quota")
@@ -135,7 +158,8 @@ def health() -> Any:
 def client_quota() -> Any:
     with db.session() as conn:
         client = clients.get(conn, g.client["id"])
-        usage = clients.usage(conn, client["id"], dockerctl.running_names())
+        # Totals for the whole client; runningNames only the asking user's sandboxes.
+        usage = clients.usage(conn, client["id"], dockerctl.running_names(), owner=g.albert_user)
         profile = profiles.get(conn, client["profile_id"]) if client["profile_id"] else None
     return jsonify({"quota": clients.quotas(client), "usage": usage,
                     "defaults": _defaults_dict(client),
