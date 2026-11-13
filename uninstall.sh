@@ -4,8 +4,8 @@
 #   sudo bash uninstall.sh [--yes]
 #
 # Removes ALL sandboxes including their data (containers, disk images,
-# legacy volumes), the manager, its systemd units, nginx routes and the
-# installation directory. Docker, nginx, Debian packages, the sandbox Docker
+# legacy volumes), sandbox profile images, the manager, its systemd units,
+# nginx routes and the installation directory. Docker, nginx, Debian packages, the sandbox Docker
 # image and /etc/nginx/conf.d/albert-security.conf (setup-tls.sh hardening)
 # are left in place.
 set -uo pipefail
@@ -49,6 +49,11 @@ fi
 systemctl disable albert-sandbox-firewall.service >/dev/null 2>&1 || true
 if command -v docker >/dev/null 2>&1; then
 	docker network rm albert-sandbox >/dev/null 2>&1 || true
+	docker network rm albert-sandbox-offline >/dev/null 2>&1 || true
+	say "Removing sandbox profile images..."
+	for img in $(docker image ls -q --filter label=albert.profile | sort -u); do
+		docker image rm -f "$img" >/dev/null 2>&1 || true
+	done
 fi
 
 say "Removing sandbox disks..."

@@ -26,6 +26,9 @@
     sbxFilter: { text: "", status: "" },
     auditFilter: "",
     lastReconcile: null,
+    profiles: null,      // cached profile list (client forms)
+    profilesAt: 0,
+    baseImage: null,
   };
 
   // ------------------------------------------------------------------------
@@ -331,6 +334,18 @@
     return ov;
   }
 
+  function storeProfiles(data) {
+    state.profiles = data.profiles || [];
+    state.profilesAt = Date.now();
+    state.baseImage = data.baseImage || state.baseImage;
+    return state.profiles;
+  }
+
+  async function getProfiles(maxAgeMs = 15000) {
+    if (state.profiles && Date.now() - state.profilesAt < maxAgeMs) return state.profiles;
+    return storeProfiles(await api("profiles"));
+  }
+
   const ERROR_TITLES = {
     quota_exceeded: "Kontingent überschritten",
     sandbox_limit_exceeded: "Limit pro Sandbox überschritten",
@@ -347,6 +362,10 @@
     client_delete_incomplete: "Client nicht gelöscht",
     create_failed: "Erstellen fehlgeschlagen",
     image_missing: "Docker-Image fehlt",
+    profile_not_ready: "Profil noch nicht gebaut",
+    profile_in_use: "Profil wird verwendet",
+    invalid_package: "Ungültiger Paketname",
+    build_failed: "Bau fehlgeschlagen",
     csrf: "Sicherheits-Token ungültig",
     throttled: "Zu viele Fehlversuche",
     network: "Keine Verbindung",
@@ -686,6 +705,44 @@
     };
   }
 
+  /** "Internetzugriff" switch. Returns {node, input, value(), changed()}. */
+  function internetPolicyField(client) {
+    const initial = !client || client.allowInternet !== false;
+    const input = h("input", { type: "checkbox", class: "switch", name: "allowInternet", checked: initial });
+    const node = h("label", { class: "switch-field" },
+      input,
+      h("span", null,
+        h("span", { class: "field-label" }, "Internetzugriff"),
+        h("span", { class: "field-hint" },
+          "Aus: keine Verbindungen nach außen und keine Namensauflösung, nur freigegebene interne Ziele "
+          + "(ALBERT_ALLOW_NETS). Gilt sofort auch für bestehende Sandboxen.")));
+    return {
+      node,
+      input,
+      value: () => input.checked,
+      changed: () => input.checked !== initial,
+    };
+  }
+
+  /** "Software-Profil" select. Returns {node, value(), changed()}. */
+  function profileSelectField(client, profiles) {
+    const initial = client && client.profileId ? String(client.profileId) : "";
+    const list = [...(profiles || [])];
+    if (client && client.profile && !list.some((p) => p.id === client.profile.id)) list.push(client.profile);
+    const select = h("select", { name: "profileId", class: "wide" },
+      h("option", { value: "" }, "Standard (mitgeliefertes Image)"),
+      list.map((p) => h("option", { value: String(p.id) },
+        p.name + (p.status === "new" || (p.status === "failed" && !p.image) ? " – noch nicht gebaut" : ""))));
+    select.value = initial;
+    const node = field("Software-Profil", select,
+      "Zusatzsoftware für neue Sandboxen. Bestehende werden als veraltet markiert und per „Neu aufbauen“ umgestellt.");
+    return {
+      node,
+      value: () => (select.value ? Number(select.value) : null),
+      changed: () => select.value !== initial,
+    };
+  }
+
   /**
    * "Limit pro Sandbox" + "Gesamtkontingent" fieldsets, side by side.
    * Returns {nodes, values(), changedValues()}.
@@ -883,6 +940,8 @@
     clients: { title: "Clients", nav: "clients", fn: viewClients },
     client: { title: "Client", nav: "clients", fn: viewClientDetail },
     sandboxes: { title: "Sandboxen", nav: "sandboxes", fn: viewSandboxes },
+    profiles: { title: "Profile", nav: "profiles", fn: viewProfiles },
+    profile: { title: "Profil", nav: "profiles", fn: viewProfileDetail },
     admins: { title: "Admins", nav: "admins", fn: viewAdmins },
     maintenance: { title: "Wartung", nav: "maintenance", fn: viewMaintenance },
   };
@@ -898,6 +957,9 @@
     const params = {};
     if (name === "clients" && parts[1]) {
       name = "client";
+      params.id = parts[1];
+    } else if (name === "profiles" && parts[1]) {
+      name = "profile";
       params.id = parts[1];
     }
     if (!VIEWS[name]) name = "overview";
@@ -1059,7 +1121,8 @@
     }
 
     out.push(h("div", { class: "grid cols-4" + (out.length ? " mt-16" : "") },
-      kpi("Clients", fmtNum(ov.clients, 0), null, "Mandanten mit API-Key", "#/clients"),
+      kpi("Clients", fmtNum(ov.clients, 0), null,
+        ov.clientsOffline ? `davon ${fmtNum(ov.clientsOffline, 0)} ohne Internet` : "Mandanten mit API-Key", "#/clients"),
       kpi("Sandboxen", fmtNum(sb.total, 0), null,
         `${fmtNum(sb.running, 0)} laufend · ${fmtNum((sb.total || 0) - (sb.running || 0), 0)} gestoppt`, "#/sandboxes"),
       kpi("CPU-Kerne (Host)", fmtNum(host.cpus, 0), null, "logische Kerne"),
@@ -1134,6 +1197,7 @@
 
     if (ov.isolation) {
       const yesNo = (v) => h("span", { class: ["badge", v ? "ok" : "danger"] }, v ? "aktiv" : "fehlt");
+      const offline = iso.offline || {};
       const isolation = h("div", { class: "panel" }, h("div", { class: "panel-body" },
         h("div", { class: "panel-title" }, "Netz-Isolation"),
         h("dl", { class: "kv" },
@@ -1145,11 +1209,23 @@
           h("dt", null, "Gesperrte Ziele"),
           h("dd", { class: "mono small" }, (iso.blockedNets || []).join(", ") || "–"),
           (iso.allowedNets || []).length ? h("dt", null, "Ausnahmen") : null,
-          (iso.allowedNets || []).length ? h("dd", { class: "mono small" }, iso.allowedNets.join(", ")) : null),
+          (iso.allowedNets || []).length ? h("dd", { class: "mono small" }, iso.allowedNets.join(", ")) : null,
+          h("dt", null, "Netz ohne Internet"),
+          h("dd", null, offline.network ? yesNo(true) : h("span", { class: "faint" }, "wird bei Bedarf angelegt"),
+            " ", h("span", { class: "mono faint" }, offline.subnet || ""))),
         h("p", { class: "metric-note mt-12" },
           "Sandboxen erreichen das Internet, aber weder andere Sandboxen noch interne Netze oder Dienste des Hosts "
-          + "(ALBERT_BLOCK_NETS / ALBERT_ALLOW_NETS).")));
-      out.push(h("div", { class: "grid cols-2 mt-16" }, isolation));
+          + "(ALBERT_BLOCK_NETS / ALBERT_ALLOW_NETS). Sandboxen von Clients ohne Internetzugriff erreichen nur die "
+          + "Ausnahmen und haben keine Namensauflösung.")));
+      const profilesPanel = h("div", { class: "panel" }, h("div", { class: "panel-body" },
+        h("div", { class: "panel-title" }, "Software-Profile"),
+        h("dl", { class: "kv" },
+          h("dt", null, "Profile"), h("dd", null, h("a", { href: "#/profiles" }, fmtNum(ov.profiles || 0, 0))),
+          h("dt", null, "Clients ohne Internet"), h("dd", null, fmtNum(ov.clientsOffline || 0, 0))),
+        h("p", { class: "metric-note mt-12" },
+          "Ein Profil ergänzt das mitgelieferte Sandbox-Image um Pakete (apt, pip, npm). Es wird einem Client "
+          + "zugeordnet; dessen neue Sandboxen entstehen dann aus dem Profil-Image.")));
+      out.push(h("div", { class: "grid cols-2 mt-16" }, isolation, profilesPanel));
     }
     return out;
   }
@@ -1196,6 +1272,16 @@
       count ? h("div", { class: "cell-sub", title: "Vor der Sperre persistent gesetzt; bleiben erhalten" }, count) : null);
   }
 
+  function softwareNetText(client) {
+    return h("div", null,
+      client.profile
+        ? h("a", { href: "#/profiles/" + enc(client.profile.id), title: "Software-Profil" }, client.profile.name)
+        : h("span", { class: "muted", title: "Mitgeliefertes Sandbox-Image" }, "Standard"),
+      h("div", { class: "cell-sub" }, client.allowInternet === false
+        ? h("span", { class: "badge warn" }, "ohne Internet")
+        : "mit Internet"));
+  }
+
   function clientsTable(list) {
     const head = h("thead", null, h("tr", null,
       h("th", null, "Client"),
@@ -1206,6 +1292,7 @@
       h("th", null, "RAM (laufend)"),
       h("th", null, "Disk (alle)"),
       h("th", null, "Limit pro Sandbox"),
+      h("th", null, "Software · Netz"),
       h("th", null, "Persistenz")));
     const rows = list.map((c) => {
       const u = c.usage || {};
@@ -1221,26 +1308,30 @@
         h("td", null, usageCell(u.memoryMb, q.memoryMb, fmtMb)),
         h("td", null, usageCell(u.diskGb, q.diskGb, (n) => fmtNum(n, 0) + " GB")),
         h("td", null, perSandboxText(c)),
+        h("td", null, softwareNetText(c)),
         h("td", null, persistentPolicyText(c)));
     });
     if (!rows.length) {
-      rows.push(h("tr", null, h("td", { class: "empty", colspan: "9" },
+      rows.push(h("tr", null, h("td", { class: "empty", colspan: "10" },
         "Noch keine Clients angelegt. Mit „Client anlegen“ wird ein Client samt API-Key erzeugt.")));
     }
     return h("div", { class: "table-wrap" }, h("table", { class: "data" }, head, h("tbody", null, rows)));
   }
 
   async function openCreateClient() {
-    const ov = await getOverview().catch(() => null);
+    const [ov, profiles] = await Promise.all([getOverview().catch(() => null), getProfiles().catch(() => [])]);
     const label = h("input", { type: "text", name: "label", required: true, maxlength: "200", autocomplete: "off" });
     const limits = clientLimitFields(null, ov);
     const policy = persistentPolicyField(null, ov);
+    const internet = internetPolicyField(null);
+    const profile = profileSelectField(null, profiles);
     const created = await modal({
       title: "Client anlegen",
       wide: true,
       submitLabel: "Client anlegen",
       body: [
-        h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), policy.node),
+        h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), profile.node,
+          policy.node, internet.node),
         limits.nodes,
       ],
       onSubmit: async () => {
@@ -1252,7 +1343,11 @@
           return false;
         }
         return api("clients", {
-          method: "POST", body: { label: text, ...limits.values(), allowPersistent: policy.value() },
+          method: "POST",
+          body: {
+            label: text, ...limits.values(), allowPersistent: policy.value(), allowInternet: internet.value(),
+            profileId: profile.value(),
+          },
         });
       },
     });
@@ -1335,12 +1430,40 @@
             h("span", { class: "sep" }, "|"),
             "Persistente Sandboxen: ",
             h("strong", null, client.allowPersistent ? "erlaubt" : "gesperrt"),
-            u.persistent ? ` (${fmtNum(u.persistent, 0)} persistent${client.allowPersistent ? "" : ", vor der Sperre gesetzt"})` : null))));
+            u.persistent ? ` (${fmtNum(u.persistent, 0)} persistent${client.allowPersistent ? "" : ", vor der Sperre gesetzt"})` : null,
+            h("span", { class: "sep" }, "|"),
+            "Software: ",
+            client.profile
+              ? h("a", { href: "#/profiles/" + enc(client.profile.id) }, h("strong", null, client.profile.name))
+              : h("strong", null, "Standard"),
+            h("span", { class: "sep" }, "|"),
+            "Internet: ",
+            h("strong", null, client.allowInternet === false ? "gesperrt" : "erlaubt")))));
+    }
+
+    /** Asks before the internet access of a client with sandboxes is switched. */
+    async function confirmInternetSwitch(allow) {
+      const list = client.sandboxes || [];
+      if (!list.length) return true;
+      const running = list.filter((s) => s.status === "running").length;
+      return confirmDialog({
+        title: allow ? "Internetzugriff einschalten" : "Internetzugriff abschalten",
+        message: [
+          h("p", null, `Die ${list.length === 1 ? "Sandbox" : `${list.length} Sandboxen`} von `,
+            h("strong", null, client.label || `#${client.id}`), " werden sofort umgestellt: ",
+            allow ? "Verbindungen nach außen und Namensauflösung werden wieder möglich."
+              : "Verbindungen nach außen und die Namensauflösung werden gesperrt."),
+          notice("ok", "Daten bleiben erhalten.",
+            "Die Container werden dafür neu aufgebaut; Home-Verzeichnis, Uploads, Ports und Zugangsdaten bleiben gleich."
+            + (running ? ` ${running} laufende Sandbox${running === 1 ? " ist" : "en sind"} dabei kurz nicht erreichbar.` : "")),
+        ],
+        confirmLabel: "Speichern und umstellen",
+      });
     }
 
     async function renderForm() {
       formRendered = true;
-      const ov = await getOverview().catch(() => null);
+      const [ov, profiles] = await Promise.all([getOverview().catch(() => null), getProfiles().catch(() => [])]);
       if (!ctx.alive()) return;
       const label = h("input", {
         type: "text", name: "label", required: true, maxlength: "200", autocomplete: "off", value: client.label || "",
@@ -1348,11 +1471,13 @@
       label.dataset.initial = client.label || "";
       const limits = clientLimitFields(client, ov);
       const policy = persistentPolicyField(client, ov);
+      const internet = internetPolicyField(client);
+      const profile = profileSelectField(client, profiles);
       const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Änderungen speichern");
       const resetBtn = h("button", { type: "button", class: "btn" }, "Zurücksetzen");
       const status = h("span", { class: "state" });
       const form = h("form", { class: "panel panel-body" },
-        h("div", { class: "form-row" }, field("Bezeichnung", label), policy.node),
+        h("div", { class: "form-row" }, field("Bezeichnung", label), profile.node, policy.node, internet.node),
         limits.nodes,
         h("div", { class: "form-actions" }, saveBtn, resetBtn, status));
       resetBtn.addEventListener("click", () => renderForm());
@@ -1364,6 +1489,11 @@
         }
         const payload = limits.changedValues();
         if (policy.changed()) payload.allowPersistent = policy.value();
+        if (profile.changed()) payload.profileId = profile.value();
+        if (internet.changed()) {
+          if (!(await confirmInternetSwitch(internet.value()))) return;
+          payload.allowInternet = internet.value();
+        }
         if (changed(label)) {
           const text = label.value.trim();
           if (!text) {
@@ -1384,11 +1514,18 @@
           const data = await api("clients/" + id, { method: "PATCH", body: payload });
           if (!ctx.alive()) return;
           client = { ...data.client, sandboxes: client.sandboxes };
-          toast("Client gespeichert.", { type: "success" });
+          if (data.client.networkPolicy === "applying") {
+            toast("Client gespeichert. Die Sandboxen werden jetzt umgestellt – das kann etwas dauern.",
+              { type: "success" });
+            setTimeout(() => { if (ctx.alive()) refresh({ silent: true }); }, 3000);
+          } else {
+            toast("Client gespeichert.", { type: "success" });
+          }
           renderHead();
           renderQuota();
           renderForm();
-          if ("allowPersistent" in payload) refresh({ silent: true }); // persistence switches in the table
+          // persistence switches, profile and network state in the sandbox table
+          if (["allowPersistent", "profileId", "allowInternet"].some((k) => k in payload)) refresh({ silent: true });
         } catch (err) {
           showError(err, "Speichern fehlgeschlagen");
         } finally {
@@ -1492,9 +1629,9 @@
     recreate: "baut neu auf …",
   };
   const OUTDATED_LABEL = {
-    image: "älteres Sandbox-Image",
+    image: "älteres Image (Sandbox-Image oder Software-Profil)",
     hardening: "ohne aktuelle Container-Härtung",
-    network: "nicht im isolierten Netz",
+    network: "Netz passt nicht zur Client-Einstellung",
   };
 
   function outdatedBadge(s) {
@@ -1580,6 +1717,10 @@
           class: "sbx-name",
           title: s.status === "stopped" ? "Desktop erst nach dem Start erreichbar" : null,
         }, s.name),
+      (s.profile || s.internet === false) ? h("div", { class: "cell-tags" },
+        s.profile ? h("span", { class: "tag", title: "Software-Profil des Clients" }, s.profile.name) : null,
+        s.internet === false ? h("span", { class: "tag warn", title: "Kein Internetzugriff, keine Namensauflösung" },
+          "ohne Internet") : null) : null,
       s.lastError ? h("div", { class: "err-line", title: s.lastError }, "Fehler: " + s.lastError) : null);
 
     const clientCell = showClient
@@ -1623,6 +1764,7 @@
     rebuild: [["path", { d: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94"
       + "l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" }]],
     live: [["path", { d: "M3 12h4l3-8 4 16 3-8h4" }]],
+    build: [["path", { d: "M21 8 12 3 3 8l9 5 9-5z" }], ["path", { d: "M3 8v8l9 5 9-5V8" }], ["path", { d: "M12 13v8" }]],
     remove: [["path", { d: "M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" }]],
   };
 
@@ -1707,7 +1849,9 @@
       title: "Sandbox neu aufbauen",
       message: [
         h("p", null, "Der Container von ", h("strong", { class: "mono" }, s.name),
-          " wird mit dem aktuellen Sandbox-Image, der aktuellen Härtung und im isolierten Netz neu erstellt."),
+          " wird mit dem aktuellen Image des Clients (", s.profile ? `Profil „${s.profile.name}“` : "Standard",
+          "), der aktuellen Härtung und im passenden Netz (",
+          s.internet === false ? "ohne Internet" : "mit Internet", ") neu erstellt."),
         reasons.length ? h("p", null, "Grund: " + reasons.join(", ") + ".") : null,
         notice("ok", "Daten bleiben erhalten.",
           "Home-Verzeichnis, Uploads, Ports, Desktop-URL und Zugangsdaten bleiben gleich. "
@@ -2097,6 +2241,388 @@
   }
 
   // ------------------------------------------------------------------------
+  // view: Profile (extra software on top of the shipped sandbox image)
+  // ------------------------------------------------------------------------
+
+  const PROFILE_STATUS = {
+    new: ["noch nicht gebaut", "warn"],
+    queued: ["wartet auf Bau", "accent busy"],
+    building: ["wird gebaut", "accent busy"],
+    ready: ["bereit", "ok"],
+    outdated: ["veraltet", "warn"],
+    failed: ["Bau fehlgeschlagen", "danger"],
+  };
+  const PROFILE_OUTDATED = {
+    config: "Pakete oder Befehle wurden seit dem letzten Bau geändert",
+    base: "das mitgelieferte Sandbox-Image wurde aktualisiert",
+  };
+  const PACKAGE_KINDS = [
+    { key: "apt", label: "Systempakete (apt)", placeholder: "libreoffice\ntesseract-ocr-deu",
+      hint: "Ubuntu-Pakete, je Zeile eins (oder mit Leerzeichen getrennt), optional mit Version: paket=1.2-3" },
+    { key: "pip", label: "Python-Pakete (pip)", placeholder: "pandas\nopenpyxl==3.1.5",
+      hint: "z. B. pandas oder openpyxl==3.1.5" },
+    { key: "npm", label: "Node-Pakete (npm, global)", placeholder: "typescript",
+      hint: "z. B. typescript oder @mermaid-js/mermaid-cli@11.4.2" },
+  ];
+  const BUILD_ACTIVE = new Set(["queued", "building"]);
+
+  function profileStatusBadge(p) {
+    const [label, cls] = PROFILE_STATUS[p.status] || [p.status || "unbekannt", "warn"];
+    const reasons = (p.outdatedReasons || []).map((r) => PROFILE_OUTDATED[r] || r);
+    return h("span", { class: ["badge", cls], title: reasons.length ? "Veraltet: " + reasons.join("; ") : null }, label);
+  }
+
+  function packageList(p) {
+    const pk = p.packages || {};
+    return PACKAGE_KINDS.flatMap((k) => pk[k.key] || []);
+  }
+
+  function softwareCell(p) {
+    const pk = p.packages || {};
+    const counts = PACKAGE_KINDS.map((k) => [k.key, (pk[k.key] || []).length]).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${n} ${k}`);
+    if (p.setupScript) counts.push("eigene Befehle");
+    const all = packageList(p);
+    const preview = all.join(", ");
+    return h("div", { title: all.join("\n") || null },
+      h("div", null, counts.join(" · ") || h("span", { class: "faint" }, "keine Zusatzsoftware")),
+      all.length ? h("div", { class: "cell-sub" }, preview.length > 80 ? preview.slice(0, 79) + "…" : preview) : null);
+  }
+
+  function imageCell(p) {
+    if (!p.image) return h("span", { class: "faint" }, "–");
+    return h("div", null,
+      h("div", { class: "mono small" }, p.image),
+      h("div", { class: "cell-sub" }, isNum(p.imageSizeBytes) ? fmtBytes(p.imageSizeBytes) + " · " : "",
+        "gebaut ", timeEl(p.builtAt, true)));
+  }
+
+  function clientLinks(list) {
+    if (!list || !list.length) return h("span", { class: "faint" }, "keinem Client");
+    return h("div", { class: "link-list" }, list.map((c, i) => [i ? ", " : null,
+      h("a", { href: "#/clients/" + enc(c.id) }, c.label || `Client ${c.id}`)]));
+  }
+
+  async function buildProfile(p, { after = null } = {}) {
+    try {
+      await api(`profiles/${enc(p.id)}/build`, { method: "POST" });
+      toast(`Bau von „${p.name}“ gestartet. Das Protokoll steht auf der Profilseite.`, { type: "success" });
+    } catch (err) {
+      showError(err, "Bau nicht gestartet");
+    } finally {
+      state.profilesAt = 0;
+      if (after) after();
+    }
+  }
+
+  async function deleteProfile(p, { after = null } = {}) {
+    const ok = await confirmDialog({
+      title: "Profil löschen",
+      message: [
+        h("p", null, "Das Profil ", h("strong", null, p.name), " wird gelöscht."),
+        (p.clients || []).length
+          ? notice("warn", "Das Profil ist noch Clients zugeordnet.",
+            "Vorher bei diesen Clients ein anderes Profil wählen: "
+            + p.clients.map((c) => c.label || `#${c.id}`).join(", "))
+          : h("p", { class: "muted" }, "Das Image wird beim nächsten Aufräumen entfernt, sobald keine Sandbox es mehr verwendet."),
+      ],
+      confirmLabel: "Profil löschen",
+      danger: true,
+      onConfirm: () => api("profiles/" + enc(p.id), { method: "DELETE" }),
+    });
+    state.profilesAt = 0;
+    if (ok) toast(`Profil „${p.name}“ gelöscht.`, { type: "success" });
+    if (after) after(!!ok);
+  }
+
+  function viewProfiles(root, _params, ctx) {
+    const createBtn = h("button", { type: "button", class: "btn primary" }, "Profil anlegen");
+    createBtn.addEventListener("click", () => openCreateProfile());
+    root.append(pageHead("Profile",
+      "Zusatzsoftware auf Basis des mitgelieferten Sandbox-Images – wird einem Client zugeordnet", createBtn));
+    const body = h("div", null, loadingEl());
+    root.append(body);
+
+    async function load() {
+      const data = await api("profiles");
+      storeProfiles(data);
+      if (!ctx.alive()) return;
+      body.replaceChildren(profilesTable(state.profiles, refresh),
+        h("p", { class: "metric-note mt-12" },
+          "Basis aller Profile: ", h("span", { class: "mono" }, data.baseImage || "–"),
+          ". Wird das Sandbox-Image bei einem Update neu gebaut, baut install.sh die Profile automatisch nach; "
+          + "die Sandboxen erscheinen danach als veraltet und werden per „Neu aufbauen“ aktualisiert (Daten bleiben)."));
+    }
+    const refresh = ({ silent = false } = {}) => guarded(ctx, body, load, silent && state.profiles !== null);
+    refresh();
+    return { refresh };
+  }
+
+  function profilesTable(list, refresh) {
+    const head = h("thead", null, h("tr", null,
+      ["Profil", "Software", "Status", "Image", "Verwendet von", "Aktionen"].map((c) => h("th", null, c))));
+    const rows = list.map((p) => {
+      const building = BUILD_ACTIVE.has(p.status);
+      const buildBtn = h("button", {
+        type: "button", class: ["btn small icon-only", (p.status === "outdated" || p.status === "new") && "primary"],
+        disabled: building, title: p.image ? "Neu bauen" : "Bauen", "aria-label": p.image ? "Neu bauen" : "Bauen",
+      }, icon("build"));
+      buildBtn.addEventListener("click", () => buildProfile(p, { after: () => refresh({ silent: true }) }));
+      const delBtn = h("button", {
+        type: "button", class: "btn small icon-only danger-outline", disabled: building,
+        title: "Löschen", "aria-label": "Löschen",
+      }, icon("remove"));
+      delBtn.addEventListener("click", () => deleteProfile(p, { after: () => refresh({ silent: true }) }));
+      return h("tr", null,
+        h("td", null,
+          h("a", { href: "#/profiles/" + enc(p.id), class: "cell-main" }, p.name),
+          p.description ? h("div", { class: "cell-sub" }, p.description) : null),
+        h("td", null, softwareCell(p)),
+        h("td", null, profileStatusBadge(p)),
+        h("td", null, imageCell(p)),
+        h("td", null, clientLinks(p.clients)),
+        h("td", { class: "actions" }, h("div", { class: "btn-row" }, buildBtn, delBtn)));
+    });
+    if (!rows.length) {
+      rows.push(h("tr", null, h("td", { class: "empty", colspan: "6" },
+        "Noch keine Profile. Ein Profil ergänzt das Sandbox-Image um Pakete, z. B. für Kunden ohne Internetzugriff.")));
+    }
+    return h("div", { class: "table-wrap" }, h("table", { class: "data" }, head, h("tbody", null, rows)));
+  }
+
+  async function openCreateProfile() {
+    const name = h("input", { type: "text", name: "name", required: true, maxlength: "80", autocomplete: "off" });
+    const description = h("input", { type: "text", name: "description", maxlength: "1000", autocomplete: "off" });
+    const created = await modal({
+      title: "Profil anlegen",
+      submitLabel: "Anlegen",
+      body: [
+        field("Name", name, "z. B. Office + OCR"),
+        field("Beschreibung", description, "optional – wofür das Profil gedacht ist"),
+        h("p", { class: "muted small mt-12" }, "Pakete und Bau folgen auf der nächsten Seite."),
+      ],
+      onSubmit: () => api("profiles", {
+        method: "POST", body: { name: name.value.trim(), description: description.value.trim() },
+      }),
+    });
+    if (!created || !created.profile) return;
+    state.profilesAt = 0;
+    location.hash = "#/profiles/" + enc(created.profile.id);
+  }
+
+  function viewProfileDetail(root, params, ctx) {
+    const id = Number.parseInt(params.id, 10);
+    root.append(h("a", { class: "back-link", href: "#/profiles" }, "← Alle Profile"));
+    const head = h("div", null, loadingEl());
+    const statusBox = h("div");
+    const formBox = h("div");
+    const logTitle = h("h2", null, "Bau-Protokoll");
+    const logHint = h("span", { class: "hint" });
+    const logPre = h("pre", { class: "build-log", "aria-live": "polite" });
+    const sections = h("div", { hidden: true },
+      h("section", { class: "section" }, statusBox),
+      h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", null, "Software")), formBox),
+      h("section", { class: "section" }, h("div", { class: "section-head" }, logTitle, logHint), logPre));
+    root.append(head, sections);
+    if (!Number.isInteger(id)) {
+      head.replaceChildren(notice("danger", "Ungültige Profil-ID."));
+      return null;
+    }
+
+    let profile = null;
+    let formRendered = false;
+    const log = { seq: null, offset: 0, timer: null };
+
+    function renderHead() {
+      const building = BUILD_ACTIVE.has(profile.status);
+      const buildBtn = h("button", { type: "button", class: "btn primary", disabled: building },
+        profile.image ? "Neu bauen" : "Bauen");
+      buildBtn.addEventListener("click", () => buildProfile(profile, { after: () => refresh({ silent: true }) }));
+      const deleteBtn = h("button", { type: "button", class: "btn danger-outline", disabled: building }, "Profil löschen");
+      deleteBtn.addEventListener("click", () => deleteProfile(profile, {
+        after: (deleted) => { if (deleted) location.hash = "#/profiles"; },
+      }));
+      setTitle(profile.name);
+      head.replaceChildren(h("div", { class: "page-head" },
+        h("div", null,
+          h("h1", null, profile.name),
+          h("div", { class: "meta-line" },
+            h("span", null, "ID ", h("span", { class: "mono" }, String(profile.id))),
+            profile.description ? h("span", null, profile.description) : null,
+            h("span", null, "angelegt ", timeEl(profile.createdAt)),
+            profile.updatedAt ? h("span", null, "geändert ", timeEl(profile.updatedAt)) : null)),
+        h("div", { class: "actions" }, buildBtn, deleteBtn)));
+    }
+
+    function renderStatus() {
+      const b = profile.build || {};
+      const reasons = (profile.outdatedReasons || []).map((r) => PROFILE_OUTDATED[r] || r);
+      const lastBuild = b.seq
+        ? [`#${b.seq} · `, { ok: "erfolgreich", failed: "fehlgeschlagen", queued: "wartet", building: "läuft" }[b.state] || b.state,
+          b.finishedAt ? [" · ", timeEl(b.finishedAt, true)] : b.startedAt ? [" · gestartet ", timeEl(b.startedAt, true)] : null,
+          b.actor ? h("span", { class: "faint" }, " · " + b.actor) : null]
+        : h("span", { class: "faint" }, "noch nie gebaut");
+      const out = [
+        h("div", { class: "section-head" }, h("h2", null, "Status")),
+        h("div", { class: "panel" }, h("div", { class: "panel-body" },
+          h("dl", { class: "kv" },
+            h("dt", null, "Status"), h("dd", null, profileStatusBadge(profile)),
+            h("dt", null, "Image"), h("dd", null, imageCell(profile)),
+            h("dt", null, "Letzter Bau"), h("dd", null, lastBuild),
+            h("dt", null, "Basis"), h("dd", { class: "mono small" }, state.baseImage || "albert-ai-sandbox:latest"),
+            h("dt", null, "Verwendet von"), h("dd", null, clientLinks(profile.clients))))),
+      ];
+      if (profile.status === "new") {
+        out.push(notice("warn", "Das Profil wurde noch nicht gebaut.",
+          "Clients mit diesem Profil können erst Sandboxen erstellen, wenn der Bau erfolgreich war (sonst lehnt die API mit "
+          + "profile_not_ready ab)."));
+      } else if (reasons.length) {
+        out.push(notice("warn", "Das Image ist veraltet: " + reasons.join("; ") + ".",
+          "Bis zum nächsten erfolgreichen Bau bekommen neue Sandboxen das bisherige Image."));
+      }
+      if (b.state === "failed" && b.error) {
+        out.push(h("div", { class: "notice danger mt-12" },
+          h("strong", null, profile.image ? "Der letzte Bau ist fehlgeschlagen – das bisherige Image bleibt in Betrieb."
+            : "Der Bau ist fehlgeschlagen."),
+          h("pre", { class: "build-log compact" }, b.error)));
+      }
+      statusBox.replaceChildren(...out);
+    }
+
+    function renderForm() {
+      formRendered = true;
+      const name = h("input", { type: "text", name: "name", required: true, maxlength: "80", autocomplete: "off",
+        value: profile.name });
+      const description = h("input", { type: "text", name: "description", maxlength: "1000", autocomplete: "off",
+        value: profile.description || "" });
+      const areas = {};
+      const pkgFields = PACKAGE_KINDS.map((k) => {
+        const ta = h("textarea", { name: k.key, rows: "7", spellcheck: "false", autocomplete: "off",
+          placeholder: k.placeholder, class: "mono" });
+        ta.value = ((profile.packages || {})[k.key] || []).join("\n");
+        areas[k.key] = ta;
+        return field(k.label, ta, k.hint);
+      });
+      const setup = h("textarea", { name: "setupScript", rows: "8", spellcheck: "false", autocomplete: "off",
+        class: "mono", placeholder: "# Beispiel: Paketquelle eines Herstellers einbinden\n"
+          + "curl -fsSL https://example.com/key.gpg | gpg --dearmor -o /usr/share/keyrings/example.gpg" });
+      setup.value = profile.setupScript || "";
+      const advanced = h("details", { class: "advanced", open: !!profile.setupScript },
+        h("summary", null, "Zusätzliche Befehle (für Fortgeschrittene)"),
+        field("Shell-Befehle", setup,
+          "Laufen am Ende des Baus als root im Build-Container (bash, Abbruch beim ersten Fehler), nicht auf dem Host. "
+          + "Für alles, was sich nicht als Paket angeben lässt."));
+      const dockerfile = h("details", { class: "advanced" },
+        h("summary", null, "Erzeugtes Dockerfile"),
+        h("pre", { class: "build-log compact" }, profile.dockerfile || ""));
+      const saveBtn = h("button", { type: "submit", class: "btn" }, "Speichern");
+      const saveBuildBtn = h("button", { type: "button", class: "btn primary" }, "Speichern und bauen");
+      const resetBtn = h("button", { type: "button", class: "btn ghost" }, "Zurücksetzen");
+      const form = h("form", { class: "panel panel-body" },
+        h("div", { class: "form-row" }, field("Name", name), field("Beschreibung", description)),
+        h("div", { class: "grid cols-3 mt-12" }, pkgFields),
+        advanced,
+        dockerfile,
+        h("div", { class: "form-actions" }, saveBuildBtn, saveBtn, resetBtn));
+
+      async function save(andBuild) {
+        if (!form.checkValidity()) {
+          form.reportValidity();
+          return;
+        }
+        const body = {
+          name: name.value.trim(),
+          description: description.value.trim(),
+          packages: Object.fromEntries(PACKAGE_KINDS.map((k) => [k.key, areas[k.key].value])),
+          setupScript: setup.value,
+        };
+        const btn = andBuild ? saveBuildBtn : saveBtn;
+        [saveBtn, saveBuildBtn].forEach((b) => { b.disabled = true; });
+        btn.classList.add("busy");
+        try {
+          const data = await api("profiles/" + id, { method: "PATCH", body });
+          if (!ctx.alive()) return;
+          profile = data.profile;
+          state.profilesAt = 0;
+          if (andBuild) {
+            await api(`profiles/${id}/build`, { method: "POST" });
+            toast("Gespeichert, der Bau läuft.", { type: "success" });
+          } else {
+            toast("Profil gespeichert." + (profile.status === "outdated" ? " Neu bauen, damit es wirkt." : ""),
+              { type: "success" });
+          }
+          await load();
+          renderForm();
+        } catch (err) {
+          showError(err, andBuild ? "Speichern und Bauen fehlgeschlagen" : "Speichern fehlgeschlagen");
+        } finally {
+          [saveBtn, saveBuildBtn].forEach((b) => { b.disabled = false; });
+          btn.classList.remove("busy");
+        }
+      }
+      form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        save(false);
+      });
+      saveBuildBtn.addEventListener("click", () => save(true));
+      resetBtn.addEventListener("click", () => renderForm());
+      formBox.replaceChildren(form);
+    }
+
+    /** Streams the build log (incrementally while a build runs). */
+    async function pollLog() {
+      clearTimeout(log.timer);
+      log.timer = null;
+      if (!ctx.alive() || !profile) return;
+      const seq = (profile.build || {}).seq;
+      if (!seq) {
+        logPre.textContent = "";
+        logHint.textContent = "noch kein Bau";
+        return;
+      }
+      if (log.seq !== seq) {
+        log.seq = seq;
+        log.offset = 0;
+        logPre.textContent = "";
+      }
+      try {
+        const data = await api(`profiles/${id}/log?seq=${seq}&offset=${log.offset}`);
+        if (!ctx.alive()) return;
+        const atBottom = logPre.scrollHeight - logPre.scrollTop - logPre.clientHeight < 40;
+        if (data.text) logPre.append(data.text);
+        log.offset = data.offset;
+        if (atBottom) logPre.scrollTop = logPre.scrollHeight;
+        logTitle.textContent = `Bau-Protokoll (Bau ${seq})`;
+        logHint.textContent = data.running ? "läuft – wird laufend aktualisiert" : "";
+        if (data.running) {
+          log.timer = setTimeout(pollLog, 2000);
+        } else if (BUILD_ACTIVE.has(profile.status)) {
+          refresh({ silent: true }); // finished meanwhile: show the result
+        }
+      } catch (err) {
+        if (err && err.status === 401) return;
+        log.timer = setTimeout(pollLog, 5000);
+      }
+    }
+
+    async function load() {
+      const data = await api("profiles/" + id);
+      if (!ctx.alive()) return;
+      profile = data.profile;
+      renderHead();
+      renderStatus();
+      sections.hidden = false;
+      if (!formRendered) renderForm();
+      if (!log.timer) pollLog();
+    }
+
+    const refresh = ({ silent = false } = {}) => guarded(ctx, head, load, silent && profile !== null);
+    if (!state.baseImage) getProfiles().catch(() => {});
+    refresh();
+    return { refresh };
+  }
+
+  // ------------------------------------------------------------------------
   // view: Wartung (reconcile + audit log)
   // ------------------------------------------------------------------------
 
@@ -2109,6 +2635,13 @@
     "remove-file": "Datei entfernen",
     "write-route": "nginx-Route schreiben",
     "mount-disk": "Disk einhängen",
+    "create-network": "Sandbox-Netz anlegen",
+    "apply-firewall": "Firewall-Regeln setzen",
+    "isolate-network": "Ins richtige Netz verschieben",
+    "rebuild-network": "Neu aufbauen (Netz)",
+    "fail-build": "Abgebrochenen Profil-Bau beenden",
+    "remove-image": "Profil-Image entfernen",
+    "remove-profile-dir": "Build-Dateien entfernen",
   };
 
   function renderReconcile(res, when) {

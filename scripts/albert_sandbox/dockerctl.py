@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+import threading
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 LABEL_MANAGER = "albert.manager"
 LABEL_SANDBOX = "albert.sandbox"
@@ -229,6 +230,65 @@ def stats(names: Iterable[str]) -> Dict[str, Dict[str, str]]:
 
 def build(image: str, context_dir: str) -> subprocess.CompletedProcess:
     return subprocess.run(["docker", "build", "-t", image, context_dir])
+
+
+def build_streaming(tag: str, context_dir: str, labels: Dict[str, str], on_line: Callable[[str], None],
+                    timeout: float) -> int:
+    """``docker build`` with plain progress output passed line by line to ``on_line``.
+
+    Returns the exit code; on timeout the build is killed and 124 is returned.
+    """
+    args = ["docker", "build", "--progress=plain", "-t", tag]
+    for key, value in labels.items():
+        args += ["--label", f"{key}={value}"]
+    args.append(context_dir)
+    try:
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    except FileNotFoundError as exc:
+        raise DockerError("docker binary not found", 127) from exc
+    killed = threading.Event()
+
+    def kill() -> None:
+        killed.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, kill)
+    timer.start()
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            on_line(raw.decode("utf-8", "replace").rstrip("\n"))
+        proc.wait()
+    finally:
+        timer.cancel()
+    return 124 if killed.is_set() else proc.returncode
+
+
+def image_inspect(image: str) -> Optional[Dict[str, Any]]:
+    proc = _run(["image", "inspect", image], timeout=30, check=False)
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(_text(proc) or "[]")
+    except ValueError:
+        return None
+    return payload[0] if payload else None
+
+
+def images_with_label(label: str) -> List[Dict[str, str]]:
+    """Tagged images carrying ``label``: [{"ref": "repo:tag", "id": "sha256:..."}]."""
+    proc = _run(["image", "ls", "--no-trunc", "--filter", f"label={label}",
+                 "--format", "{{.Repository}}:{{.Tag}} {{.ID}}"], timeout=60, check=False)
+    result = []
+    for line in _text(proc).splitlines():
+        parts = line.split()
+        if len(parts) == 2 and not parts[0].startswith("<none>"):
+            result.append({"ref": parts[0], "id": parts[1]})
+    return result
+
+
+def image_remove(ref: str) -> bool:
+    return _run(["image", "rm", ref], timeout=120, check=False).returncode == 0
 
 
 def system_df() -> Dict[str, Any]:

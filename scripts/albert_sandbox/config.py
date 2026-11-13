@@ -101,6 +101,16 @@ class Settings:
     network_name: str = "albert-sandbox"
     network_subnet: str = "172.30.0.0/16"
     network_bridge: str = "br-albert"
+    # Sandboxes of clients without internet access (created on first use).
+    offline_network_name: str = "albert-sandbox-offline"
+    offline_network_subnet: str = "172.31.0.0/16"
+    offline_network_bridge: str = "br-albert-off"
+    # DNS server given to offline sandboxes: a loopback address nothing listens
+    # on, so name lookups fail at once (Docker's embedded DNS would otherwise
+    # resolve external names for them from the host's network namespace).
+    offline_dns: str = "127.0.0.254"
+    profile_image_prefix: str = "albert-ai-sandbox-profile"
+    profile_build_timeout: int = 3600
     firewall: bool = True
     block_nets: Tuple[str, ...] = ()
     allow_nets: Tuple[str, ...] = ()
@@ -118,6 +128,11 @@ class Settings:
     @property
     def skel_dir(self) -> Path:
         return self.storage_dir / "skel"
+
+    @property
+    def profiles_dir(self) -> Path:
+        """Build contexts and build logs of sandbox profiles."""
+        return self.data_dir / "profiles"
 
 
 def _primary_ip() -> str:
@@ -199,6 +214,12 @@ def load_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
         network_name=get("ALBERT_NETWORK", "albert-sandbox"),
         network_subnet=get("ALBERT_NETWORK_SUBNET", "172.30.0.0/16"),
         network_bridge=get("ALBERT_NETWORK_BRIDGE", "br-albert")[:15],
+        offline_network_name=get("ALBERT_OFFLINE_NETWORK", "albert-sandbox-offline"),
+        offline_network_subnet=get("ALBERT_OFFLINE_SUBNET", "172.31.0.0/16"),
+        offline_network_bridge=get("ALBERT_OFFLINE_BRIDGE", "br-albert-off")[:15],
+        offline_dns=get("ALBERT_OFFLINE_DNS", "127.0.0.254"),
+        profile_image_prefix=get("ALBERT_PROFILE_IMAGE_PREFIX", "albert-ai-sandbox-profile"),
+        profile_build_timeout=get_int("ALBERT_PROFILE_BUILD_TIMEOUT", 3600),
         firewall=get("ALBERT_FIREWALL", "1") not in ("0", "false", "no"),
         block_nets=_split_nets(get("ALBERT_BLOCK_NETS", DEFAULT_BLOCK_NETS)),
         allow_nets=_split_nets(get("ALBERT_ALLOW_NETS", "")),

@@ -142,7 +142,8 @@ body {
 
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -523,6 +524,30 @@ table.data td.empty {
 .cell-sub { color: var(--text-muted); font-size: .84rem; margin-top: 1px; }
 .cell-sub.mono { white-space: nowrap; font-size: .8rem; }
 .sbx-name { font-family: var(--mono); font-size: .9rem; white-space: nowrap; }
+/* small tags under a sandbox name (profile, offline) */
+.cell-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.link-list { overflow-wrap: anywhere; }
+
+/* build output of sandbox profiles */
+.build-log {
+  margin: 0;
+  max-height: 460px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.build-log:empty::before { content: "Noch keine Ausgabe."; color: var(--text-faint); }
+.build-log.compact { max-height: 260px; margin-top: 8px; }
+.notice .build-log { background: var(--surface); }
+
 .err-line {
   color: var(--danger);
   font-size: .82rem;
@@ -559,6 +584,25 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 input:disabled { background: var(--surface-2); color: var(--text-muted); }
 input:focus { border-color: var(--accent); }
 select { width: auto; padding-right: 28px; }
+select.wide { width: 100%; }
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.45;
+}
+textarea.mono { font-family: var(--mono); font-size: .86rem; }
+textarea::placeholder { color: var(--text-faint); }
+textarea:focus { border-color: var(--accent); }
+details.advanced { margin-top: 14px; }
+details.advanced > summary { cursor: pointer; font-weight: 500; font-size: .92rem; padding: 2px 0; }
+details.advanced[open] > summary { margin-bottom: 8px; }
 input[readonly] { background: var(--surface-2); }
 
 .field { display: grid; gap: 4px; min-width: 0; }

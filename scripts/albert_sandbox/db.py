@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from .config import settings
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -109,6 +109,41 @@ API_KEY_V4_COLUMNS = {
     "allow_persistent": ("INTEGER NOT NULL DEFAULT 0", "UPDATE api_keys SET allow_persistent=1"),
 }
 
+# v5: sandbox profiles (extra software on top of the shipped image) and
+# internet access per client. Clients keep internet access (previous
+# behaviour) and the standard image (profile_id NULL).
+V5_SCHEMA = """
+CREATE TABLE IF NOT EXISTS profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL COLLATE NOCASE,
+  description TEXT NOT NULL DEFAULT '',
+  apt_packages TEXT NOT NULL DEFAULT '',
+  pip_packages TEXT NOT NULL DEFAULT '',
+  npm_packages TEXT NOT NULL DEFAULT '',
+  setup_script TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  image TEXT,
+  image_id TEXT,
+  image_config_hash TEXT,
+  image_base_id TEXT,
+  image_size_bytes INTEGER,
+  built_at INTEGER,
+  build_seq INTEGER NOT NULL DEFAULT 0,
+  build_state TEXT NOT NULL DEFAULT 'none',
+  build_started_at INTEGER,
+  build_finished_at INTEGER,
+  build_heartbeat_at INTEGER,
+  build_error TEXT,
+  build_actor TEXT
+);
+"""
+
+API_KEY_V5_COLUMNS = {
+    "profile_id": "INTEGER REFERENCES profiles(id)",
+    "allow_internet": "INTEGER NOT NULL DEFAULT 1",
+}
+
 
 def connect() -> sqlite3.Connection:
     path = settings().db_path
@@ -155,6 +190,7 @@ def init_db() -> None:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.executescript(BASE_SCHEMA)
         conn.executescript(V2_SCHEMA)
+        conn.executescript(V5_SCHEMA)
         existing = _columns(conn, "api_keys")
         for column, ctype in API_KEY_V2_COLUMNS.items():
             if column not in existing:
@@ -165,6 +201,9 @@ def init_db() -> None:
                     conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
                     if backfill:
                         conn.execute(backfill)
+        for column, ctype in API_KEY_V5_COLUMNS.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
         existing = _columns(conn, "admin_users")
         for column, ctype in ADMIN_V3_COLUMNS.items():
             if column not in existing:

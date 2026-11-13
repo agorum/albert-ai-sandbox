@@ -1,16 +1,24 @@
 """Network isolation of sandboxes.
 
-All sandboxes live in one dedicated Docker bridge network whose
-inter-container communication is disabled (``enable_icc=false``): a sandbox
-cannot reach any other sandbox, not even its MCP Hub or file service.
+Sandboxes live in dedicated Docker bridge networks whose inter-container
+communication is disabled (``enable_icc=false``): a sandbox cannot reach any
+other sandbox, not even its MCP Hub or file service.
 
-Two iptables chains add egress rules for traffic coming from that network:
+* ``albert-sandbox`` (``ALBERT_NETWORK_SUBNET``): sandboxes of clients with
+  internet access.
+* ``albert-sandbox-offline`` (``ALBERT_OFFLINE_SUBNET``, created on first use):
+  sandboxes of clients without internet access. Their containers also get a
+  dead DNS server (``ALBERT_OFFLINE_DNS``), because Docker's embedded DNS
+  would otherwise resolve external names for them from the host.
+
+Two iptables chains add egress rules for traffic coming from these networks:
 
 * ``ALBERT-SANDBOX`` (hooked into Docker's ``DOCKER-USER`` chain, i.e. routed
   traffic): drops new connections to private/internal networks
   (``ALBERT_BLOCK_NETS``: RFC 1918, CGNAT, link-local incl. cloud metadata, ...)
   except explicitly allowed ones (``ALBERT_ALLOW_NETS``). The internet stays
-  reachable.
+  reachable - except for the offline network, where everything but the
+  allowed networks is dropped.
 * ``ALBERT-SANDBOX-IN`` (hooked into ``INPUT``): drops new connections from
   sandboxes to services on the host itself (ssh, nginx, ...). Replies to
   connections the host opened (nginx -> sandbox ports) are allowed.
@@ -42,27 +50,38 @@ class NetworkError(SandboxError):
 # docker network
 # --------------------------------------------------------------------------
 
-def ensure_network() -> Dict[str, Any]:
-    """Create the sandbox network if missing and verify its isolation settings."""
+def _network(offline: bool) -> Tuple[str, str, str, str]:
+    """(name, configured subnet, bridge, setting name) of the online or offline network."""
     s = settings()
-    info = dockerctl.network_inspect(s.network_name)
+    if offline:
+        return s.offline_network_name, s.offline_network_subnet, s.offline_network_bridge, "ALBERT_OFFLINE_SUBNET"
+    return s.network_name, s.network_subnet, s.network_bridge, "ALBERT_NETWORK_SUBNET"
+
+
+def network_name(offline: bool = False) -> str:
+    return _network(offline)[0]
+
+
+def ensure_network(offline: bool = False) -> Dict[str, Any]:
+    """Create the sandbox network if missing and verify its isolation settings."""
+    name, subnet, bridge, setting = _network(offline)
+    info = dockerctl.network_inspect(name)
     if info is None:
-        dockerctl.network_create(s.network_name, s.network_subnet, s.network_bridge,
-                                 {dockerctl.LABEL_MANAGER: "1"})
-        info = dockerctl.network_inspect(s.network_name)
+        dockerctl.network_create(name, subnet, bridge, {dockerctl.LABEL_MANAGER: "1"})
+        info = dockerctl.network_inspect(name)
         if info is None:
-            raise NetworkError(f"could not create docker network {s.network_name}")
+            raise NetworkError(f"could not create docker network {name}")
     options = info.get("Options") or {}
     if options.get("com.docker.network.bridge.enable_icc", "true") != "false":
         raise NetworkError(
-            f"docker network {s.network_name} allows inter-container traffic; "
+            f"docker network {name} allows inter-container traffic; "
             "remove it (docker network rm) so the manager can recreate it isolated")
     actual = _subnet_of(info)
-    if actual and actual != s.network_subnet:
-        # The boot-time firewall uses ALBERT_NETWORK_SUBNET, so both must agree.
+    if actual and actual != subnet:
+        # The boot-time firewall uses the configured subnet, so both must agree.
         raise NetworkError(
-            f"docker network {s.network_name} uses subnet {actual}, but ALBERT_NETWORK_SUBNET is "
-            f"{s.network_subnet}; set ALBERT_NETWORK_SUBNET={actual} or recreate the network")
+            f"docker network {name} uses subnet {actual}, but {setting} is "
+            f"{subnet}; set {setting}={actual} or recreate the network")
     return info
 
 
@@ -73,38 +92,56 @@ def _subnet_of(info: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def network_subnet(info: Optional[Dict[str, Any]] = None, use_docker: bool = True) -> str:
-    """Subnet of the sandbox network. ``use_docker=False`` (boot, before dockerd
+def network_subnet(info: Optional[Dict[str, Any]] = None, use_docker: bool = True, offline: bool = False) -> str:
+    """Subnet of a sandbox network. ``use_docker=False`` (boot, before dockerd
     runs - asking docker would deadlock on socket activation) uses the configured value."""
+    name, subnet, _, _ = _network(offline)
     if use_docker:
-        info = info or dockerctl.network_inspect(settings().network_name) or {}
+        info = info or dockerctl.network_inspect(name) or {}
         actual = _subnet_of(info)
         if actual:
             return actual
-    return settings().network_subnet
+    return subnet
 
 
 def container_networks(info: Optional[Dict[str, Any]]) -> List[str]:
     return sorted(((info or {}).get("NetworkSettings") or {}).get("Networks", {}).keys())
 
 
-def is_isolated(info: Optional[Dict[str, Any]]) -> bool:
-    return container_networks(info) == [settings().network_name]
+def is_isolated(info: Optional[Dict[str, Any]], offline: bool = False) -> bool:
+    return container_networks(info) == [network_name(offline)]
 
 
-def isolate(name: str, info: Optional[Dict[str, Any]] = None) -> bool:
-    """Move a container into the sandbox network (works while it runs).
+def dns_matches(info: Optional[Dict[str, Any]], offline: bool) -> bool:
+    """Offline containers must use the dead DNS server, online ones must not."""
+    dns = ((info or {}).get("HostConfig") or {}).get("Dns") or []
+    dead = settings().offline_dns
+    return dns == [dead] if offline else dead not in dns
+
+
+def run_args(offline: bool) -> List[str]:
+    """``docker run`` arguments that put a container into its sandbox network."""
+    args = ["--network", network_name(offline)]
+    if offline:
+        args += ["--dns", settings().offline_dns]
+    return args
+
+
+def isolate(name: str, info: Optional[Dict[str, Any]] = None, offline: bool = False) -> bool:
+    """Move a container into its sandbox network (works while it runs).
 
     Published ports stay as they are; returns True if something changed.
     """
     info = info or dockerctl.inspect_one(name)
     if info is None:
         return False
-    target = settings().network_name
+    target = network_name(offline)
     nets = container_networks(info)
     if nets == [target]:
         return False
     if target not in nets:
+        if offline:
+            ensure_network(offline=True)
         dockerctl.network_connect(target, name)
     for other in nets:
         if other != target:
@@ -126,7 +163,7 @@ def _iptables(args: Sequence[str], check: bool = True) -> subprocess.CompletedPr
     return proc
 
 
-def desired_rules(subnet: str) -> Tuple[List[List[str]], List[List[str]], str]:
+def desired_rules(subnet: str, offline_subnet: str) -> Tuple[List[List[str]], List[List[str]], str]:
     """Rule specs for both chains plus a fingerprint of the configuration."""
     s = settings()
     fwd: List[List[str]] = [["-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "RETURN"]]
@@ -134,10 +171,14 @@ def desired_rules(subnet: str) -> Tuple[List[List[str]], List[List[str]], str]:
         fwd.append(["-s", subnet, "-d", net, "-j", "RETURN"])
     for net in s.block_nets:
         fwd.append(["-s", subnet, "-d", net, "-j", "DROP"])
+    # Offline sandboxes: only the explicitly allowed internal networks.
+    for net in s.allow_nets:
+        fwd.append(["-s", offline_subnet, "-d", net, "-j", "RETURN"])
+    fwd.append(["-s", offline_subnet, "-j", "DROP"])
     inp: List[List[str]] = [["-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "RETURN"]]
     if s.block_host_access:
         inp.append(["-j", "DROP"])
-    fingerprint = hashlib.sha256(repr((subnet, fwd, inp)).encode()).hexdigest()[:16]
+    fingerprint = hashlib.sha256(repr((subnet, offline_subnet, fwd, inp)).encode()).hexdigest()[:16]
     return fwd, inp, fingerprint
 
 
@@ -147,19 +188,26 @@ def _marker(fingerprint: str) -> List[str]:
             "-j", "RETURN"]
 
 
+def _subnets(use_docker: bool) -> Tuple[str, str]:
+    return network_subnet(use_docker=use_docker), network_subnet(use_docker=use_docker, offline=True)
+
+
 def firewall_status(use_docker: bool = True) -> Dict[str, Any]:
     s = settings()
     if not s.firewall:
         return {"enabled": False, "ok": True}
-    subnet = network_subnet(use_docker=use_docker)
-    _, _, fingerprint = desired_rules(subnet)
+    subnet, offline_subnet = _subnets(use_docker)
+    _, _, fingerprint = desired_rules(subnet, offline_subnet)
     checks = {
         "forwardChain": _iptables(["-C", CHAIN_FWD, *_marker(fingerprint)], check=False).returncode == 0,
         "inputChain": _iptables(["-C", CHAIN_IN, *_marker(fingerprint)], check=False).returncode == 0,
         "dockerUserJump": _iptables(["-C", "DOCKER-USER", "-j", CHAIN_FWD], check=False).returncode == 0,
         "inputJump": _iptables(["-C", "INPUT", "-s", subnet, "-j", CHAIN_IN], check=False).returncode == 0,
+        "inputJumpOffline": _iptables(["-C", "INPUT", "-s", offline_subnet, "-j", CHAIN_IN],
+                                      check=False).returncode == 0,
     }
-    return {"enabled": True, "ok": all(checks.values()), "subnet": subnet, "fingerprint": fingerprint, **checks}
+    return {"enabled": True, "ok": all(checks.values()), "subnet": subnet, "offlineSubnet": offline_subnet,
+            "fingerprint": fingerprint, **checks}
 
 
 def apply_firewall(use_docker: bool = True) -> Dict[str, Any]:
@@ -170,8 +218,8 @@ def apply_firewall(use_docker: bool = True) -> Dict[str, Any]:
     s = settings()
     if not s.firewall:
         return {"enabled": False, "applied": False}
-    subnet = network_subnet(use_docker=use_docker)
-    fwd, inp, fingerprint = desired_rules(subnet)
+    subnet, offline_subnet = _subnets(use_docker)
+    fwd, inp, fingerprint = desired_rules(subnet, offline_subnet)
     for chain, rules in ((CHAIN_FWD, fwd), (CHAIN_IN, inp)):
         if _iptables(["-n", "-L", chain], check=False).returncode != 0:
             _iptables(["-N", chain])
@@ -184,9 +232,11 @@ def apply_firewall(use_docker: bool = True) -> Dict[str, Any]:
         _iptables(["-N", "DOCKER-USER"])
     if _iptables(["-C", "DOCKER-USER", "-j", CHAIN_FWD], check=False).returncode != 0:
         _iptables(["-I", "DOCKER-USER", "1", "-j", CHAIN_FWD])
-    if _iptables(["-C", "INPUT", "-s", subnet, "-j", CHAIN_IN], check=False).returncode != 0:
-        _iptables(["-I", "INPUT", "1", "-s", subnet, "-j", CHAIN_IN])
-    return {"enabled": True, "applied": True, "subnet": subnet, "fingerprint": fingerprint}
+    for net in (subnet, offline_subnet):
+        if _iptables(["-C", "INPUT", "-s", net, "-j", CHAIN_IN], check=False).returncode != 0:
+            _iptables(["-I", "INPUT", "1", "-s", net, "-j", CHAIN_IN])
+    return {"enabled": True, "applied": True, "subnet": subnet, "offlineSubnet": offline_subnet,
+            "fingerprint": fingerprint}
 
 
 def ensure_firewall() -> bool:
@@ -201,17 +251,19 @@ def ensure_firewall() -> bool:
 
 def remove_firewall() -> None:
     """Unhook and delete both chains (uninstall)."""
-    subnet = network_subnet()
     while _iptables(["-D", "DOCKER-USER", "-j", CHAIN_FWD], check=False).returncode == 0:
         pass
-    while _iptables(["-D", "INPUT", "-s", subnet, "-j", CHAIN_IN], check=False).returncode == 0:
-        pass
+    for net in _subnets(use_docker=True):
+        while _iptables(["-D", "INPUT", "-s", net, "-j", CHAIN_IN], check=False).returncode == 0:
+            pass
     for chain in (CHAIN_FWD, CHAIN_IN):
         _iptables(["-F", chain], check=False)
         _iptables(["-X", chain], check=False)
 
 
-def ensure_ready() -> None:
+def ensure_ready(offline: bool = False) -> None:
     """Network + firewall in place - called before a sandbox is created or started."""
     ensure_network()
+    if offline:
+        ensure_network(offline=True)
     ensure_firewall()

@@ -199,7 +199,7 @@ def test_network_subnet_mismatch_is_reported(env, make_client):
 
 def test_firewall_rules_follow_configuration(env):
     config.configure(block_nets=("10.0.0.0/8", "169.254.0.0/16"), allow_nets=("10.0.5.0/24",))
-    fwd, inp, fp1 = netctl.desired_rules("172.30.0.0/16")
+    fwd, inp, fp1 = netctl.desired_rules("172.30.0.0/16", "172.31.0.0/16")
     flat = [" ".join(r) for r in fwd]
     assert flat[0].startswith("-m conntrack --ctstate RELATED,ESTABLISHED")
     allow = flat.index("-s 172.30.0.0/16 -d 10.0.5.0/24 -j RETURN")
@@ -207,5 +207,9 @@ def test_firewall_rules_follow_configuration(env):
     assert allow < drop
     assert "-s 172.30.0.0/16 -d 169.254.0.0/16 -j DROP" in flat
     assert [" ".join(r) for r in inp][-1] == "-j DROP"
+    # offline network: allowed internal networks only, everything else is dropped
+    offline_allow = flat.index("-s 172.31.0.0/16 -d 10.0.5.0/24 -j RETURN")
+    assert flat[-1] == "-s 172.31.0.0/16 -j DROP" and offline_allow < len(flat) - 1
+    assert not any(r.startswith("-s 172.31.0.0/16 -d 10.0.0.0/8") for r in flat)
     config.configure(allow_nets=())
-    assert netctl.desired_rules("172.30.0.0/16")[2] != fp1
+    assert netctl.desired_rules("172.30.0.0/16", "172.31.0.0/16")[2] != fp1

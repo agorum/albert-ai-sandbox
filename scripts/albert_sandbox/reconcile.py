@@ -8,15 +8,16 @@ runs every minute from the watcher; ``dry_run`` only reports what it would do.
 from __future__ import annotations
 
 import re
+import shutil
 import time
 from typing import Any, Dict, List
 
-from . import db, dockerctl, netctl, nginxctl, storage
+from . import db, dockerctl, netctl, nginxctl, profiles, storage
 from .config import settings
 from .errors import SandboxError
 from .locking import host_lock
 from .sandboxes import (STATE_CREATING, STATE_ERROR, STATE_READY, STATE_REBUILDING, STATE_REMOVING, _destroy,
-                        parse_time)
+                        parse_time, recreate)
 
 LEGACY_VOLUME_RE = re.compile(r"^(sbx-[a-z0-9.-]+)_data$")
 
@@ -51,16 +52,38 @@ def reconcile(dry_run: bool = False, actor: str = "reconcile") -> Dict[str, Any]
                 netctl.apply_firewall()
     except SandboxError as exc:
         errors.append(exc.message)
+    # Network per sandbox follows the owner's internet access; containers
+    # unknown to the database get the most restrictive (offline) network.
+    with db.session() as conn:
+        policy = {r["name"]: (not r["allow_internet"], r["state"]) for r in conn.execute(
+            "SELECT s.name, s.state, k.allow_internet FROM sandboxes s JOIN api_keys k ON k.id = s.api_key_id")}
     for name in sorted(docker_names):
         info = infos.get(name)
-        if info and not netctl.is_isolated(info):
+        offline = policy.get(name, (True, None))[0]
+        if info and not netctl.is_isolated(info, offline):
             act("isolate-network", name,
-                "container not (only) in the isolated network: " + ",".join(netctl.container_networks(info)))
+                f"container not (only) in the {'offline' if offline else 'isolated'} network: "
+                + ",".join(netctl.container_networks(info)))
             if not dry_run:
                 try:
-                    netctl.isolate(name, info)
-                except dockerctl.DockerError as exc:
+                    netctl.isolate(name, info, offline)
+                except (dockerctl.DockerError, SandboxError) as exc:
                     errors.append(str(exc))
+    # Running sandboxes whose DNS setting does not match the internet access
+    # (normally fixed right when the setting changes) are rebuilt; stopped ones
+    # are rebuilt when they are started.
+    for name in sorted(docker_names):
+        info = infos.get(name)
+        offline, state = policy.get(name, (None, None))
+        if not info or offline is None or state != STATE_READY or not (info.get("State") or {}).get("Running"):
+            continue
+        if not netctl.dns_matches(info, offline):
+            act("rebuild-network", name, "DNS setting does not match the client's internet access")
+            if not dry_run:
+                try:
+                    recreate(name, actor=actor)
+                except SandboxError as exc:
+                    errors.append(exc.message)
 
     with db.session() as conn:
         rows = conn.execute("SELECT * FROM sandboxes").fetchall()
@@ -176,6 +199,30 @@ def reconcile(dry_run: bool = False, actor: str = "reconcile") -> Dict[str, Any]
                     storage.mount(row["name"])
                 except storage.StorageError as exc:
                     errors.append(str(exc))
+
+    # 9: sandbox profiles - interrupted builds, images nobody uses any more,
+    # build directories of deleted profiles
+    with db.session() as conn:
+        stale = conn.execute(
+            "SELECT name FROM profiles WHERE build_state IN ('queued','building') "
+            "AND COALESCE(build_heartbeat_at, build_started_at, 0) < ?",
+            (int(now) - profiles.STALE_SECONDS,)).fetchall()
+        for row in stale:
+            act("fail-build", row["name"], "build job stopped sending heartbeats")
+        if stale and not dry_run:
+            profiles.expire_stale(conn)
+    try:
+        used_ids = {(info or {}).get("Image") for info in dockerctl.inspect(dockerctl.managed_container_names()).values()}
+        for image in profiles.unused_images(i for i in used_ids if i):
+            act("remove-image", image["ref"], "profile image not used any more")
+            if not dry_run and not dockerctl.image_remove(image["ref"]):
+                errors.append(f"could not remove image {image['ref']}")
+    except dockerctl.DockerError as exc:
+        errors.append(str(exc))
+    for path in profiles.stray_dirs():
+        act("remove-profile-dir", str(path), "build files of a deleted profile")
+        if not dry_run:
+            shutil.rmtree(path, ignore_errors=True)
 
     if actions and not dry_run:
         with db.session() as conn:

@@ -20,6 +20,10 @@ Quota semantics:
 Persistent sandboxes (excluded from the automatic max-age removal) are only
 possible for clients with ``allow_persistent``; otherwise creating one or
 switching a sandbox to persistent is refused with ``persistent_not_allowed``.
+
+``profile_id`` selects the sandbox profile (extra software, see profiles.py;
+NULL = standard image). Without ``allow_internet`` the client's sandboxes run
+in the offline network (no internet, no DNS; see netctl.py).
 """
 from __future__ import annotations
 
@@ -34,8 +38,8 @@ from .errors import BadRequest, NotFound, QuotaExceeded
 
 QUOTA_FIELDS = ("quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes", "quota_running")
 DEFAULT_FIELDS = ("default_cpus", "default_memory_mb", "default_disk_gb")
-FLAG_FIELDS = ("allow_persistent",)
-EDITABLE_FIELDS = ("label",) + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS
+FLAG_FIELDS = ("allow_persistent", "allow_internet")
+EDITABLE_FIELDS = ("label", "profile_id") + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS
 
 
 def hash_key(raw: str) -> str:
@@ -94,6 +98,24 @@ def _clean_flag(field: str, value: Any) -> int:
     raise BadRequest(f"{field} must be true or false")
 
 
+def _clean_profile_id(value: Any) -> Optional[int]:
+    if value is None or value == "" or (isinstance(value, str) and value.strip().lower() in ("none", "standard")):
+        return None
+    if isinstance(value, bool):
+        raise BadRequest("profile_id must be a profile id or empty")
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise BadRequest("profile_id must be a profile id or empty")
+    return number if number > 0 else None
+
+
+def _check_profile(conn: sqlite3.Connection, clean: Dict[str, Any]) -> None:
+    profile_id = clean.get("profile_id")
+    if profile_id and not conn.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
+        raise BadRequest(f"profile {profile_id} does not exist")
+
+
 def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     clean: Dict[str, Any] = {}
     for key, value in fields.items():
@@ -108,6 +130,8 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
             clean[key] = label
         elif key in FLAG_FIELDS:
             clean[key] = _clean_flag(key, value)
+        elif key == "profile_id":
+            clean[key] = _clean_profile_id(value)
         else:
             clean[key] = _clean_number(key, value)
     for key in DEFAULT_FIELDS:
@@ -121,6 +145,7 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
 
 def create(conn: sqlite3.Connection, label: str = "", **fields: Any) -> Tuple[sqlite3.Row, str]:
     clean = validate_fields({"label": label, **fields})
+    _check_profile(conn, clean)
     raw = generate_key()
     now = int(time.time())
     columns = ["key_hash", "created_at", "updated_at"] + list(clean.keys())
@@ -133,6 +158,7 @@ def create(conn: sqlite3.Connection, label: str = "", **fields: Any) -> Tuple[sq
 def update(conn: sqlite3.Connection, client_id: int, fields: Dict[str, Any]) -> sqlite3.Row:
     get(conn, client_id)
     clean = validate_fields(fields)
+    _check_profile(conn, clean)
     if clean:
         assignments = ", ".join(f"{k}=?" for k in clean)
         conn.execute(f"UPDATE api_keys SET {assignments}, updated_at=? WHERE id=?",
@@ -177,6 +203,10 @@ def quotas(client: sqlite3.Row) -> Dict[str, Any]:
 
 def persistent_allowed(client: sqlite3.Row) -> bool:
     return bool(client["allow_persistent"])
+
+
+def internet_allowed(client: sqlite3.Row) -> bool:
+    return bool(client["allow_internet"])
 
 
 def usage(conn: sqlite3.Connection, client_id: int, running: Iterable[str],

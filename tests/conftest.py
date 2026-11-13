@@ -18,7 +18,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from albert_sandbox import config, db, dockerctl, netctl, ports, sandboxes, storage  # noqa: E402
+from albert_sandbox import config, db, dockerctl, netctl, ports, profiles, sandboxes, storage  # noqa: E402
 
 
 def _iso(ts: float) -> str:
@@ -39,6 +39,11 @@ class FakeDocker:
         self.networks: Dict[str, Dict[str, Any]] = {}
         self.copied_in: List[tuple] = []
         self.files_tar: Dict[str, bytes] = {}
+        # tag -> image id; profile images are added by build_streaming
+        self.images: Dict[str, str] = {"albert-ai-sandbox:latest": CURRENT_IMAGE_ID}
+        self.image_labels: Dict[str, Dict[str, str]] = {}
+        self.builds: List[Dict[str, Any]] = []
+        self.fail_build: Optional[str] = None
 
     def add_container(self, name: str, labels: Dict[str, str], running: bool = True,
                       created: Optional[float] = None, image: str = "albert-ai-sandbox:latest",
@@ -64,7 +69,38 @@ class FakeDocker:
         return True
 
     def image_id(self, image: str) -> Optional[str]:
-        return CURRENT_IMAGE_ID
+        if image in self.images:
+            return self.images[image]
+        if image.startswith("sha256:"):
+            return image
+        return None if image.startswith("albert-ai-sandbox-profile") else CURRENT_IMAGE_ID
+
+    def build_streaming(self, tag, context_dir, labels, on_line, timeout):
+        dockerfile = (Path(context_dir) / "Dockerfile").read_text()
+        setup = Path(context_dir) / "setup.sh"
+        self.builds.append({"tag": tag, "dockerfile": dockerfile, "labels": dict(labels),
+                            "setup": setup.read_text() if setup.exists() else None})
+        on_line("#1 [internal] load build definition from Dockerfile")
+        if self.fail_build:
+            on_line(f"ERROR: {self.fail_build}")
+            return 100
+        self.images[tag] = f"sha256:img-{tag}"
+        self.image_labels[tag] = dict(labels)
+        on_line(f"#9 naming to docker.io/library/{tag} done")
+        return 0
+
+    def image_inspect(self, image):
+        if image not in self.images:
+            return None
+        return {"Id": self.images[image], "Size": 3 * 1024 ** 3}
+
+    def images_with_label(self, label):
+        return [{"ref": tag, "id": self.images[tag]} for tag, labels in self.image_labels.items()
+                if label in labels and tag in self.images]
+
+    def image_remove(self, ref):
+        self.image_labels.pop(ref, None)
+        return self.images.pop(ref, None) is not None
 
     def inspect(self, names, size: bool = False):
         return {n: self.containers[n] for n in names if n in self.containers}
@@ -91,6 +127,8 @@ class FakeDocker:
         host_config: Dict[str, Any] = {"CapAdd": None, "SecurityOpt": None, "CapDrop": [], "Init": False}
         network = "bridge"
         for i, a in enumerate(args):
+            if a == "--dns":
+                host_config["Dns"] = (host_config.get("Dns") or []) + [args[i + 1]]
             if a == "--label":
                 k, v = args[i + 1].split("=", 1)
                 labels[k] = v
@@ -102,7 +140,7 @@ class FakeDocker:
                 host_config["CapAdd"] = (host_config["CapAdd"] or []) + [args[i + 1]]
             elif a == "--init":
                 host_config["Init"] = True
-        image_id = CURRENT_IMAGE_ID if args[-1] == "albert-ai-sandbox:latest" else args[-1]
+        image_id = self.images.get(args[-1], args[-1])
         self.add_container(name, labels, running=running, image=args[-1], host_config=host_config,
                            networks=[network], image_id=image_id)
         return f"id-{name}"
@@ -220,7 +258,8 @@ def env(tmp_path, monkeypatch):
     for attr in ("available", "image_id", "inspect", "inspect_one", "managed_container_names", "running_names",
                  "run_container", "create_container", "start", "stop", "remove", "update_limits", "volume_names",
                  "volume_remove", "volume_mountpoint", "stats", "network_inspect", "network_create",
-                 "network_connect", "network_disconnect", "copy_out_tar", "copy_in_tar"):
+                 "network_connect", "network_disconnect", "copy_out_tar", "copy_in_tar", "build_streaming",
+                 "image_inspect", "images_with_label", "image_remove"):
         monkeypatch.setattr(dockerctl, attr, getattr(fake, attr))
     firewall = {"ok": False, "applied": 0, "fail": None}
 
@@ -241,6 +280,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(sandboxes, "wait_for_mcphub", lambda port: True)
     monkeypatch.setattr(sandboxes, "host_cpus", lambda: 16)
     monkeypatch.setattr(sandboxes, "host_memory_mb", lambda: 65536)
+    # Build jobs and background work run inline in tests.
+    monkeypatch.setattr(profiles, "spawn_build", lambda pid, seq: profiles.run_build(pid, seq))
+    from albert_sandbox import web
+    monkeypatch.setattr(web, "run_in_background", lambda target, *a, **k: target(*a, **k))
 
     db.init_db()
     yield {"settings": s, "docker": fake, "disks": disks, "tmp": tmp_path, "firewall": firewall}

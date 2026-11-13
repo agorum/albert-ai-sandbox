@@ -143,9 +143,10 @@ def _skeleton(image: str) -> Path:
         tmp = cache.with_suffix(".tmp")
         tmp.write_bytes(data)
         tmp.replace(cache)
-        # Drop skeletons of older images.
+        # Drop skeletons of images that no longer exist (standard and profile
+        # images are used side by side, so others stay cached).
         for old in settings().skel_dir.glob("*.tar"):
-            if old != cache:
+            if old != cache and not dockerctl.image_id(old.stem.replace("_", ":", 1)):
                 old.unlink(missing_ok=True)
     return cache
 

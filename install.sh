@@ -416,6 +416,15 @@ if [ "$ADMIN_COUNT" = "0" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Sandbox profiles built on an older version of the image are rebuilt on the
+# new one (their previous image stays in use if a build fails).
+# ---------------------------------------------------------------------------
+say "Checking sandbox profile images..."
+if ! "$CLI" profile rebuild-outdated; then
+	warn "Some sandbox profiles could not be rebuilt - see the admin UI (Profile) or: $CLI profile list"
+fi
+
+# ---------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------
 say "Verifying..."

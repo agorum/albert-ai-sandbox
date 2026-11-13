@@ -2,7 +2,8 @@
 
 Client API (unchanged paths and payloads, plus additions):
   GET    /health
-  GET    /quota                         (new) quota, usage, defaults, persistentAllowed
+  GET    /quota                         (new) quota, usage, defaults, persistentAllowed,
+                                        internetAccess, profile
   POST   /containers                    body: name, persistent, resources{cpus,memoryMb,diskGb}
   GET    /containers
   GET    /containers/<name>
@@ -27,7 +28,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from flask import Blueprint, Flask, g, jsonify, redirect, request, send_from_directory, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, admins, clients, db, dockerctl, reconcile, sandboxes, storage
+from . import __version__, admins, clients, db, dockerctl, profiles, reconcile, sandboxes, storage
 from .config import settings
 from .errors import BadRequest, SandboxError
 
@@ -113,9 +114,14 @@ def client_quota() -> Any:
     with db.session() as conn:
         client = clients.get(conn, g.client["id"])
         usage = clients.usage(conn, client["id"], dockerctl.running_names())
+        profile = profiles.get(conn, client["profile_id"]) if client["profile_id"] else None
     return jsonify({"quota": clients.quotas(client), "usage": usage,
                     "defaults": _defaults_dict(client),
-                    "persistentAllowed": clients.persistent_allowed(client)})
+                    "persistentAllowed": clients.persistent_allowed(client),
+                    # Without internet access sandboxes cannot download anything (no DNS either);
+                    # the profile lists the software installed on top of the standard image.
+                    "internetAccess": clients.internet_allowed(client),
+                    "profile": profiles.summary(profile)})
 
 
 @client_api.post("/containers")
@@ -319,6 +325,9 @@ def _defaults_dict(client: Any) -> Dict[str, Any]:
 
 
 def _client_dict(conn: Any, client: Any, running: set) -> Dict[str, Any]:
+    profile = None
+    if client["profile_id"]:
+        profile = conn.execute("SELECT id, name FROM profiles WHERE id=?", (client["profile_id"],)).fetchone()
     return {
         "id": client["id"],
         "label": client["label"] or "",
@@ -329,6 +338,9 @@ def _client_dict(conn: Any, client: Any, running: set) -> Dict[str, Any]:
         "quota": clients.quotas(client),
         "usage": clients.usage(conn, client["id"], running),
         "allowPersistent": clients.persistent_allowed(client),
+        "allowInternet": clients.internet_allowed(client),
+        "profileId": client["profile_id"],
+        "profile": {"id": profile["id"], "name": profile["name"]} if profile else None,
     }
 
 
@@ -340,6 +352,8 @@ _CLIENT_FIELD_MAP = {
     "quotaSandboxes": "quota_sandboxes",
     "quotaRunning": "quota_running",
     "allowPersistent": "allow_persistent",
+    "allowInternet": "allow_internet",
+    "profileId": "profile_id",
     "defaultCpus": "default_cpus",
     "defaultMemoryMb": "default_memory_mb",
     "defaultDiskGb": "default_disk_gb",
@@ -348,6 +362,16 @@ _CLIENT_FIELD_MAP = {
 
 def _client_fields(body: Dict[str, Any]) -> Dict[str, Any]:
     return {column: body[key] for key, column in _CLIENT_FIELD_MAP.items() if key in body}
+
+
+def run_in_background(target: Callable, *args: Any, **kwargs: Any) -> None:
+    """Long-running follow-up work of a request (tests replace this with a direct call)."""
+    def runner() -> None:
+        try:
+            target(*args, **kwargs)
+        except Exception as exc:  # the state stays visible in the UI (sandbox errors, audit log)
+            print(f"[ERROR] background {getattr(target, '__name__', target)}: {exc}", flush=True)
+    threading.Thread(target=runner, daemon=True).start()
 
 
 @admin_bp.get("/api/overview")
@@ -397,9 +421,17 @@ def admin_update_client(client_id: int) -> Any:
         raise BadRequest("label is required")
     running = dockerctl.running_names()
     with db.session() as conn:
+        before = clients.get(conn, client_id)
         client = clients.update(conn, client_id, fields)
         db.audit(conn, g.actor, "client.update", client["label"], {"clientId": client_id, **fields})
-        return jsonify({"client": _client_dict(conn, client, running)})
+        data = _client_dict(conn, client, running)
+        has_sandboxes = conn.execute("SELECT 1 FROM sandboxes WHERE api_key_id=? LIMIT 1",
+                                     (client_id,)).fetchone() is not None
+    # Internet access changed: move/rebuild the client's sandboxes right away.
+    if bool(before["allow_internet"]) != bool(client["allow_internet"]) and has_sandboxes:
+        run_in_background(sandboxes.apply_network_policy, client_id, actor=g.actor)
+        data["networkPolicy"] = "applying"
+    return jsonify({"client": data})
 
 
 @admin_bp.post("/api/clients/<int:client_id>/rotate-key")
@@ -416,6 +448,95 @@ def admin_rotate_key(client_id: int) -> Any:
 @admin_required
 def admin_delete_client(client_id: int) -> Any:
     return jsonify(sandboxes.delete_client(client_id, actor=g.actor))
+
+
+_PROFILE_FIELD_MAP = {
+    "name": "name",
+    "description": "description",
+    "setupScript": "setup_script",
+}
+
+
+def _profile_fields(body: Dict[str, Any]) -> Dict[str, Any]:
+    fields = {column: body[key] for key, column in _PROFILE_FIELD_MAP.items() if key in body}
+    pk = body.get("packages")
+    if pk is not None:
+        if not isinstance(pk, dict):
+            raise BadRequest("packages must be an object with apt, pip and npm lists")
+        for kind, column in profiles.PACKAGE_COLUMNS.items():
+            if kind in pk:
+                fields[column] = pk[kind]
+    return fields
+
+
+def _profile_view(conn: Any, row: Any, with_dockerfile: bool = False) -> Dict[str, Any]:
+    data = profiles.serialize(conn, row, profiles.base_image_id())
+    if with_dockerfile:
+        data["dockerfile"] = profiles.dockerfile(row)
+    return data
+
+
+@admin_bp.get("/api/profiles")
+@admin_required
+def admin_profiles() -> Any:
+    base_id = profiles.base_image_id()
+    with db.session() as conn:
+        return jsonify({"profiles": [profiles.serialize(conn, r, base_id) for r in profiles.list_all(conn)],
+                        "baseImage": settings().docker_image})
+
+
+@admin_bp.post("/api/profiles")
+@admin_required
+def admin_create_profile() -> Any:
+    fields = _profile_fields(_body())
+    name = fields.pop("name", "")
+    with db.session() as conn:
+        row = profiles.create(conn, name if isinstance(name, str) else "", **fields)
+        db.audit(conn, g.actor, "profile.create", row["name"], {"profileId": row["id"]})
+        return jsonify({"profile": _profile_view(conn, row, with_dockerfile=True)}), 201
+
+
+@admin_bp.get("/api/profiles/<int:profile_id>")
+@admin_required
+def admin_get_profile(profile_id: int) -> Any:
+    with db.session() as conn:
+        profiles.expire_stale(conn)
+        return jsonify({"profile": _profile_view(conn, profiles.get(conn, profile_id), with_dockerfile=True)})
+
+
+@admin_bp.patch("/api/profiles/<int:profile_id>")
+@admin_required
+def admin_update_profile(profile_id: int) -> Any:
+    fields = _profile_fields(_body())
+    with db.session() as conn:
+        row = profiles.update(conn, profile_id, fields)
+        db.audit(conn, g.actor, "profile.update", row["name"],
+                 {"profileId": profile_id, "fields": sorted(fields)})
+        return jsonify({"profile": _profile_view(conn, row, with_dockerfile=True)})
+
+
+@admin_bp.delete("/api/profiles/<int:profile_id>")
+@admin_required
+def admin_delete_profile(profile_id: int) -> Any:
+    with db.session() as conn:
+        row = profiles.delete(conn, profile_id)
+        db.audit(conn, g.actor, "profile.delete", row["name"], {"profileId": profile_id})
+    return jsonify({"deleted": profile_id})
+
+
+@admin_bp.post("/api/profiles/<int:profile_id>/build")
+@admin_required
+def admin_build_profile(profile_id: int) -> Any:
+    profiles.request_build(profile_id, actor=g.actor)
+    with db.session() as conn:
+        return jsonify({"profile": _profile_view(conn, profiles.get(conn, profile_id), with_dockerfile=True)}), 202
+
+
+@admin_bp.get("/api/profiles/<int:profile_id>/log")
+@admin_required
+def admin_profile_log(profile_id: int) -> Any:
+    return jsonify(profiles.read_log(profile_id, seq=request.args.get("seq", type=int),
+                                     offset=request.args.get("offset", default=0, type=int)))
 
 
 @admin_bp.get("/api/sandboxes")

@@ -15,7 +15,7 @@ import secrets
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import admins, clients, db, dockerctl, netctl, reconcile, sandboxes, watcher
+from . import admins, clients, db, dockerctl, netctl, profiles, reconcile, sandboxes, watcher
 from .config import settings
 from .errors import NotFound, SandboxError
 
@@ -114,6 +114,32 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("id", type=int, nargs="?")
     cp.add_argument("--key", help="identify the client by plaintext API key instead of id")
 
+    p = add("profile", "manage sandbox profiles (extra software on top of the standard image)")
+    psub = p.add_subparsers(dest="profile_command")
+    psub.add_parser("list", parents=[common], help="list profiles")
+    pp = psub.add_parser("show", parents=[common], help="show a profile incl. generated Dockerfile")
+    pp.add_argument("profile", help="id or name")
+    pp = psub.add_parser("create", parents=[common], help="create a profile")
+    pp.add_argument("--name", required=True)
+    _profile_options(pp)
+    pp = psub.add_parser("set", parents=[common], help="change a profile (rebuild it afterwards)")
+    pp.add_argument("profile", help="id or name")
+    pp.add_argument("--name")
+    _profile_options(pp)
+    pp = psub.add_parser("delete", parents=[common], help="delete a profile no client uses")
+    pp.add_argument("profile", help="id or name")
+    pp = psub.add_parser("build", parents=[common], help="build the profile image (shows the build output)")
+    pp.add_argument("profile", help="id or name")
+    pp.add_argument("--background", action="store_true", help="start the build job and return at once")
+    psub.add_parser("rebuild-outdated", parents=[common],
+                    help="rebuild all profiles whose image is outdated (install.sh, after a base image update)")
+    pp = psub.add_parser("log", parents=[common], help="show the output of the last (or a given) build")
+    pp.add_argument("profile", help="id or name")
+    pp.add_argument("--seq", type=int)
+    pp = psub.add_parser("build-job", parents=[common], help=argparse.SUPPRESS)
+    pp.add_argument("profile_id", type=int)
+    pp.add_argument("seq", type=int)
+
     p = add("admin", "manage admin users of the web UI")
     asub = p.add_subparsers(dest="admin_command")
     ap = asub.add_parser("add", parents=[common], help="add an admin user")
@@ -138,6 +164,17 @@ def _client_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--quota-running", help="sandboxes running at the same time")
     p.add_argument("--allow-persistent", choices=("yes", "no"),
                    help="may the client create persistent sandboxes (new clients: no)")
+    p.add_argument("--internet", choices=("yes", "no"),
+                   help="internet access of the client's sandboxes (default: yes)")
+    p.add_argument("--profile", help="sandbox profile (id or name; 'none' = standard image)")
+
+
+def _profile_options(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--description")
+    p.add_argument("--apt", help="OS packages, space separated (replaces the list)")
+    p.add_argument("--pip", help="Python packages, space separated (replaces the list)")
+    p.add_argument("--npm", help="global Node packages, space separated (replaces the list)")
+    p.add_argument("--setup-file", help="shell script run as root at the end of the build ('-' = none)")
 
 
 # --------------------------------------------------------------------------
@@ -291,6 +328,15 @@ def _client_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
             fields[attr] = value
     if getattr(args, "allow_persistent", None):
         fields["allow_persistent"] = args.allow_persistent == "yes"
+    if getattr(args, "internet", None):
+        fields["allow_internet"] = args.internet == "yes"
+    ref = getattr(args, "profile", None)
+    if ref is not None:
+        if ref.strip().lower() in ("none", "standard", "-", ""):
+            fields["profile_id"] = None
+        else:
+            with db.session() as conn:
+                fields["profile_id"] = profiles.find(conn, ref)["id"]
     return fields
 
 
@@ -302,6 +348,8 @@ def _client_summary(conn: Any, row: Any, running: set) -> Dict[str, Any]:
                      "diskGb": row["default_disk_gb"]},
         "quota": clients.quotas(row), "usage": clients.usage(conn, row["id"], running),
         "allowPersistent": clients.persistent_allowed(row),
+        "allowInternet": clients.internet_allowed(row),
+        "profile": profiles.summary(profiles.get(conn, row["profile_id"])) if row["profile_id"] else None,
     }
 
 
@@ -329,6 +377,8 @@ def cmd_client(args: argparse.Namespace, out: Out) -> None:
                   f"sandboxes={u['sandboxes']}/{q['sandboxes'] if q['sandboxes'] is not None else '∞'} "
                   f"running={u['running']}/{q['running'] if q['running'] is not None else '∞'} "
                   f"persistent={'yes' if c['allowPersistent'] else 'no'} "
+                  f"internet={'yes' if c['allowInternet'] else 'no'} "
+                  f"profile={(c['profile'] or {}).get('name', 'standard')} "
                   f"cpus={u['cpus']:g}/{q['cpus'] if q['cpus'] is not None else '∞'} "
                   f"memMb={u['memoryMb']}/{q['memoryMb'] if q['memoryMb'] is not None else '∞'} "
                   f"diskGb={u['diskGb']}/{q['diskGb'] if q['diskGb'] is not None else '∞'}")
@@ -343,9 +393,16 @@ def cmd_client(args: argparse.Namespace, out: Out) -> None:
         if args.label is not None:
             fields["label"] = args.label
         with db.session() as conn:
+            before = clients.get(conn, args.id)
             row = clients.update(conn, args.id, fields)
             db.audit(conn, "cli", "client.update", row["label"], {"clientId": args.id, **fields})
-            item = _client_summary(conn, row, dockerctl.running_names())
+        if bool(before["allow_internet"]) != bool(row["allow_internet"]):
+            if not out.json and not out.quiet:
+                print(f"{YELLOW}Internet access changed - moving/rebuilding the client's sandboxes ...{NC}",
+                      flush=True)
+            sandboxes.apply_network_policy(args.id, actor="cli")
+        with db.session() as conn:
+            item = _client_summary(conn, clients.get(conn, args.id), dockerctl.running_names())
         out.emit(item, json.dumps(item, indent=2, ensure_ascii=False))
     elif sub == "rotate":
         with db.session() as conn:
@@ -368,6 +425,121 @@ def cmd_client(args: argparse.Namespace, out: Out) -> None:
                          "API key revoked.")
     else:
         raise CliError("usage: client {create,list,show,set,rotate,delete}", "usage", 2)
+
+
+def _profile_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {}
+    for attr, column in (("name", "name"), ("description", "description"), ("apt", "apt_packages"),
+                         ("pip", "pip_packages"), ("npm", "npm_packages")):
+        value = getattr(args, attr, None)
+        if value is not None:
+            fields[column] = value
+    setup = getattr(args, "setup_file", None)
+    if setup is not None:
+        if setup == "-":
+            fields["setup_script"] = ""
+        else:
+            try:
+                with open(setup, encoding="utf-8") as fh:
+                    fields["setup_script"] = fh.read()
+            except OSError as exc:
+                raise CliError(f"cannot read {setup}: {exc}", "usage", 2)
+    return fields
+
+
+def _profile_text(item: Dict[str, Any]) -> str:
+    pk = item["packages"]
+    lines = [
+        f"{BLUE}Profile:{NC} {item['name']} (id {item['id']})",
+        f"{BLUE}Status:{NC} {item['status']}" + (f" ({', '.join(item['outdatedReasons'])})"
+                                                if item["outdatedReasons"] else ""),
+        f"{BLUE}Image:{NC} {item['image'] or '-'}  {_fmt_bytes(item['imageSizeBytes'])}  built {item['builtAt'] or '-'}",
+        f"{BLUE}apt:{NC} {' '.join(pk['apt']) or '-'}",
+        f"{BLUE}pip:{NC} {' '.join(pk['pip']) or '-'}",
+        f"{BLUE}npm:{NC} {' '.join(pk['npm']) or '-'}",
+        f"{BLUE}Clients:{NC} {', '.join(c['label'] or str(c['id']) for c in item.get('clients', [])) or '-'}",
+    ]
+    if item["build"]["state"] == "failed" and item["build"]["error"]:
+        lines.append(f"{RED}Last build failed:{NC} {item['build']['error'].splitlines()[0]}")
+    return "\n".join(lines)
+
+
+def cmd_profile(args: argparse.Namespace, out: Out) -> None:
+    sub = args.profile_command
+    if sub == "build-job":
+        ok = profiles.run_build(args.profile_id, args.seq)
+        if not ok:
+            raise CliError("profile build failed", "build_failed", 1)
+        return
+    if sub == "rebuild-outdated":
+        echo = None if (out.json or out.quiet) else (lambda line: print(line, flush=True))
+        results = profiles.rebuild_outdated("cli", echo=echo)
+        out.emit(results, "\n".join(f"{k}: {v}" for k, v in results.items()) or "All profile images are up to date.")
+        if any(v != "ok" for v in results.values()):
+            raise CliError("some profiles could not be rebuilt", "build_failed", 1)
+        return
+    base_id = profiles.base_image_id()
+    if sub == "list":
+        with db.session() as conn:
+            items = [profiles.serialize(conn, r, base_id) for r in profiles.list_all(conn)]
+        if out.json:
+            out.emit(items)
+            return
+        if not items:
+            print("No profiles.")
+        for it in items:
+            pk = it["packages"]
+            print(f"id={it['id']} name={it['name']} status={it['status']} image={it['image'] or '-'} "
+                  f"apt={len(pk['apt'])} pip={len(pk['pip'])} npm={len(pk['npm'])} "
+                  f"clients={len(it.get('clients', []))}")
+        return
+    if sub == "create":
+        fields = _profile_fields_from_args(args)
+        name = fields.pop("name")
+        with db.session() as conn:
+            row = profiles.create(conn, name, **fields)
+            db.audit(conn, "cli", "profile.create", row["name"], {"profileId": row["id"]})
+            item = profiles.serialize(conn, row, base_id)
+        out.emit(item, _profile_text(item) + f"\nBuild it with: albert-ai-sandbox-manager profile build {row['id']}")
+        return
+    with db.session() as conn:
+        row = profiles.find(conn, args.profile)
+    if sub == "show":
+        with db.session() as conn:
+            item = profiles.serialize(conn, row, base_id)
+        item["dockerfile"] = profiles.dockerfile(row)
+        out.emit(item, _profile_text(item) + "\n\n" + item["dockerfile"])
+    elif sub == "set":
+        fields = _profile_fields_from_args(args)
+        with db.session() as conn:
+            row = profiles.update(conn, row["id"], fields)
+            db.audit(conn, "cli", "profile.update", row["name"], {"profileId": row["id"], "fields": sorted(fields)})
+            item = profiles.serialize(conn, row, base_id)
+        out.emit(item, _profile_text(item))
+    elif sub == "delete":
+        with db.session() as conn:
+            profiles.delete(conn, row["id"])
+            db.audit(conn, "cli", "profile.delete", row["name"], {"profileId": row["id"]})
+        out.emit({"deleted": row["id"]}, f"Profile '{row['name']}' deleted (its images are removed by reconcile).")
+    elif sub == "build":
+        queued = profiles.request_build(row["id"], "cli", spawn=args.background)
+        if args.background:
+            out.emit({"profile": row["id"], "seq": queued["build_seq"], "state": "queued"},
+                     f"Build {queued['build_seq']} of '{row['name']}' started; "
+                     f"follow it with: albert-ai-sandbox-manager profile log {row['id']}")
+            return
+        echo = None if (out.json or out.quiet) else (lambda line: print(line, flush=True))
+        ok = profiles.run_build(row["id"], queued["build_seq"], echo=echo)
+        with db.session() as conn:
+            item = profiles.serialize(conn, profiles.get(conn, row["id"]), profiles.base_image_id())
+        out.emit(item, f"{GREEN if ok else RED}Build {'finished' if ok else 'failed'}: {item['image'] or '-'}{NC}")
+        if not ok:
+            raise CliError("profile build failed", "build_failed", 1)
+    elif sub == "log":
+        data = profiles.read_log(row["id"], seq=args.seq)
+        out.emit(data, data["text"] or "(no build output)")
+    else:
+        raise CliError("usage: profile {list,show,create,set,delete,build,rebuild-outdated,log}", "usage", 2)
 
 
 def _read_password(args: argparse.Namespace, out: Out) -> str:
@@ -469,6 +641,8 @@ def cmd_firewall(args: argparse.Namespace, out: Out) -> None:
     net = dockerctl.network_inspect(settings().network_name)
     status["network"] = settings().network_name if net else None
     status["icc"] = ((net or {}).get("Options") or {}).get("com.docker.network.bridge.enable_icc")
+    offline = dockerctl.network_inspect(settings().offline_network_name)
+    status["offlineNetwork"] = settings().offline_network_name if offline else "(created on first use)"
     out.emit(status, "\n".join(f"{k}: {v}" for k, v in status.items()))
     if status.get("enabled") and not status.get("ok"):
         raise CliError("sandbox firewall is not complete", "firewall", 1)
@@ -511,6 +685,7 @@ def cmd_selfcheck(args: argparse.Namespace, out: Out) -> None:
         "dockerReachable": dockerctl.available(),
         "image": s.docker_image,
         "imagePresent": bool(dockerctl.image_id(s.docker_image)),
+        "offlineNetwork": f"{s.offline_network_name} ({s.offline_network_subnet})",
         "publicUrl": s.public_url,
         "storageDir": str(s.storage_dir),
         "nginxSandboxDir": str(s.nginx_sandbox_dir),
@@ -540,6 +715,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd_client(args, out)
         elif command == "admin":
             cmd_admin(args, out)
+        elif command == "profile":
+            cmd_profile(args, out)
         elif command == "reconcile":
             cmd_reconcile(args, out)
         elif command == "recreate":
