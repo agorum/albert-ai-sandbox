@@ -632,6 +632,8 @@ dialog .limit-groups { grid-template-columns: minmax(0, 1fr); }
 .switch-field input.switch { flex: none; margin-top: 1px; }
 .switch-field .field-label, .switch-field .field-hint { display: block; }
 .field-grid .field + .field { margin-top: 0; }
+/* side by side, not stacked: no extra gap above the second field of a row */
+.form-row > .field + .field, .grid > .field + .field { margin-top: 0; }
 @media (max-width: 640px) {
   .field-grid, .field-grid.cols-4, .field-grid.cols-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
