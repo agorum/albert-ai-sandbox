@@ -114,7 +114,8 @@ def render(row: Mapping[str, Any]) -> str:
         for suffix in ("mcp", "sse"):
             parts += [
                 "",
-                f"location /{name}/mcphub/{suffix} {{",
+                # Exact path: nothing else of MCP Hub (dashboard, its API) is reachable.
+                f"location = /{name}/mcphub/{suffix} {{",
                 f"    auth_request /_albert_auth/mcp/{name};",
                 "    error_page 401 = @albert_auth_required;",
                 "    error_page 403 = @albert_auth_forbidden;",

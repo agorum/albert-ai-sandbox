@@ -249,7 +249,9 @@ def test_sandbox_route_checks_every_service(env, make_client):
     name = sandboxes.create(client["id"])["name"]
     row = _row(name)
     conf = nginxctl.conf_path(name).read_text(encoding="utf-8")
-    mcp = conf.split(f"location /{name}/mcphub/mcp {{", 1)[1].split("\n}", 1)[0]
+    # Exact paths only: the MCP Hub dashboard and its API stay unreachable.
+    assert f"location /{name}/mcphub/" not in conf and f"location = /{name}/mcphub/sse {{" in conf
+    mcp = conf.split(f"location = /{name}/mcphub/mcp {{", 1)[1].split("\n}", 1)[0]
     assert f"auth_request /_albert_auth/mcp/{name};" in mcp
     assert f'proxy_set_header Authorization "Bearer {row["mcphub_token"]}";' in mcp
     assert 'proxy_set_header Cookie "";' in mcp and 'proxy_set_header X-Albert-User "";' in mcp
