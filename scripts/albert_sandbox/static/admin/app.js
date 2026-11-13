@@ -1449,8 +1449,9 @@
       return confirmDialog({
         title: allow ? "Internetzugriff einschalten" : "Internetzugriff abschalten",
         message: [
-          h("p", null, `Die ${list.length === 1 ? "Sandbox" : `${list.length} Sandboxen`} von `,
-            h("strong", null, client.label || `#${client.id}`), " werden sofort umgestellt: ",
+          h("p", null, list.length === 1 ? "Die Sandbox von " : `Die ${list.length} Sandboxen von `,
+            h("strong", null, client.label || `#${client.id}`),
+            list.length === 1 ? " wird sofort umgestellt: " : " werden sofort umgestellt: ",
             allow ? "Verbindungen nach außen und Namensauflösung werden wieder möglich."
               : "Verbindungen nach außen und die Namensauflösung werden gesperrt."),
           notice("ok", "Daten bleiben erhalten.",
@@ -2293,7 +2294,11 @@
     if (!p.image) return h("span", { class: "faint" }, "–");
     return h("div", null,
       h("div", { class: "mono small" }, p.image),
-      h("div", { class: "cell-sub" }, isNum(p.imageSizeBytes) ? fmtBytes(p.imageSizeBytes) + " · " : "",
+      h("div", { class: "cell-sub" },
+        isNum(p.imageSizeBytes)
+          ? h("span", { title: "Gesamtgröße inklusive des mitgelieferten Sandbox-Images, dessen Schichten alle Profile "
+            + "gemeinsam nutzen" }, fmtBytes(p.imageSizeBytes) + " inkl. Basis · ")
+          : "",
         "gebaut ", timeEl(p.builtAt, true)));
   }
 
@@ -2596,6 +2601,8 @@
         logHint.textContent = data.running ? "läuft – wird laufend aktualisiert" : "";
         if (data.running) {
           log.timer = setTimeout(pollLog, 2000);
+          // "wartet auf Bau" -> "wird gebaut" as soon as the job got the build slot
+          if (data.state !== profile.status && data.state && BUILD_ACTIVE.has(data.state)) refresh({ silent: true });
         } else if (BUILD_ACTIVE.has(profile.status)) {
           refresh({ silent: true }); // finished meanwhile: show the result
         }

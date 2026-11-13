@@ -46,7 +46,7 @@ from .config import settings
 from .errors import BadRequest, Conflict, NotFound, SandboxError, Unavailable
 
 # Bump when the generated Dockerfile changes in a way that needs a rebuild.
-TEMPLATE_VERSION = 1
+TEMPLATE_VERSION = 2
 LABEL_PROFILE = "albert.profile"
 LABEL_PROFILE_SEQ = "albert.profile.seq"
 STALE_SECONDS = 120
@@ -328,7 +328,9 @@ def dockerfile(row: sqlite3.Row) -> str:
         lines.append("RUN apt-get update && apt-get install -y " + " ".join(shlex.quote(p) for p in pk["apt"])
                      + " && apt-get clean && rm -rf /var/lib/apt/lists/*")
     if pk["pip"]:
-        lines.append("RUN pip3 install --no-cache-dir " + " ".join(shlex.quote(p) for p in pk["pip"]))
+        # system-wide on purpose (the sandbox user should see the packages); no root warning in the log
+        lines.append("RUN PIP_ROOT_USER_ACTION=ignore pip3 install --no-cache-dir "
+                     + " ".join(shlex.quote(p) for p in pk["pip"]))
     if pk["npm"]:
         lines.append("RUN npm install -g --no-fund --no-audit " + " ".join(shlex.quote(p) for p in pk["npm"]))
     if (row["setup_script"] or "").strip():
