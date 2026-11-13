@@ -414,7 +414,11 @@ def status() -> Dict[str, Any]:
             elif days < 10:
                 warnings.append(f"The certificate expires in {days} days although it should have been renewed "
                                 "(check: systemctl status certbot.timer).")
-    host = state.get("fqdn") if active else access.public_url().split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    if active:
+        host = access.url_host(state.get("fqdn") or "")
+    else:
+        host = access.public_url().split("://", 1)[-1].split("/", 1)[0]
+        host = host if host.startswith("[") else host.split(":", 1)[0]
     job = state.get("job") or None
     if job and job.get("state") == "running" and time.time() - (job.get("startedAt") or 0) > 600:
         job = {**job, "state": "failed", "error": "The request did not finish (interrupted)."}

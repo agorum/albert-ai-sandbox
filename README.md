@@ -64,6 +64,11 @@ The installer writes the nginx site `/etc/nginx/sites-available/albert-sandbox` 
 | `ALBERT_ADMIN_PORT` | `8443` | Port of the admin UI (own origin; HTTPS once a certificate is active) |
 | `ALBERT_DESKTOP_LINK_SECONDS` | `120` | Validity of a one-time desktop link |
 | `ALBERT_DESKTOP_SESSION_HOURS` | `8` | Validity of the desktop session (cookie) a link opens |
+| `ALBERT_NGINX_SITE_FILE` / `ALBERT_NGINX_SITE_LINK` | `/etc/nginx/sites-available/albert-sandbox` / `/etc/nginx/sites-enabled/albert-sandbox` | nginx site written by the manager (main server, HTTPS, admin port) |
+| `ALBERT_NOVNC_DIR` | `<install dir>/novnc` | noVNC client files served by nginx (copied from the sandbox image by `install.sh`) |
+| `ALBERT_ACME_DIR` | `/var/www/albert-acme` | Webroot for Let's Encrypt HTTP-01 challenges |
+| `ALBERT_TLS_DIR` | `/etc/albert-sandbox/tls` | Uploaded certificates and keys (root only) |
+| `ALBERT_LETSENCRYPT_DIR` / `ALBERT_CERTBOT` | `/etc/letsencrypt` / `certbot` | Let's Encrypt directory and certbot binary |
 | `ALBERT_DEFAULT_CPUS` | `1` | Global per-sandbox CPU limit (if the client has none) |
 | `ALBERT_DEFAULT_MEMORY_MB` | `2048` | Global per-sandbox RAM limit (an idle desktop needs ~450 MB, one browser page ~900 MB) |
 | `ALBERT_DEFAULT_DISK_GB` | `10` | Global per-sandbox disk size |

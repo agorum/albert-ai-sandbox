@@ -494,6 +494,49 @@ def test_waitress_keeps_forwarded_headers(env, monkeypatch):
     assert seen["clear_untrusted_proxy_headers"] is False and seen["host"] == "127.0.0.1"
 
 
+def test_failed_rebuild_keeps_the_credentials_of_the_old_container(env, make_client, monkeypatch):
+    client, _ = make_client()
+    name = sandboxes.create(client["id"])["name"]
+    before = _row(name)
+
+    def broken_remove(*_a, **_k):
+        raise sandboxes.dockerctl.DockerError("daemon busy")
+
+    monkeypatch.setattr(sandboxes.dockerctl, "remove", broken_remove)
+    with pytest.raises(sandboxes.SandboxError):
+        sandboxes.recreate(name)
+    after = _row(name)
+    for column in ("vnc_password", "filesvc_token", "mcphub_token"):
+        assert after[column] == before[column]  # the old container still has these
+
+
+def test_https_site_redirects_old_admin_url_and_brackets_ipv6(env):
+    tls = nginxctl.render_site({"active": True, "cert": "/c/f.pem", "key": "/c/k.pem"}, [])
+    http80 = tls.split("listen 443", 1)[0]
+    assert "location ^~ /manager/admin {" in http80 and "return 301 https://$host:8443/manager/admin/;" in http80
+    assert access.url_host("2001:db8::5") == "[2001:db8::5]" and access.url_host("10.0.1.61") == "10.0.1.61"
+
+
+def test_file_route_keeps_security_headers(env, make_client):
+    client, _ = make_client()
+    name = sandboxes.create(client["id"])["name"]
+    files = nginxctl.conf_path(name).read_text(encoding="utf-8").split(f"location /{name}/files/ {{", 1)[1]
+    for header in ("X-Frame-Options", "Referrer-Policy", "Strict-Transport-Security", "Content-Security-Policy"):
+        assert f"add_header {header} " in files
+
+
+def test_refused_first_site_is_taken_out_again(env, monkeypatch):
+    s = config.configure(nginx_site_file=env["tmp"] / "site2", nginx_site_link=env["tmp"] / "enabled2" / "site2")
+
+    def broken():
+        raise nginxctl.NginxError("nginx -t failed")
+
+    monkeypatch.setattr(nginxctl, "reload", broken)
+    with pytest.raises(nginxctl.NginxError):
+        nginxctl.write_site(None, [])
+    assert not s.nginx_site_file.exists() and not s.nginx_site_link.is_symlink()
+
+
 def test_reload_waits_for_new_nginx_workers(env, monkeypatch):
     """systemctl reload returns before nginx uses the new routes; the manager waits for new workers."""
     config.configure(nginx_reload=True)

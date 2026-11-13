@@ -30,6 +30,8 @@ def http(method, path, token=None, data=None):
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+        # User binding: required for clients without legacy access (pseudonymous id).
+        headers["X-Albert-User"] = os.environ.get("ALBERT_USER", "smoke-test")
     body = None
     if data is not None:
         body = json.dumps(data).encode("utf-8")

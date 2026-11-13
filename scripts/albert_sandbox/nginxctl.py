@@ -146,10 +146,14 @@ def render(row: Mapping[str, Any]) -> str:
             "    client_max_body_size 0;",
             "    proxy_request_buffering off;",
             "    proxy_cache off;",
-            "    # Files from a sandbox never run as a page of this host.",
+            "    # Files from a sandbox never run as a page of this host. (add_header here replaces",
+            "    # the inherited headers, so the general security headers are repeated.)",
             "    proxy_hide_header Content-Security-Policy;",
             "    add_header Content-Security-Policy \"sandbox; default-src 'none'\" always;",
             '    add_header X-Content-Type-Options "nosniff" always;',
+            '    add_header X-Frame-Options "DENY" always;',
+            '    add_header Referrer-Policy "no-referrer" always;',
+            '    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;',
             "}",
         ]
     return "\n".join(parts) + "\n"
@@ -350,6 +354,9 @@ def render_site(tls: Optional[Dict[str, Any]] = None, admin_allow: Optional[List
         out += [
             "",
             "    # HTTPS only: API keys and files never travel unencrypted.",
+            "    location ^~ /manager/admin {",
+            f"        return 301 https://$host:{int(s.admin_port)}/manager/admin/;",
+            "    }",
             "    location ^~ /manager/ {",
             "        default_type application/json;",
             f"        return 403 {https_required};",
@@ -449,9 +456,15 @@ def write_site(tls: Optional[Dict[str, Any]] = None, admin_allow: Optional[List[
     except NginxError:
         if previous is not None:
             _write_file(path, previous, 0o644)
-            try:
-                reload()
-            except NginxError:
-                pass
+        else:
+            # No previous site: take the refused one out again, or every later
+            # reload (sandbox routes) would fail on it.
+            path.unlink(missing_ok=True)
+            if link.is_symlink() and not link.exists():
+                link.unlink()
+        try:
+            reload()
+        except NginxError:
+            pass
         raise
     return True

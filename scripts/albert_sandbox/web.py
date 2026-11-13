@@ -90,11 +90,10 @@ def _secret_key() -> bytes:
 
 def _client_auth() -> Tuple[Optional[Any], Optional[Tuple[Any, int]]]:
     # "error" keeps the wording of the previous versions; "message" matches all other errors.
-    auth = request.headers.get("Authorization", "")
-    if not auth.lower().startswith("bearer "):
+    key = access.bearer(request.headers.get("Authorization"))
+    if not key:
         msg = "Missing or invalid Authorization header"
         return None, (jsonify({"error": msg, "message": msg}), 401)
-    key = auth.split(None, 1)[1].strip()
     with db.session() as conn:
         row = conn.execute("SELECT * FROM api_keys WHERE key_hash=?", (clients.hash_key(key),)).fetchone()
     if not row:
@@ -731,8 +730,8 @@ def admin_delete_sandbox(name: str) -> Any:
 @admin_required
 def admin_sandbox_desktop(name: str) -> Any:
     """One-time desktop link for an administrator."""
-    sandboxes.describe(name)  # 404 if unknown
     with db.session() as conn:
+        sandboxes.get_row(conn, name)  # 404 if unknown
         link = access.create_desktop_link(conn, name, g.actor)
     return jsonify({"desktop": link}), 201
 

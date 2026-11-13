@@ -237,11 +237,16 @@ def public_url() -> str:
         with db.session() as conn:
             tls = db.kv_get(conn, "tls", {}) or {}
         if tls.get("active") and tls.get("fqdn"):
-            value = f"https://{tls['fqdn']}"
+            value = f"https://{url_host(tls['fqdn'])}"
     except sqlite3.Error:
         pass
     _url_cache.update(at=now, value=value)
     return value
+
+
+def url_host(host: str) -> str:
+    """Host for a URL: IPv6 addresses in brackets."""
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
 
 
 def reset_url_cache() -> None:

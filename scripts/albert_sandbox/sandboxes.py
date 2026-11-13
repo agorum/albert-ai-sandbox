@@ -604,25 +604,34 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
             conn.execute("UPDATE sandboxes SET state=? WHERE name=?", (row["state"], name))
             raise SandboxError(f"Recreate of '{name}' aborted, nothing changed: {exc}", code="recreate_failed")
 
-        # New credentials for the new container (the old one is removed right below).
-        cred = new_credentials()
-        conn.execute("UPDATE sandboxes SET vnc_password=?, filesvc_token=?, mcphub_token=? WHERE name=?",
-                     (cred["vnc_password"], cred["filesvc_token"], cred["mcphub_token"], name))
-        access.revoke_desktop(conn, name)
-        row = get_row(conn, name)
+        rotated = False
+
+        def renew_credentials() -> None:
+            """New VNC password and internal tokens - only once the old container is
+            gone, so the database never holds tokens a running container does not know."""
+            nonlocal rotated
+            if rotated:
+                return
+            cred = new_credentials()
+            conn.execute("UPDATE sandboxes SET vnc_password=?, filesvc_token=?, mcphub_token=? WHERE name=?",
+                         (cred["vnc_password"], cred["filesvc_token"], cred["mcphub_token"], name))
+            access.revoke_desktop(conn, name)
+            rotated = True
 
         def build(img: str) -> str:
-            args = _docker_run_args(row, client, img)
+            args = _docker_run_args(get_row(conn, name), client, img)
             return dockerctl.run_container(args) if start_after else dockerctl.create_container(args)
 
         error: Optional[str] = None
         try:
             dockerctl.remove(name)
+            renew_credentials()
             container_id = build(image)
         except Exception as exc:
             error = f"recreate with {image} failed: {exc}"
             try:
                 dockerctl.remove(name)
+                renew_credentials()
                 container_id = build(old_image)
                 image = old_image
             except Exception as exc2:
