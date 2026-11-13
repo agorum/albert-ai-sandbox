@@ -562,7 +562,9 @@ fieldset .legend-hint { color: var(--text-muted); font-size: .84rem; margin: -2p
 .field-grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .field-grid.cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 /* "Limit pro Sandbox" and "Gesamtkontingent" next to each other when there is room */
-.limit-groups { display: grid; gap: 0 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr)); }
+.limit-groups { display: grid; gap: 0 14px; grid-template-columns: minmax(0, 3fr) minmax(0, 5fr); }
+@media (max-width: 1100px) { .limit-groups { grid-template-columns: minmax(0, 1fr); } }
+dialog .limit-groups { grid-template-columns: minmax(0, 1fr); }
 /* label + switch in one row */
 .form-row { display: grid; gap: 12px 24px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; }
 .switch-field { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; padding-top: 22px; }

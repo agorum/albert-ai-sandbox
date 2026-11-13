@@ -218,8 +218,9 @@ def check_quota(conn: sqlite3.Connection, client: sqlite3.Row, running: Iterable
         if limit == 0:
             message = "This client is not allowed to run sandboxes (limit of running sandboxes is 0)."
         else:
-            message = (f"This client may run at most {limit} sandbox(es) at the same time and "
-                       f"{current['running']} already running: {', '.join(names)}. "
+            used = current["running"]
+            message = (f"This client may run at most {limit} sandbox{'' if limit == 1 else 'es'} at the same "
+                       f"time and {used} {'is' if used == 1 else 'are'} already running: {', '.join(names)}. "
                        "Stop one of them first (POST /containers/<name>/stop), then try again.")
         raise QuotaExceeded(message, code="running_limit_exceeded",
                             details={"resource": "running", "limit": limit, "used": current["running"],
