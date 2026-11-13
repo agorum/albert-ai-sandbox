@@ -537,16 +537,25 @@ def test_refused_first_site_is_taken_out_again(env, monkeypatch):
     assert not s.nginx_site_file.exists() and not s.nginx_site_link.is_symlink()
 
 
-def test_reload_waits_for_new_nginx_workers(env, monkeypatch):
-    """systemctl reload returns before nginx uses the new routes; the manager waits for new workers."""
+def test_reload_waits_until_nginx_serves_the_new_generation(env, monkeypatch):
+    """systemctl reload returns before nginx uses the new routes; the manager probes until it does."""
     config.configure(nginx_reload=True)
     calls = []
-    states = iter([{10, 11}, {10, 11}, {10, 11}, {20, 21}])
-    monkeypatch.setattr(nginxctl, "_workers", lambda: next(states))
     monkeypatch.setattr(nginxctl.subprocess, "run",
                         lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
     monkeypatch.setattr(nginxctl.time, "sleep", lambda s: None)
+    served = iter(["old", "old"])
+
+    def probe():
+        value = next(served, None)
+        if value is None:
+            gen = nginxctl.generation_file().read_text(encoding="utf-8").split('return 200 "', 1)[1].split('"')[0]
+            probe.answers.append(gen)
+            return gen
+        return value
+    probe.answers = []
+    monkeypatch.setattr(nginxctl, "_served_generation", probe)
     nginxctl.reload()
     assert calls == [["nginx", "-t"], ["systemctl", "reload", "nginx"]]
-    with pytest.raises(StopIteration):
-        next(states)  # polled until the new workers showed up
+    assert len(probe.answers) == 3  # three fresh connections in a row with the new generation
+    assert "include " in nginxctl.render_site(None, []) and "generation*.conf;" in nginxctl.render_site(None, [])

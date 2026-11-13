@@ -25,8 +25,10 @@ import os
 import re
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional
 
 from .config import settings
 
@@ -201,35 +203,53 @@ def stray_files() -> List[Path]:
     return [p for p in directory.iterdir() if p.is_file() and p.suffix != ".conf"]
 
 
-NGINX_PID_FILE = Path("/run/nginx.pid")
+GENERATION_PATH = "/.albert-generation"
+PROBE_URL = "http://127.0.0.1"
 
 
-def _workers() -> Set[int]:
-    """Process ids of the current nginx worker processes (children of the master)."""
+def generation_file() -> Path:
+    """Answers GENERATION_PATH on port 80 with the number of the last reload
+    (included by the site with a glob, so a missing file is fine)."""
+    return settings().nginx_dir / "generation.conf"
+
+
+def _write_generation() -> str:
+    gen = str(time.time_ns())
+    _write_file(generation_file(),
+                "# Managed by albert-ai-sandbox-manager: generation of the last reload. Do not edit.\n"
+                f"location = {GENERATION_PATH} {{\n    access_log off;\n    default_type text/plain;\n"
+                f"    return 200 \"{gen}\";\n}}\n", 0o644)
+    return gen
+
+
+def _served_generation() -> Optional[str]:
+    """Generation the nginx worker answering a fresh connection serves; None if not available."""
     try:
-        master = int(NGINX_PID_FILE.read_text().strip())
+        with urllib.request.urlopen(urllib.request.Request(PROBE_URL + GENERATION_PATH,
+                                                           headers={"Connection": "close"}), timeout=2) as resp:
+            return resp.read().decode("ascii", "replace").strip()
+    except urllib.error.HTTPError:
+        return None  # site without the generation include (older site): cannot tell
     except (OSError, ValueError):
-        return set()
-    try:
-        out = subprocess.run(["pgrep", "-P", str(master)], capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
-        return set()
-    return {int(x) for x in out.split() if x.isdigit()}
+        return ""
 
 
-def _wait_for_new_workers(before: Set[int], timeout: float = 5.0) -> bool:
-    """``systemctl reload`` returns before nginx serves the new configuration:
-    wait until the master has started new workers (they take new connections),
-    so a sandbox route is usable as soon as the API call that created it returns."""
-    if not before:
-        time.sleep(0.5)  # cannot tell: give nginx a moment
-        return False
+def _wait_for_generation(gen: str, timeout: float = 5.0) -> bool:
+    """``systemctl reload`` returns before nginx serves the new configuration, and
+    old workers keep taking connections for a moment. Wait until fresh connections
+    answer with the new generation a few times in a row, so a sandbox route works
+    as soon as the API call that created it returns."""
     deadline = time.monotonic() + timeout
+    hits = 0
     while time.monotonic() < deadline:
-        if _workers() - before:
-            time.sleep(0.05)  # old workers close their listening sockets right after
+        served = _served_generation()
+        if served is None:
+            time.sleep(0.3)
+            return False
+        hits = hits + 1 if served == gen else 0
+        if hits >= 3:
             return True
-        time.sleep(0.05)
+        time.sleep(0.03)
     return False
 
 
@@ -238,12 +258,12 @@ def reload() -> None:
     No-op if reloads are disabled (tests)."""
     if not settings().nginx_reload:
         return
+    gen = _write_generation()
     test()
-    before = _workers()
     proc = subprocess.run(["systemctl", "reload", "nginx"], capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
         raise NginxError(f"nginx reload failed: {proc.stderr.strip()}")
-    _wait_for_new_workers(before)
+    _wait_for_generation(gen)
 
 
 def test() -> None:
@@ -347,6 +367,8 @@ def render_site(tls: Optional[Dict[str, Any]] = None, admin_allow: Optional[List
         "    server_tokens off;",
         "    client_max_body_size 0;",
         acme_location,
+        "    # Generation of the last reload (the manager waits until nginx serves it).",
+        f"    include {albert}/generation*.conf;",
     ]
     if tls:
         https_required = ("'{\"error\":\"https_required\",\"message\":\"This host only accepts HTTPS: "
