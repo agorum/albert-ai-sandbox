@@ -222,11 +222,19 @@ def _write_generation() -> str:
     return gen
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return None  # a redirect (HTTPS site before the first reload) means: cannot tell
+
+
+_probe_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def _served_generation() -> Optional[str]:
     """Generation the nginx worker answering a fresh connection serves; None if not available."""
     try:
-        with urllib.request.urlopen(urllib.request.Request(PROBE_URL + GENERATION_PATH,
-                                                           headers={"Connection": "close"}), timeout=2) as resp:
+        with _probe_opener.open(urllib.request.Request(PROBE_URL + GENERATION_PATH,
+                                                       headers={"Connection": "close"}), timeout=2) as resp:
             return resp.read().decode("ascii", "replace").strip()
     except urllib.error.HTTPError:
         return None  # site without the generation include (older site): cannot tell
