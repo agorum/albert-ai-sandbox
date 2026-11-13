@@ -13,11 +13,14 @@ def app(env, monkeypatch):
 
 @pytest.fixture
 def http(app):
-    return app.test_client()
+    client = app.test_client()
+    # The admin UI only answers on its own nginx server (port), which sets this header.
+    client.environ_base["HTTP_X_ALBERT_ADMIN_GATE"] = "1"
+    return client
 
 
-def auth(key):
-    return {"Authorization": f"Bearer {key}"}
+def auth(key, user="albert-user-1"):
+    return {"Authorization": f"Bearer {key}", "X-Albert-User": user}
 
 
 def test_client_api_is_compatible(env, make_client, http):
@@ -29,8 +32,11 @@ def test_client_api_is_compatible(env, make_client, http):
     created = http.post("/containers", json={"name": "Agent Lab"}, headers=auth(key))
     assert created.status_code == 201
     c = created.get_json()["container"]
-    for field in ("name", "sandboxName", "status", "ports", "urls", "vncPassword", "fileServiceToken", "persistent"):
+    for field in ("name", "sandboxName", "status", "ports", "urls", "persistent", "user"):
         assert field in c
+    # Credentials stay on the host (nginx uses them); clients never see them.
+    assert "vncPassword" not in c and "fileServiceToken" not in c
+    assert c["user"] == "albert-user-1"
     assert c["name"].startswith("sbx-agent-lab-")
     assert c["urls"]["desktop"] == f"https://sandbox.test/{c['name']}/"
     assert c["urls"]["mcphub"].endswith("/mcphub/mcp")
@@ -152,6 +158,8 @@ def test_admin_user_management(env, http):
 
 def test_password_change_logs_out_other_sessions(env, app):
     first, second = app.test_client(), app.test_client()
+    for c in (first, second):
+        c.environ_base["HTTP_X_ALBERT_ADMIN_GATE"] = "1"
     csrf1 = _login(first)
     _login(second)
     me = next(a for a in first.get("/admin/api/admins").get_json()["admins"] if a["self"])

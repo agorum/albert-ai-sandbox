@@ -23,7 +23,7 @@ def test_create_uses_global_defaults_1cpu_2gb(env, make_client):
     assert len(published) == 3 and all(p.startswith("127.0.0.1:") for p in published)
     assert nginxctl.conf_path(result["name"]).exists()
     assert result["status"] == "running"
-    assert result["vncPassword"] and result["fileServiceToken"]
+    assert "vncPassword" not in result and "fileServiceToken" not in result
     with db.session() as conn:
         assert conn.execute("SELECT state FROM sandboxes").fetchone()["state"] == "ready"
 

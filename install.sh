@@ -38,6 +38,9 @@ STORAGE_DIR="/var/lib/albert-sandbox"
 NGINX_ALBERT_DIR="/etc/nginx/albert"
 NGINX_SITES_AVAILABLE="/etc/nginx/sites-available"
 DEFAULT_SITE="/etc/nginx/sites-enabled/default"
+ALBERT_SITE="${NGINX_SITES_AVAILABLE}/albert-sandbox"
+ALBERT_SITE_LINK="/etc/nginx/sites-enabled/albert-sandbox"
+ACME_DIR="/var/www/albert-acme"
 CONFD="/etc/nginx/conf.d"
 ENV_FILE="${INSTALL_DIR}/config/albert.env"
 CLI="${INSTALL_DIR}/scripts/albert-ai-sandbox-manager.sh"
@@ -68,7 +71,7 @@ if [ "$SYSTEM_UPGRADE" -eq 1 ]; then
 fi
 apt-get install -y -qq \
 	ca-certificates curl gnupg lsb-release \
-	nginx jq git sqlite3 \
+	nginx jq git sqlite3 openssl certbot \
 	python3 python3-venv python3-pip \
 	iproute2 e2fsprogs util-linux tar >/dev/null
 
@@ -142,6 +145,26 @@ cp "${SCRIPT_DIR}/requirements.txt" "${INSTALL_DIR}/"
 find "${INSTALL_DIR}/scripts" -name '__pycache__' -type d -prune -exec rm -rf {} +
 chmod +x "${INSTALL_DIR}"/scripts/*.sh "${INSTALL_DIR}"/scripts/*.py "${INSTALL_DIR}/docker/startup.sh"
 
+# noVNC client files: served by nginx from the host (never from a container,
+# so a sandbox cannot put its own scripts on a page of this host). Taken from
+# the sandbox image, so client and image always match.
+say "Copying the noVNC client from the sandbox image..."
+NOVNC_NEW="$(mktemp -d "${INSTALL_DIR}/.novnc.XXXXXX")"
+if docker run --rm --network none --entrypoint tar "$IMAGE" -C /usr/share/novnc -chf - . 2>/dev/null \
+		| tar -C "$NOVNC_NEW" -xf - && [ -f "${NOVNC_NEW}/vnc.html" ]; then
+	chmod -R u=rwX,go=rX "$NOVNC_NEW"
+	chmod 755 "$NOVNC_NEW"
+	rm -rf "${INSTALL_DIR}/novnc.old"
+	[ -d "${INSTALL_DIR}/novnc" ] && mv "${INSTALL_DIR}/novnc" "${INSTALL_DIR}/novnc.old"
+	mv "$NOVNC_NEW" "${INSTALL_DIR}/novnc"
+	rm -rf "${INSTALL_DIR}/novnc.old"
+else
+	rm -rf "$NOVNC_NEW"
+	[ -f "${INSTALL_DIR}/novnc/vnc.html" ] || die "Could not copy the noVNC client from ${IMAGE} (image missing?)."
+	warn "Could not refresh the noVNC client from ${IMAGE}; keeping the previous copy."
+fi
+chmod 755 "${INSTALL_DIR}"
+
 # ---------------------------------------------------------------------------
 # Python environment
 # ---------------------------------------------------------------------------
@@ -161,8 +184,16 @@ if [ ! -f "$ENV_FILE" ]; then
 # Read by the manager service, the watcher and the CLI. Restart the manager
 # after changes: systemctl restart albert-container-manager
 #
-# Public base URL used in API responses (set by scripts/setup-tls.sh):
-#ALBERT_PUBLIC_URL=https://sandbox.example.com
+# Public base URL used in API responses while HTTPS is off (with HTTPS, set
+# up in the admin UI under Einstellungen, https://<host name> is used):
+#ALBERT_PUBLIC_URL=http://sandbox.example.com
+#
+# Admin UI on its own port (own origin, optional address list in the UI):
+#ALBERT_ADMIN_PORT=8443
+#
+# Desktop links: validity of a one-time link and of the desktop session it opens
+#ALBERT_DESKTOP_LINK_SECONDS=120
+#ALBERT_DESKTOP_SESSION_HOURS=8
 #
 # Global per-sandbox defaults (used when a client has no own limit):
 #ALBERT_DEFAULT_CPUS=1
@@ -239,45 +270,34 @@ cp -a "$DEFAULT_SITE" "$BACKUP_DIR/nginx/default" 2>/dev/null || true
 cp -a "${NGINX_SITES_AVAILABLE}"/albert-*.conf "$BACKUP_DIR/nginx/" 2>/dev/null || true
 cp -a "${CONFD}"/albert-*.conf "$BACKUP_DIR/nginx/" 2>/dev/null || true
 
-mkdir -p "${NGINX_ALBERT_DIR}/sandboxes"
+cp -a "$ALBERT_SITE" "$BACKUP_DIR/nginx/albert-sandbox.site" 2>/dev/null || true
+cp -a "${NGINX_ALBERT_DIR}" "$BACKUP_DIR/nginx/albert-dir" 2>/dev/null || true
+
+mkdir -p "${NGINX_ALBERT_DIR}/sandboxes" "$ACME_DIR"
+chmod 755 "$ACME_DIR"
 install -m 0644 "${INSTALL_DIR}/nginx/albert-ratelimit.conf" "${CONFD}/albert-ratelimit.conf"
 if [ -f "${CONFD}/albert-security.conf" ]; then
 	# Installed by setup-tls.sh; refresh it (rate-limit zones moved to albert-ratelimit.conf).
 	install -m 0644 "${INSTALL_DIR}/nginx/albert-security.conf" "${CONFD}/albert-security.conf"
 fi
-install -m 0644 "${INSTALL_DIR}/nginx/manager.conf" "${NGINX_ALBERT_DIR}/manager.conf"
-# Must be in place before the routes below refer to it.
-install -m 0644 "${INSTALL_DIR}/nginx/sandbox-offline.conf" "${NGINX_ALBERT_DIR}/sandbox-offline.conf"
-cat >"${NGINX_ALBERT_DIR}/sandboxes.conf" <<EOF
-# Managed by albert-ai-sandbox install.sh - one file per sandbox, written by the manager.
-include ${NGINX_ALBERT_DIR}/sandboxes/*.conf;
-EOF
-
-# Write routes for all sandboxes (incl. migrated ones) before switching over.
-ALBERT_NGINX_RELOAD=0 "$CLI" reconcile || warn "reconcile reported errors (see above)"
-
-INCLUDE_LINE="include ${NGINX_ALBERT_DIR}/*.conf;"
-if [ -f "$DEFAULT_SITE" ]; then
-	# Drop old include lines (incl. the former sites-available/albert-*.conf glob)
-	# and add exactly one include + upload limit per relevant server block.
-	sed -i '/# Albert Sandbox Configs/d; /# ALBERT Sandbox Configs/d' "$DEFAULT_SITE"
-	sed -i '/include .*albert-\*\.conf;/d; /include .*\/etc\/nginx\/albert\/\*\.conf;/d' "$DEFAULT_SITE"
-	sed -i '/^[[:space:]]*client_max_body_size[[:space:]]\+0;/d' "$DEFAULT_SITE"
-	awk -v inc_line="$INCLUDE_LINE" '
-		{
-			print $0
-			if ($0 ~ /server_name[[:space:]]+_;/ || $0 ~ /server_name[[:space:]].*managed by Certbot/) {
-				print "\t# ALBERT Sandbox Configs"
-				print "\t" inc_line
-				print "\tclient_max_body_size 0;"
-			}
-		}
-	' "$DEFAULT_SITE" > "${DEFAULT_SITE}.tmp" && mv "${DEFAULT_SITE}.tmp" "$DEFAULT_SITE"
-else
-	warn "${DEFAULT_SITE} not found - add '${INCLUDE_LINE}' to your server block manually."
-fi
-# Files of the former layout (per-sandbox routes, global /mcphub route, manager route).
+# Pages shown instead of nginx errors; must be in place before the routes refer to them.
+install -m 0644 "${INSTALL_DIR}/nginx/sandbox-pages.conf" "${NGINX_ALBERT_DIR}/sandbox-pages.conf"
+# Files of former layouts (the manager now writes the whole site, see below).
+rm -f "${NGINX_ALBERT_DIR}/manager.conf" "${NGINX_ALBERT_DIR}/sandbox-offline.conf" "${NGINX_ALBERT_DIR}/sandboxes.conf"
 rm -f "${NGINX_SITES_AVAILABLE}"/albert-*.conf
+
+# A certificate set up by the former setup-tls.sh (certbot --nginx) is taken over.
+"$CLI" tls import >/dev/null 2>&1 || true
+
+# Routes for all sandboxes (incl. migrated ones), then the site: main server
+# (HTTP, HTTPS once a certificate is active) and the admin UI on its own port.
+ALBERT_NGINX_RELOAD=0 "$CLI" reconcile || warn "reconcile reported errors (see above)"
+"$CLI" site apply --no-reload >/dev/null || die "Could not write the nginx site ${ALBERT_SITE}"
+# The manager's site replaces the Debian default site (it serves every host name on port 80/443).
+if [ -e "$DEFAULT_SITE" ] || [ -L "$DEFAULT_SITE" ]; then
+	rm -f "$DEFAULT_SITE"
+	say "Disabled the nginx default site (backup: $BACKUP_DIR/nginx/default)"
+fi
 
 systemctl enable nginx >/dev/null 2>&1 || true
 if nginx -t 2>/dev/null; then
@@ -286,7 +306,18 @@ if nginx -t 2>/dev/null; then
 else
 	warn "nginx configuration test failed - restoring previous configuration"
 	nginx -t || true
-	cp -a "$BACKUP_DIR/nginx/default" "$DEFAULT_SITE" 2>/dev/null || true
+	rm -f "$ALBERT_SITE_LINK"
+	if [ -f "$BACKUP_DIR/nginx/albert-sandbox.site" ]; then
+		cp -a "$BACKUP_DIR/nginx/albert-sandbox.site" "$ALBERT_SITE"
+		ln -sf "$ALBERT_SITE" "$ALBERT_SITE_LINK"
+	fi
+	if [ -e "$BACKUP_DIR/nginx/default" ] || [ -L "$BACKUP_DIR/nginx/default" ]; then
+		cp -a "$BACKUP_DIR/nginx/default" "$DEFAULT_SITE"
+	fi
+	if [ -d "$BACKUP_DIR/nginx/albert-dir" ]; then
+		rm -rf "${NGINX_ALBERT_DIR}"
+		cp -a "$BACKUP_DIR/nginx/albert-dir" "${NGINX_ALBERT_DIR}"
+	fi
 	for f in "$BACKUP_DIR"/nginx/albert-*.conf; do
 		[ -e "$f" ] || continue
 		case "$(basename "$f")" in
@@ -297,6 +328,10 @@ else
 	[ -f "$BACKUP_DIR/nginx/albert-ratelimit.conf" ] || rm -f "${CONFD}/albert-ratelimit.conf"
 	nginx -t && systemctl reload nginx || true
 	die "nginx update failed, previous configuration restored (backup: $BACKUP_DIR/nginx)"
+fi
+ADMIN_PORT="$("$CLI" selfcheck --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(json.load(sys.stdin)["adminPort"])')"
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+	ufw allow "${ADMIN_PORT}/tcp" comment 'albert admin ui' >/dev/null || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -430,7 +465,7 @@ fi
 say "Verifying..."
 ok=1
 for i in $(seq 1 20); do
-	code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5001/admin/api/session || true)"
+	code="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Albert-Admin-Gate: 1' http://127.0.0.1:5001/admin/api/session || true)"
 	[ "$code" = "401" ] || [ "$code" = "200" ] && break
 	sleep 1
 done
@@ -446,17 +481,23 @@ systemctl is-active --quiet nginx && say "✓ nginx running" || { warn "✗ ngin
 
 OUTDATED="$("$CLI" list --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(sum(1 for s in json.load(sys.stdin) if s.get("outdated")))' 2>/dev/null || echo 0)"
 if [ "${OUTDATED:-0}" != "0" ]; then
-	warn "${OUTDATED} sandbox(es) run with an older image or without the current hardening."
-	warn "Rebuild them (data, ports and credentials are kept): $CLI recreate --outdated"
+	warn "${OUTDATED} sandbox(es) run with an older image, without the current hardening or without"
+	warn "the internal tokens of MCP Hub and file service. Rebuild them (data and ports are kept,"
+	warn "credentials are renewed): $CLI recreate --outdated"
 	warn "or per sandbox in the admin UI (\"Neu aufbauen\")."
 fi
+LEGACY="$("$CLI" client list --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(sum(1 for c in json.load(sys.stdin) if c.get("legacyAccess")))' 2>/dev/null || echo 0)"
+if [ "${LEGACY:-0}" != "0" ]; then
+	warn "${LEGACY} client(s) still allow the former access without API key / user binding (Alte Anbindung)."
+	warn "Switch it off per client in the admin UI once their ALBERT | AI has the security update."
+fi
 
-PUBLIC_URL="$("$CLI" selfcheck --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(json.load(sys.stdin)["publicUrl"])')"
+ADMIN_URL="$("$CLI" tls status --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(json.load(sys.stdin)["adminUrl"])')"
 echo -e "${GREEN}========================================${NC}"
 if [ "$ok" -eq 1 ]; then
-	echo -e "${GREEN}Done. Admin UI: ${PUBLIC_URL}/manager/admin/${NC}"
+	echo -e "${GREEN}Done. Admin UI: ${ADMIN_URL}${NC}"
 else
-	echo -e "${YELLOW}Done with warnings. Admin UI: ${PUBLIC_URL}/manager/admin/${NC}"
+	echo -e "${YELLOW}Done with warnings. Admin UI: ${ADMIN_URL}${NC}"
 fi
 echo -e "${GREEN}Backups of replaced configuration: ${BACKUP_DIR}${NC}"
 echo -e "${GREEN}========================================${NC}"

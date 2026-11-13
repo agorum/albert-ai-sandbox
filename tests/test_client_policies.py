@@ -13,11 +13,14 @@ def http(env, monkeypatch):
     monkeypatch.setattr(web, "throttle", web._LoginThrottle())
     app = web.create_app()
     app.config["TESTING"] = True
-    return app.test_client()
+    client = app.test_client()
+    # The admin UI only answers on its own nginx server (port), which sets this header.
+    client.environ_base["HTTP_X_ALBERT_ADMIN_GATE"] = "1"
+    return client
 
 
-def auth(key):
-    return {"Authorization": f"Bearer {key}"}
+def auth(key, user="albert-user-1"):
+    return {"Authorization": f"Bearer {key}", "X-Albert-User": user}
 
 
 def _count_sandboxes():
@@ -187,8 +190,13 @@ def test_upgrade_keeps_persistent_sandboxes_for_existing_clients(env):
 # --------------------------------------------------------------------------
 
 def test_desktop_route_shows_offline_page_instead_of_502(env):
-    conf = nginxctl.render("sbx-a", 20000, 20001, 20002, "pw")
-    desktop = conf.split("location /sbx-a/ {", 1)[1].split("}", 1)[0]
-    assert "error_page 502 504 = @albert_sandbox_offline;" in desktop
-    offline = (Path(__file__).resolve().parents[1] / "nginx" / "sandbox-offline.conf").read_text(encoding="utf-8")
-    assert "location @albert_sandbox_offline" in offline
+    conf = nginxctl.render({"name": "sbx-a", "novnc_port": 20000, "mcphub_port": 20001, "filesvc_port": 20002,
+                            "vnc_password": "pw", "filesvc_token": "f" * 32, "mcphub_token": "m" * 43})
+    page = conf.split("location = /sbx-a/vnc.html {", 1)[1].split("}", 1)[0]
+    assert "error_page 403 = @albert_sandbox_offline;" in page  # stopped sandbox (manager answers 403)
+    socket = conf.split("location /sbx-a/websockify {", 1)[1].split("}", 1)[0]
+    assert "error_page 502 504 = @albert_sandbox_offline;" in socket
+    pages = (Path(__file__).resolve().parents[1] / "nginx" / "sandbox-pages.conf").read_text(encoding="utf-8")
+    for name in ("@albert_sandbox_offline", "@albert_desktop_expired", "@albert_auth_required",
+                 "@albert_auth_forbidden"):
+        assert f"location {name}" in pages

@@ -24,6 +24,12 @@ switching a sandbox to persistent is refused with ``persistent_not_allowed``.
 ``profile_id`` selects the sandbox profile (extra software, see profiles.py;
 NULL = standard image). Without ``allow_internet`` the client's sandboxes run
 in the offline network (no internet, no DNS; see netctl.py).
+
+``legacy_access`` keeps the access of ALBERT versions from before the
+security update working: MCP with the former fixed key, files without a key,
+the desktop link without a one-time link and requests without user binding
+(X-Albert-User). Clients that existed before the update keep it until an
+administrator switches it off; new clients start without it (see access.py).
 """
 from __future__ import annotations
 
@@ -38,7 +44,7 @@ from .errors import BadRequest, NotFound, QuotaExceeded
 
 QUOTA_FIELDS = ("quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes", "quota_running")
 DEFAULT_FIELDS = ("default_cpus", "default_memory_mb", "default_disk_gb")
-FLAG_FIELDS = ("allow_persistent", "allow_internet")
+FLAG_FIELDS = ("allow_persistent", "allow_internet", "legacy_access")
 EDITABLE_FIELDS = ("label", "profile_id") + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS
 
 
@@ -207,6 +213,10 @@ def persistent_allowed(client: sqlite3.Row) -> bool:
 
 def internet_allowed(client: sqlite3.Row) -> bool:
     return bool(client["allow_internet"])
+
+
+def legacy_access(client: sqlite3.Row) -> bool:
+    return bool(client["legacy_access"])
 
 
 def usage(conn: sqlite3.Connection, client_id: int, running: Iterable[str],

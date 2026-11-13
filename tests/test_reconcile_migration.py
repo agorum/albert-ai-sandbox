@@ -88,7 +88,9 @@ def test_migrate_legacy_registry_keeps_running_sandbox(env, make_client):
     env["docker"].volumes.update({"sbx-legacy-1_data", "sbx-legacy-2_data"})
     reconcile.reconcile()
     assert set(nginxctl.list_names()) == {"sbx-legacy-1", "sbx-legacy-2"}
-    assert "password=albert" in nginxctl.conf_path("sbx-legacy-1").read_text()
+    route = nginxctl.conf_path("sbx-legacy-1").read_text()
+    # Migrated containers still expect the former fixed MCP Hub key until they are rebuilt.
+    assert 'proxy_set_header Authorization "Bearer albert";' in route and "password=" not in route
     assert env["docker"].volumes == {"sbx-legacy-1_data", "sbx-legacy-2_data"}
 
     # legacy sandboxes can be started/stopped/removed with the new code

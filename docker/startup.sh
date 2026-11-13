@@ -16,11 +16,33 @@ su - ubuntu -c "mkdir -p ~/.vnc"
 su - ubuntu -c "printf '%s' \"${VNC_PASSWORD_TRUNC}\" | vncpasswd -f > ~/.vnc/passwd"
 su - ubuntu -c "chmod 600 ~/.vnc/passwd"
 
-# File service token: must be provided via env; otherwise file service refuses requests.
+# Internal tokens, set by the manager: the file service and MCP Hub only accept
+# requests that nginx forwards after checking the client's API key.
 if [ -z "${FILE_SERVICE_TOKEN}" ]; then
-	echo "Warning: FILE_SERVICE_TOKEN not set; file service will reject all requests." >&2
+	echo "Warning: FILE_SERVICE_TOKEN not set; the file service runs without authentication." >&2
 fi
 export FILE_SERVICE_TOKEN
+if [ -n "${MCPHUB_BEARER_TOKEN:-}" ]; then
+	# MCP Hub migrates routing.bearerAuthKey into its (hashed) key list on start;
+	# starting from the key alone keeps the active key equal to this token.
+	python3 - <<'PY'
+import json
+import os
+
+path = "/app/mcp_settings.json"
+with open(path, encoding="utf-8") as fh:
+    data = json.load(fh)
+routing = data.setdefault("systemConfig", {}).setdefault("routing", {})
+routing["enableBearerAuth"] = True
+routing["bearerAuthKey"] = os.environ["MCPHUB_BEARER_TOKEN"]
+data.pop("bearerKeys", None)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+	unset MCPHUB_BEARER_TOKEN
+else
+	echo "Warning: MCPHUB_BEARER_TOKEN not set; MCP Hub keeps the key of the image." >&2
+fi
 
 # Start VNC with 1280x720 resolution
 su - ubuntu -c 'tightvncserver :1 -geometry 1280x720 -depth 24 -rfbauth ~/.vnc/passwd' &
@@ -32,8 +54,10 @@ echo "Starting noVNC..."
 websockify --web=/usr/share/novnc/ 6081 localhost:5901 &
 
 echo init upload directory
-mkdir /tmp/albert-files
-chmod 777 /tmp/albert-files
+# Belongs to the desktop user: the AI writes results there without sudo.
+mkdir -p /tmp/albert-files
+chown ubuntu:ubuntu /tmp/albert-files
+chmod 775 /tmp/albert-files
 
 echo "Starting MCP Hub..."
 mkdir /tmp/playwright-mcp-output

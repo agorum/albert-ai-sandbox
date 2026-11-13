@@ -115,6 +115,21 @@ class Settings:
     block_nets: Tuple[str, ...] = ()
     allow_nets: Tuple[str, ...] = ()
     block_host_access: bool = True
+    # Desktop access: one-time links and the desktop session they open.
+    desktop_ticket_seconds: int = 120
+    desktop_session_hours: int = 8
+    # Admin UI on its own nginx server (port); see access.py.
+    admin_port: int = 8443
+    # nginx site written by the manager (main server, HTTPS, admin port).
+    nginx_site_file: Path = Path("/etc/nginx/sites-available/albert-sandbox")
+    nginx_site_link: Path = Path("/etc/nginx/sites-enabled/albert-sandbox")
+    # noVNC client files, copied from the sandbox image and served by nginx.
+    novnc_dir: Path = Path("/opt/albert-ai-sandbox-manager/novnc")
+    # HTTPS: webroot for Let's Encrypt challenges, uploaded certificates.
+    acme_dir: Path = Path("/var/www/albert-acme")
+    tls_dir: Path = Path("/etc/albert-sandbox/tls")
+    letsencrypt_dir: Path = Path("/etc/letsencrypt")
+    certbot: str = "certbot"
     extra: Dict[str, str] = field(default_factory=dict)
 
     @property
@@ -224,6 +239,16 @@ def load_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
         block_nets=_split_nets(get("ALBERT_BLOCK_NETS", DEFAULT_BLOCK_NETS)),
         allow_nets=_split_nets(get("ALBERT_ALLOW_NETS", "")),
         block_host_access=get("ALBERT_BLOCK_HOST_ACCESS", "1") not in ("0", "false", "no"),
+        desktop_ticket_seconds=max(10, get_int("ALBERT_DESKTOP_LINK_SECONDS", 120)),
+        desktop_session_hours=max(1, get_int("ALBERT_DESKTOP_SESSION_HOURS", 8)),
+        admin_port=get_int("ALBERT_ADMIN_PORT", 8443),
+        nginx_site_file=Path(get("ALBERT_NGINX_SITE_FILE", "/etc/nginx/sites-available/albert-sandbox")),
+        nginx_site_link=Path(get("ALBERT_NGINX_SITE_LINK", "/etc/nginx/sites-enabled/albert-sandbox")),
+        novnc_dir=Path(get("ALBERT_NOVNC_DIR", str(install_dir / "novnc"))),
+        acme_dir=Path(get("ALBERT_ACME_DIR", "/var/www/albert-acme")),
+        tls_dir=Path(get("ALBERT_TLS_DIR", "/etc/albert-sandbox/tls")),
+        letsencrypt_dir=Path(get("ALBERT_LETSENCRYPT_DIR", "/etc/letsencrypt")),
+        certbot=get("ALBERT_CERTBOT", "certbot"),
         extra=merged,
     )
 

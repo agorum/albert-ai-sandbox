@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from .config import settings
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -144,6 +144,42 @@ API_KEY_V5_COLUMNS = {
     "allow_internet": "INTEGER NOT NULL DEFAULT 1",
 }
 
+# v6: access to MCP, files and desktop only with the client's API key (checked
+# by nginx through the manager), sandboxes bound to the ALBERT user that
+# created them, one-time desktop links. Clients that existed before the
+# upgrade keep the former open access (legacy_access=1) until an
+# administrator switches it off; new clients start without it.
+API_KEY_V6_COLUMNS = {
+    "legacy_access": ("INTEGER NOT NULL DEFAULT 0", "UPDATE api_keys SET legacy_access=1"),
+}
+
+SANDBOX_V6_COLUMNS = {
+    # Pseudonymous ALBERT user (X-Albert-User) the sandbox belongs to; NULL =
+    # created without user binding (legacy clients, operators).
+    "owner": "TEXT",
+    # Bearer token of the MCP Hub inside the container; NULL = container from
+    # an older version that still expects the former fixed key.
+    "mcphub_token": "TEXT",
+}
+
+V6_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_sandboxes_owner ON sandboxes(api_key_id, owner);
+CREATE TABLE IF NOT EXISTS desktop_tickets (
+  token_hash TEXT PRIMARY KEY,
+  sandbox TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  actor TEXT
+);
+CREATE TABLE IF NOT EXISTS desktop_sessions (
+  token_hash TEXT PRIMARY KEY,
+  sandbox TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_desktop_sessions_sandbox ON desktop_sessions(sandbox);
+"""
+
 
 def connect() -> sqlite3.Connection:
     path = settings().db_path
@@ -204,6 +240,17 @@ def init_db() -> None:
         for column, ctype in API_KEY_V5_COLUMNS.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
+        for column, (ctype, backfill) in API_KEY_V6_COLUMNS.items():
+            if column not in existing:
+                with transaction(conn):
+                    conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
+                    if backfill:
+                        conn.execute(backfill)
+        existing = _columns(conn, "sandboxes")
+        for column, ctype in SANDBOX_V6_COLUMNS.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE sandboxes ADD COLUMN {column} {ctype}")
+        conn.executescript(V6_SCHEMA)
         existing = _columns(conn, "admin_users")
         for column, ctype in ADMIN_V3_COLUMNS.items():
             if column not in existing:

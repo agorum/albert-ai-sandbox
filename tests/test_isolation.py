@@ -1,6 +1,6 @@
 import pytest
 
-from albert_sandbox import config, db, netctl, reconcile, sandboxes
+from albert_sandbox import config, db, netctl, nginxctl, reconcile, sandboxes
 from albert_sandbox.errors import Conflict, SandboxError
 
 NET = "albert-sandbox"
@@ -75,12 +75,17 @@ def test_outdated_detection(env, make_client):
     container["Image"] = "sha256:oldimage"
     container["HostConfig"]["CapAdd"] = ["CAP_SYS_ADMIN"]
     assert set(sandboxes.describe(name)["outdated"]) == {"image", "hardening"}
+    # Containers of older versions lack the internal tokens of MCP Hub and file service.
+    del container["Config"]["Labels"][sandboxes.AUTH_LABEL]
+    assert set(sandboxes.describe(name)["outdated"]) == {"image", "hardening", "auth"}
 
 
-def test_recreate_keeps_ports_credentials_and_data(env, make_client):
+def test_recreate_keeps_ports_and_data_and_renews_credentials(env, make_client):
     client, _ = make_client()
     created = sandboxes.create(client["id"])
     name = created["name"]
+    with db.session() as conn:
+        before = conn.execute("SELECT * FROM sandboxes WHERE name=?", (name,)).fetchone()
     container = env["docker"].containers[name]
     container["Image"] = "sha256:oldimage"
     container["HostConfig"] = {"CapAdd": ["CAP_SYS_ADMIN"], "SecurityOpt": ["seccomp=unconfined"]}
@@ -93,9 +98,16 @@ def test_recreate_keeps_ports_credentials_and_data(env, make_client):
     assert name in env["disks"].disks  # disk image (home + uploads) untouched
     with db.session() as conn:
         row = conn.execute("SELECT * FROM sandboxes WHERE name=?", (name,)).fetchone()
-    assert row["vnc_password"] == created["vncPassword"] and row["state"] == "ready"
+    assert row["state"] == "ready"
+    # Fresh credentials: values that ever leaked (old chats, logs) become worthless.
+    for column in ("vnc_password", "filesvc_token", "mcphub_token"):
+        assert row[column] and row[column] != before[column]
     args = _args(env)
-    assert f"VNC_PASSWORD={created['vncPassword']}" in args
+    assert f"VNC_PASSWORD={row['vnc_password']}" in args
+    assert f"FILE_SERVICE_TOKEN={row['filesvc_token']}" in args
+    assert f"MCPHUB_BEARER_TOKEN={row['mcphub_token']}" in args
+    route = nginxctl.conf_path(name).read_text(encoding="utf-8")
+    assert f'Bearer {row["mcphub_token"]}' in route and before["mcphub_token"] not in route
 
 
 def test_recreate_of_stopped_sandbox_keeps_it_stopped(env, make_client):

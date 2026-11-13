@@ -74,6 +74,13 @@ if [ -f "$DEFAULT_SITE" ]; then
 fi
 rm -rf "$NGINX_ALBERT_DIR"
 rm -f /etc/nginx/sites-available/albert-*.conf /etc/nginx/conf.d/albert-ratelimit.conf
+# Site written by the manager; bring back the Debian default site.
+rm -f /etc/nginx/sites-enabled/albert-sandbox /etc/nginx/sites-available/albert-sandbox
+if [ ! -e "$DEFAULT_SITE" ] && [ -f /etc/nginx/sites-available/default ]; then
+	ln -s /etc/nginx/sites-available/default "$DEFAULT_SITE"
+fi
+rm -rf /var/www/albert-acme /etc/albert-sandbox/tls
+rm -f /etc/letsencrypt/renewal-hooks/deploy/albert-sandbox-nginx.sh
 if systemctl is-active --quiet nginx; then
 	nginx -t >/dev/null 2>&1 && systemctl reload nginx || systemctl restart nginx || true
 fi

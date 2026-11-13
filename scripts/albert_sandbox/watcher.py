@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from typing import Dict, Iterable, Optional, Set
 
-from . import db, dockerctl, reconcile, sandboxes
+from . import access, db, dockerctl, reconcile, sandboxes
 from .config import settings
 from .errors import SandboxError
 
@@ -134,6 +134,12 @@ def update_activity_and_stop_idle(now: float) -> None:
             log(f"[WARN] Could not stop idle sandbox {name}: {exc}")
 
 
+def purge_desktop_links(now: float) -> None:
+    """Drop expired one-time desktop links and desktop sessions."""
+    with db.session() as conn:
+        access.purge_expired(conn, int(now))
+
+
 def remove_expired(now: float) -> None:
     s = settings()
     if s.max_age_seconds <= 0:
@@ -180,7 +186,7 @@ def run_once() -> int:
             log("[WARN] Docker not reachable; skipping run")
             return 0
         now = time.time()
-        for step in (update_activity_and_stop_idle, remove_expired):
+        for step in (update_activity_and_stop_idle, remove_expired, purge_desktop_links):
             try:
                 step(now)
             except Exception as exc:  # keep the other steps running

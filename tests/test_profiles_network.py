@@ -16,7 +16,10 @@ def http(env, monkeypatch):
     monkeypatch.setattr(web, "throttle", web._LoginThrottle())
     app = web.create_app()
     app.config["TESTING"] = True
-    return app.test_client()
+    client = app.test_client()
+    # The admin UI only answers on its own nginx server (port), which sets this header.
+    client.environ_base["HTTP_X_ALBERT_ADMIN_GATE"] = "1"
+    return client
 
 
 def _login(http):
@@ -263,10 +266,11 @@ def test_reconcile_rebuilds_running_sandbox_with_wrong_dns(env, make_client):
 def test_client_api_reports_internet_and_profile(env, make_client, http):
     row = _built(pip_packages="pandas")
     client, key = make_client(profile_id=row["id"], allow_internet=False)
-    quota = http.get("/quota", headers={"Authorization": f"Bearer {key}"}).get_json()
+    quota = http.get("/quota", headers={"Authorization": f"Bearer {key}", "X-Albert-User": "u1"}).get_json()
     assert quota["internetAccess"] is False
     assert quota["profile"]["name"] == "Office" and quota["profile"]["packages"]["pip"] == ["pandas"]
-    created = http.post("/containers", headers={"Authorization": f"Bearer {key}"}, json={}).get_json()["container"]
+    created = http.post("/containers", headers={"Authorization": f"Bearer {key}", "X-Albert-User": "u1"},
+                        json={}).get_json()["container"]
     assert created["internet"] is False and created["profile"]["id"] == row["id"]
 
 
@@ -337,7 +341,7 @@ def test_upgrade_keeps_internet_and_standard_image(env):
     db.init_db()
     db.init_db()  # idempotent
     with db.session() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         old = conn.execute("SELECT allow_internet, profile_id FROM api_keys").fetchone()
         assert old["allow_internet"] == 1 and old["profile_id"] is None
         new, _ = clients.create(conn, "Neu")

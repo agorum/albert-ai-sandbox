@@ -177,8 +177,7 @@ def reconcile(dry_run: bool = False, actor: str = "reconcile") -> Dict[str, Any]
             if row["name"] not in docker_names:
                 continue
             path = nginxctl.conf_path(row["name"])
-            expected = nginxctl.render(row["name"], row["novnc_port"], row["mcphub_port"],
-                                       row["filesvc_port"], row["vnc_password"] or "")
+            expected = nginxctl.render(row)
             current = path.read_text(encoding="utf-8") if path.exists() else None
             if current != expected:
                 act("write-route", row["name"], "route missing" if current is None else "route outdated")

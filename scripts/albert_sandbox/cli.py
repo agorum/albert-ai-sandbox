@@ -15,7 +15,8 @@ import secrets
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import admins, clients, db, dockerctl, netctl, profiles, reconcile, sandboxes, watcher
+from . import access, admins, clients, db, dockerctl, netctl, nginxctl, profiles, reconcile, sandboxes, \
+    tlsctl, watcher
 from .config import settings
 from .errors import NotFound, SandboxError
 
@@ -80,6 +81,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", nargs="?")
     p.add_argument("--outdated", action="store_true", help="rebuild every outdated sandbox")
     p.add_argument("--force", action="store_true", help="also rebuild sandboxes stuck in 'rebuilding'")
+
+    p = add("desktop", "print a one-time link to the desktop of a sandbox")
+    p.add_argument("name")
+
+    p = add("site", "nginx site of the host: main server, HTTPS, admin port")
+    p.add_argument("action", nargs="?", choices=["apply", "show"], default="apply")
+    p.add_argument("--no-reload", action="store_true", help="only write the file")
+
+    p = add("tls", "HTTPS certificate (Let's Encrypt or own certificate)")
+    tsub = p.add_subparsers(dest="tls_command")
+    tsub.add_parser("status", parents=[common], help="show the certificate and HTTPS state")
+    tp = tsub.add_parser("custom", parents=[common], help="use an own certificate (PEM files)")
+    tp.add_argument("--host", required=True, help="host name the certificate is issued for")
+    tp.add_argument("--cert", required=True, help="certificate (PEM; may include intermediates)")
+    tp.add_argument("--chain", help="intermediate certificates (PEM)")
+    tp.add_argument("--key", required=True, help="private key (PEM, without passphrase)")
+    tp = tsub.add_parser("letsencrypt", parents=[common], help="request a Let's Encrypt certificate")
+    tp.add_argument("--host", required=True)
+    tp.add_argument("--email", required=True)
+    tp.add_argument("--accept-terms", action="store_true", help="accept the Let's Encrypt terms of service")
+    tsub.add_parser("disable", parents=[common], help="back to plain HTTP")
+    tsub.add_parser("import", parents=[common], help=argparse.SUPPRESS)
+
+    p = add("admin-access", "addresses allowed to open the admin UI (empty = all)")
+    p.add_argument("action", nargs="?", choices=["show", "set", "clear"], default="show")
+    p.add_argument("addresses", nargs="*", help="IP addresses or networks (CIDR)")
 
     p = add("firewall", "network isolation of the sandboxes (apply is idempotent)")
     p.add_argument("action", nargs="?", choices=["apply", "status", "remove"], default="apply")
@@ -167,6 +194,9 @@ def _client_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--internet", choices=("yes", "no"),
                    help="internet access of the client's sandboxes (default: yes)")
     p.add_argument("--profile", help="sandbox profile (id or name; 'none' = standard image)")
+    p.add_argument("--legacy-access", choices=("yes", "no"),
+                   help="keep ALBERT versions without the security update working: MCP with the fixed key, "
+                        "files without key, plain desktop URL, no X-Albert-User (new clients: no)")
 
 
 def _profile_options(p: argparse.ArgumentParser) -> None:
@@ -261,9 +291,8 @@ def cmd_sandbox(args: argparse.Namespace, out: Out) -> None:
             f"{GREEN}MCP URL: {result['urls']['mcphub']}{NC}",
             f"{GREEN}File Service Upload: {result['urls']['filesUpload']}{NC}",
             f"Limits: {_limits(result)}",
-            f"{YELLOW}VNC Password: {result['vncPassword']}{NC}",
-            f"{YELLOW}File Service Token: {result['fileServiceToken']}{NC}",
-            f"{YELLOW}MCP Hub Bearer token: albert{NC}",
+            f"{YELLOW}MCP and files: Authorization: Bearer <API key of the client>; "
+            f"desktop: albert-ai-sandbox-manager desktop {result['name']}{NC}",
         ]))
     elif command in ("remove", "delete"):
         sandboxes.remove(args.name, client_id, actor=actor)
@@ -330,6 +359,8 @@ def _client_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         fields["allow_persistent"] = args.allow_persistent == "yes"
     if getattr(args, "internet", None):
         fields["allow_internet"] = args.internet == "yes"
+    if getattr(args, "legacy_access", None):
+        fields["legacy_access"] = args.legacy_access == "yes"
     ref = getattr(args, "profile", None)
     if ref is not None:
         if ref.strip().lower() in ("none", "standard", "-", ""):
@@ -349,6 +380,7 @@ def _client_summary(conn: Any, row: Any, running: set) -> Dict[str, Any]:
         "quota": clients.quotas(row), "usage": clients.usage(conn, row["id"], running),
         "allowPersistent": clients.persistent_allowed(row),
         "allowInternet": clients.internet_allowed(row),
+        "legacyAccess": clients.legacy_access(row),
         "profile": profiles.summary(profiles.get(conn, row["profile_id"])) if row["profile_id"] else None,
     }
 
@@ -378,6 +410,7 @@ def cmd_client(args: argparse.Namespace, out: Out) -> None:
                   f"running={u['running']}/{q['running'] if q['running'] is not None else '∞'} "
                   f"persistent={'yes' if c['allowPersistent'] else 'no'} "
                   f"internet={'yes' if c['allowInternet'] else 'no'} "
+                  f"legacy={'yes' if c['legacyAccess'] else 'no'} "
                   f"profile={(c['profile'] or {}).get('name', 'standard')} "
                   f"cpus={u['cpus']:g}/{q['cpus'] if q['cpus'] is not None else '∞'} "
                   f"memMb={u['memoryMb']}/{q['memoryMb'] if q['memoryMb'] is not None else '∞'} "
@@ -665,6 +698,67 @@ def cmd_migrate(args: argparse.Namespace, out: Out) -> None:
                      + "".join(f"Skipped {k}: {v}\n" for k, v in report["skipped"].items()))
 
 
+def _read_file(path: Optional[str]) -> str:
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        raise CliError(f"cannot read {path}: {exc}", "file", 2)
+
+
+def cmd_tls(args: argparse.Namespace, out: Out) -> None:
+    sub = args.tls_command or "status"
+    if sub == "custom":
+        tlsctl.install_custom(_read_file(args.cert), _read_file(args.chain), _read_file(args.key), args.host,
+                              actor="cli")
+    elif sub == "letsencrypt":
+        tlsctl.start_letsencrypt(args.host, args.email, args.accept_terms, actor="cli")
+        if not out.json and not out.quiet:
+            print(f"{YELLOW}Requesting the certificate for {args.host} ...{NC}", flush=True)
+        tlsctl.run_letsencrypt("cli")
+    elif sub == "disable":
+        tlsctl.disable(actor="cli")
+    elif sub == "import":
+        imported = tlsctl.import_existing()
+        out.emit({"imported": bool(imported)}, f"imported: {imported['fqdn']}" if imported else "nothing to import")
+        return
+    info = tlsctl.status()
+    cert = info.get("certificate") or {}
+    job = info.get("job") or {}
+    lines = [f"HTTPS: {'active' if info['active'] else 'off'} ({info.get('mode') or '-'})",
+             f"Host: {info.get('host') or '-'}",
+             f"Certificate: {cert.get('subject', '-')}, issuer {cert.get('issuer', '-')}, "
+             f"valid until {cert.get('notAfter', '-')}",
+             f"Admin UI: {info['adminUrl']}", f"Public URL: {info['publicUrl']}"]
+    if job.get("state") == "failed":
+        lines.append(f"{RED}Last request failed: {job.get('error')}{NC}")
+    lines += [f"{YELLOW}{w}{NC}" for w in info["warnings"]]
+    out.emit(info, "\n".join(lines))
+    if job.get("state") == "failed" and sub == "letsencrypt":
+        raise CliError(job.get("error") or "certificate request failed", "tls_letsencrypt_failed")
+
+
+def cmd_admin_access(args: argparse.Namespace, out: Out) -> None:
+    if args.action in ("set", "clear"):
+        values = [] if args.action == "clear" else args.addresses
+        with db.session() as conn:
+            previous = access.admin_allow(conn)
+            nets = access.parse_networks(values)
+            db.kv_set(conn, access.ADMIN_ALLOW_KEY, nets)  # host operator: no lock-out check
+            try:
+                tlsctl.apply_site()
+            except nginxctl.NginxError as exc:
+                db.kv_set(conn, access.ADMIN_ALLOW_KEY, previous)
+                raise CliError(f"nginx refused the change, nothing was changed: {exc}", "nginx_failed")
+            db.audit(conn, "cli", "settings.admin_access", None, {"allow": nets})
+    with db.session() as conn:
+        nets = access.admin_allow(conn)
+    out.emit({"allow": nets, "adminPort": settings().admin_port},
+             "Admin UI open for: " + (", ".join(nets) + " (+ loopback/SSH tunnel)" if nets else "all addresses"))
+
+
 def cmd_selfcheck(args: argparse.Namespace, out: Out) -> None:
     s = settings()
     with db.session() as conn:
@@ -686,7 +780,8 @@ def cmd_selfcheck(args: argparse.Namespace, out: Out) -> None:
         "image": s.docker_image,
         "imagePresent": bool(dockerctl.image_id(s.docker_image)),
         "offlineNetwork": f"{s.offline_network_name} ({s.offline_network_subnet})",
-        "publicUrl": s.public_url,
+        "publicUrl": access.public_url(),
+        "adminPort": s.admin_port,
         "storageDir": str(s.storage_dir),
         "nginxSandboxDir": str(s.nginx_sandbox_dir),
         "portRange": f"{s.port_range[0]}-{s.port_range[1]}",
@@ -723,6 +818,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd_recreate(args, out)
         elif command == "firewall":
             cmd_firewall(args, out)
+        elif command == "desktop":
+            sandboxes.describe(args.name)
+            with db.session() as conn:
+                link = access.create_desktop_link(conn, args.name, "cli")
+            out.emit(link, f"{link['url']}\n{YELLOW}Valid once, for {link['validSeconds']} seconds.{NC}")
+        elif command == "site":
+            if args.action == "show":
+                with db.session() as conn:
+                    state = tlsctl.load(conn)
+                    allow = access.admin_allow(conn)
+                print(nginxctl.render_site(state if state.get("active") else None, allow), end="")
+            else:
+                changed = tlsctl.apply_site(reload_nginx=not args.no_reload)
+                out.emit({"result": "written" if changed else "unchanged",
+                          "file": str(settings().nginx_site_file)},
+                         f"{GREEN}nginx site {'written' if changed else 'unchanged'}: "
+                         f"{settings().nginx_site_file}{NC}")
+        elif command == "tls":
+            cmd_tls(args, out)
+        elif command == "admin-access":
+            cmd_admin_access(args, out)
         elif command == "migrate":
             cmd_migrate(args, out)
         elif command == "mount-disks":

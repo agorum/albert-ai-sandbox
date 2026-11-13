@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import clients, db, dockerctl, netctl, nginxctl, ports, profiles, storage
+from . import access, clients, db, dockerctl, netctl, nginxctl, ports, profiles, storage
 from .config import settings
 from .errors import BadRequest, Conflict, Forbidden, NotFound, QuotaExceeded, SandboxError, Unavailable
 from .locking import host_lock
@@ -32,6 +32,16 @@ STATE_REBUILDING = "rebuilding"  # recreate in progress; never touched by reconc
 
 CONTAINER_PORTS = {"novnc": 6081, "mcphub": 3000, "filesvc": 4000}
 LEGACY_VNC_PASSWORD = "albert"
+# Containers get the internal tokens of MCP Hub and file service (nginx sends
+# them, see nginxctl/access). Older containers lack the label -> "auth".
+AUTH_LABEL = "albert.auth"
+AUTH_VERSION = "2"
+
+
+def new_credentials() -> Dict[str, str]:
+    """Fresh VNC password and internal tokens (create, and every rebuild)."""
+    return {"vnc_password": secrets.token_urlsafe(6)[:8], "filesvc_token": secrets.token_hex(16),
+            "mcphub_token": secrets.token_urlsafe(32)}
 
 
 # --------------------------------------------------------------------------
@@ -144,7 +154,7 @@ def validate_resources(cpus: Optional[float], memory_mb: Optional[int], disk_gb:
 
 
 def urls(name: str) -> Dict[str, str]:
-    base = settings().public_url
+    base = access.public_url()
     return {
         "desktop": f"{base}/{name}/",
         "mcphub": f"{base}/{name}/mcphub/mcp",
@@ -201,12 +211,12 @@ def owner_context(conn: sqlite3.Connection, client_ids: Optional[List[int]] = No
 
 
 def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
-              context: Optional[Dict[str, Any]] = None, include_secrets: bool = False,
-              with_client_label: bool = False) -> Dict[str, Any]:
+              context: Optional[Dict[str, Any]] = None, with_client_label: bool = False) -> Dict[str, Any]:
     """Public representation; keeps the field names of the previous API.
 
     ``context`` is the owner's entry from ``owner_context`` (expected image and
-    network, profile, persistence permission).
+    network, profile, persistence permission). VNC password and internal
+    tokens are never part of it: nginx uses them, clients do not need them.
     """
     context = context or {}
     name = row["name"]
@@ -249,6 +259,8 @@ def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
         },
         "lastActivityAt": iso(row["last_activity_at"]),
         "clientId": row["api_key_id"],
+        # Pseudonymous ALBERT user the sandbox is bound to (X-Albert-User), None = no binding.
+        "user": row["owner"],
         # Non-empty: the container predates the current image/hardening/network
         # setup; "recreate" rebuilds it with the same data, ports and credentials.
         "outdated": outdated_reasons(info, context.get("image_id"), bool(context.get("offline"))),
@@ -263,9 +275,6 @@ def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
             data["clientLabel"] = context["label"]
     if row["error"]:
         data["lastError"] = row["error"]
-    if include_secrets:
-        data["vncPassword"] = row["vnc_password"]
-        data["fileServiceToken"] = row["filesvc_token"]
     return data
 
 
@@ -276,11 +285,11 @@ def get_row(conn: sqlite3.Connection, name: str, client_id: Optional[int] = None
     return row
 
 
-def present(conn: sqlite3.Connection, name: str, include_secrets: bool = False) -> Dict[str, Any]:
+def present(conn: sqlite3.Connection, name: str) -> Dict[str, Any]:
     """Current public representation of one sandbox."""
     row = get_row(conn, name)
     context = owner_context(conn, [row["api_key_id"]]).get(row["api_key_id"])
-    return serialize(row, dockerctl.inspect_one(name), context=context, include_secrets=include_secrets)
+    return serialize(row, dockerctl.inspect_one(name), context=context)
 
 
 def _offline(client: sqlite3.Row) -> bool:
@@ -334,6 +343,7 @@ def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row, image: Optional[str]
         "--label", f"{dockerctl.LABEL_SANDBOX}={name}",
         "--label", f"{dockerctl.LABEL_CLIENT}={client['id']}",
         "--label", f"{dockerctl.LABEL_APIKEY_HASH}={client['key_hash']}",
+        "--label", f"{AUTH_LABEL}={AUTH_VERSION}",
         "--restart", "unless-stopped",
         *netctl.run_args(_offline(client)),
         *HARDENING_ARGS,
@@ -356,6 +366,12 @@ def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row, image: Optional[str]
         "-e", "FILE_SERVICE_PORT=4000",
         "-e", f"VNC_PASSWORD={row['vnc_password']}",
     ]
+    # Internal tokens: the file service and MCP Hub only answer requests that
+    # nginx forwards after the manager checked the client's API key.
+    if row["filesvc_token"]:
+        args += ["-e", f"FILE_SERVICE_TOKEN={row['filesvc_token']}"]
+    if row["mcphub_token"]:
+        args += ["-e", f"MCPHUB_BEARER_TOKEN={row['mcphub_token']}"]
     if row["storage"] == "volume":
         # Sandbox migrated from the former version: data stays in its docker volume.
         args += ["-v", f"{name}_data:/home/ubuntu"]
@@ -386,6 +402,9 @@ def outdated_reasons(info: Optional[Dict[str, Any]], current_image_id: Optional[
         reasons.append("hardening")
     if not netctl.is_isolated(info, offline) or not netctl.dns_matches(info, offline):
         reasons.append("network")
+    labels = (info.get("Config") or {}).get("Labels") or {}
+    if labels.get(AUTH_LABEL) != AUTH_VERSION:
+        reasons.append("auth")
     return reasons
 
 
@@ -400,7 +419,9 @@ def _ensure_route(row: sqlite3.Row) -> None:
 # --------------------------------------------------------------------------
 
 def create(client_id: int, requested_name: Optional[str] = None, persistent: bool = False,
-           resources: Optional[Dict[str, Any]] = None, actor: str = "api") -> Dict[str, Any]:
+           resources: Optional[Dict[str, Any]] = None, actor: str = "api",
+           owner: Optional[str] = None) -> Dict[str, Any]:
+    """Create a sandbox. ``owner``: ALBERT user it is bound to (X-Albert-User)."""
     s = settings()
     with db.session() as conn:
         client = clients.get(conn, client_id)
@@ -419,18 +440,20 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
             name = generate_name(conn, requested_name)
             novnc, mcphub, filesvc = ports.allocate(conn, 3)
             now = int(time.time())
+            cred = new_credentials()
             with db.transaction(conn):
                 conn.execute(
                     """INSERT INTO sandboxes(name, api_key_id, image, state, created_at, persistent,
-                         novnc_port, mcphub_port, filesvc_port, vnc_password, filesvc_token,
-                         cpus, memory_mb, disk_gb, storage, last_activity_at, last_started_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         novnc_port, mcphub_port, filesvc_port, vnc_password, filesvc_token, mcphub_token,
+                         cpus, memory_mb, disk_gb, storage, last_activity_at, last_started_at, owner)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (name, client_id, image, STATE_CREATING, now, 1 if persistent else 0,
-                     novnc, mcphub, filesvc, secrets.token_urlsafe(6)[:8], secrets.token_hex(16),
-                     res["cpus"], res["memory_mb"], res["disk_gb"], "image", now, now),
+                     novnc, mcphub, filesvc, cred["vnc_password"], cred["filesvc_token"], cred["mcphub_token"],
+                     res["cpus"], res["memory_mb"], res["disk_gb"], "image", now, now, owner),
                 )
                 db.audit(conn, actor, "sandbox.create", name, {"clientId": client_id, **res,
-                                                               "persistent": bool(persistent)})
+                                                               "persistent": bool(persistent),
+                                                               **({"user": owner} if owner else {})})
         row = get_row(conn, name)
         try:
             storage.create(name, res["disk_gb"])
@@ -449,7 +472,7 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
             if isinstance(exc, SandboxError):
                 raise
             raise SandboxError(f"Sandbox create failed: {exc}", code="create_failed")
-        result = present(conn, name, include_secrets=True)
+        result = present(conn, name)
         result["result"] = "created"
         return result
 
@@ -460,10 +483,14 @@ def describe(name: str, client_id: Optional[int] = None) -> Dict[str, Any]:
         return present(conn, name)
 
 
-def list_sandboxes(client_id: Optional[int] = None) -> List[Dict[str, Any]]:
+def list_sandboxes(client_id: Optional[int] = None, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    """All sandboxes, those of a client, or those of one ALBERT user of a client."""
     with db.session() as conn:
         if client_id is None:
             rows = conn.execute("SELECT * FROM sandboxes ORDER BY created_at").fetchall()
+        elif owner is not None:
+            rows = conn.execute("SELECT * FROM sandboxes WHERE api_key_id=? AND owner=? ORDER BY created_at",
+                                (client_id, owner)).fetchall()
         else:
             rows = conn.execute("SELECT * FROM sandboxes WHERE api_key_id=? ORDER BY created_at",
                                 (client_id,)).fetchall()
@@ -533,8 +560,9 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
     """Rebuild the container with the current image, hardening and network.
 
     The image is the owner's current one (standard or profile image), the
-    network follows the owner's internet access. Data, ports, credentials and
-    limits stay the same. Disk-image sandboxes keep everything (home and
+    network follows the owner's internet access. Data, ports and limits stay
+    the same; VNC password and internal tokens are renewed (values that ever
+    showed up in old chats or logs become worthless), open desktops end. Disk-image sandboxes keep everything (home and
     uploads live on the disk image); sandboxes migrated from the former
     version keep their home volume and get their upload directory copied into
     the new container. A running sandbox is running again afterwards, a
@@ -574,6 +602,13 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
         except Exception as exc:
             conn.execute("UPDATE sandboxes SET state=? WHERE name=?", (row["state"], name))
             raise SandboxError(f"Recreate of '{name}' aborted, nothing changed: {exc}", code="recreate_failed")
+
+        # New credentials for the new container (the old one is removed right below).
+        cred = new_credentials()
+        conn.execute("UPDATE sandboxes SET vnc_password=?, filesvc_token=?, mcphub_token=? WHERE name=?",
+                     (cred["vnc_password"], cred["filesvc_token"], cred["mcphub_token"], name))
+        access.revoke_desktop(conn, name)
+        row = get_row(conn, name)
 
         def build(img: str) -> str:
             args = _docker_run_args(row, client, img)
@@ -716,6 +751,7 @@ def _destroy(conn: sqlite3.Connection, row: sqlite3.Row, actor: str, reason: str
     with db.transaction(conn):
         conn.execute("DELETE FROM sandboxes WHERE name=?", (name,))
         conn.execute("DELETE FROM containers WHERE name=?", (name,))
+        access.revoke_desktop(conn, name)
         db.audit(conn, actor, "sandbox.remove", name, {"reason": reason})
 
 
@@ -886,7 +922,9 @@ def host_overview() -> Dict[str, Any]:
         rows = conn.execute("SELECT name, cpus, memory_mb, disk_gb, disk_used_bytes FROM sandboxes").fetchall()
         client_count = conn.execute("SELECT COUNT(*) FROM api_keys").fetchone()[0]
         offline_clients = conn.execute("SELECT COUNT(*) FROM api_keys WHERE allow_internet=0").fetchone()[0]
+        legacy_clients = conn.execute("SELECT COUNT(*) FROM api_keys WHERE legacy_access=1").fetchone()[0]
         profile_count = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
+        tls_state = db.kv_get(conn, "tls", {}) or {}
     try:
         running = dockerctl.running_names()
         docker_ok = True
@@ -926,6 +964,9 @@ def host_overview() -> Dict[str, Any]:
         },
         "clients": client_count,
         "clientsOffline": offline_clients,
+        # Clients whose sandboxes still accept MCP/files without API key (legacy access).
+        "clientsLegacy": legacy_clients,
+        "https": {"active": bool(tls_state.get("active")), "host": tls_state.get("fqdn")},
         "profiles": profile_count,
         "sandboxes": {"total": len(rows), "running": len(active)},
         "allocated": {
@@ -939,5 +980,6 @@ def host_overview() -> Dict[str, Any]:
                    "maxDiskGb": s.max_disk_gb},
         # Non-persistent sandboxes are removed after maxAgeSeconds; all stop when idle.
         "lifecycle": {"maxAgeSeconds": s.max_age_seconds, "inactivitySeconds": s.inactivity_seconds},
-        "publicUrl": s.public_url,
+        "publicUrl": access.public_url(),
+        "adminPort": s.admin_port,
     }

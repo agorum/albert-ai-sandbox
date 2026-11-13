@@ -2,6 +2,10 @@
 # Albert sandbox host hardening: TLS (Let's Encrypt), firewall, security
 # headers, fail2ban, SSH hardening, unattended-upgrades.
 #
+# HTTPS can also be set up (or switched to an own certificate) in the admin
+# UI under "Einstellungen"; this script requests the Let's Encrypt
+# certificate through the manager (albert-ai-sandbox-manager tls letsencrypt).
+#
 # Run ONCE per host as root, before/after install.sh. Idempotent: every step
 # is safe to re-run. Reads FQDN and ADMIN_EMAIL from arguments or environment.
 #
@@ -53,7 +57,7 @@ say "Installing required packages (certbot, fail2ban, ufw, unattended-upgrades).
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
-	certbot python3-certbot-nginx \
+	certbot \
 	fail2ban ufw unattended-upgrades
 
 # --- Step b: ufw firewall --------------------------------------------------
@@ -62,6 +66,8 @@ say "Configuring ufw firewall..."
 ufw allow 22/tcp comment 'ssh' >/dev/null
 ufw allow 80/tcp comment 'http (acme + redirect)' >/dev/null
 ufw allow 443/tcp comment 'https' >/dev/null
+ADMIN_PORT="$(sed -n 's/^ALBERT_ADMIN_PORT=//p' /opt/albert-ai-sandbox-manager/config/albert.env 2>/dev/null | tail -n1)"
+ufw allow "${ADMIN_PORT:-8443}/tcp" comment 'albert admin ui' >/dev/null
 ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
 if ! ufw status | grep -q '^Status: active'; then
@@ -76,16 +82,13 @@ say "Ensuring nginx is running for ACME HTTP-01 challenge..."
 systemctl enable --now nginx
 nginx -t
 
-CERT_LIVE="/etc/letsencrypt/live/${FQDN}/fullchain.pem"
-if [[ -f "$CERT_LIVE" ]]; then
-	say "Certificate already present at $CERT_LIVE — skipping certbot."
+MANAGER_CLI="/usr/local/bin/albert-ai-sandbox-manager"
+if [[ -x "$MANAGER_CLI" ]]; then
+	say "Requesting Let's Encrypt certificate for $FQDN (through the manager)..."
+	"$MANAGER_CLI" tls letsencrypt --host "$FQDN" --email "$ADMIN_EMAIL" --accept-terms
 else
-	say "Requesting Let's Encrypt certificate for $FQDN..."
-	backup /etc/nginx/sites-enabled/default
-	certbot --nginx \
-		-d "$FQDN" \
-		-m "$ADMIN_EMAIL" \
-		--agree-tos --non-interactive --redirect
+	warn "The manager is not installed yet: run install.sh first, then this script again,"
+	warn "or set up HTTPS in the admin UI (Einstellungen)."
 fi
 systemctl enable --now certbot.timer
 say "Renewal timer: $(systemctl is-active certbot.timer)"

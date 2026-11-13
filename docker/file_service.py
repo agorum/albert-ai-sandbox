@@ -8,24 +8,48 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_file
 
 UPLOAD_DIR = "/tmp/albert-files"
+# Owner of the upload directory and of uploaded files (the desktop user, who
+# runs the AI's shell commands).
+DESKTOP_USER = os.environ.get("FILE_SERVICE_FILE_OWNER", "ubuntu")
 DEFAULT_PORT = int(os.environ.get("FILE_SERVICE_PORT", "4000"))
 # Bind 0.0.0.0 inside the container so Docker's port-publishing can reach
 # the service. Host-side isolation is handled one layer up by
-# `docker run -p 127.0.0.1:<host>:4000` in albert-ai-sandbox-manager.sh,
-# which limits the exposed port to the host loopback. The bearer token
-# below is the real authentication layer.
+# `docker run -p 127.0.0.1:<host>:4000` (sandboxes.py), which limits the
+# exposed port to the host loopback. nginx forwards requests only after the
+# manager checked the client's API key and sends the internal bearer token
+# below, which this service checks as well.
 BIND_HOST = os.environ.get("FILE_SERVICE_BIND_HOST", "0.0.0.0")
 FILE_SERVICE_TOKEN = os.environ.get("FILE_SERVICE_TOKEN", "").strip()
 
 app = Flask(__name__)
 
 
+def _desktop_user():
+    """uid/gid of the desktop user (files belong to it, so the AI needs no sudo)."""
+    try:
+        import pwd
+        entry = pwd.getpwnam(DESKTOP_USER)
+        return entry.pw_uid, entry.pw_gid
+    except Exception:
+        return None
+
+
+def _own(path, mode):
+    try:
+        ids = _desktop_user()
+        if ids:
+            os.chown(path, *ids)
+        os.chmod(path, mode)
+    except Exception:
+        pass
+
+
 def ensure_upload_dir():
     try:
         os.makedirs(UPLOAD_DIR, exist_ok=True)
-        os.chmod(UPLOAD_DIR, 0o755)
     except Exception:
         pass
+    _own(UPLOAD_DIR, 0o775)
 
 
 def _extract_bearer():
@@ -86,10 +110,7 @@ def upload_file():
 
     try:
         file.save(dest_path)
-        try:
-            os.chmod(dest_path, 0o644)
-        except Exception:
-            pass
+        _own(dest_path, 0o664)
         return jsonify({"path": dest_path}), 201
     except Exception as e:
         return jsonify({"error": f"Failed to save file: {e}"}), 500

@@ -9,10 +9,18 @@ Client API (unchanged paths and payloads, plus additions):
   GET    /containers/<name>
   POST   /containers/<name>/start|stop|restart
   PATCH  /containers/<name>/persistent  (POST also accepted)
+  POST   /containers/<name>/desktop     (new) one-time link to the desktop
   DELETE /containers/<name>
+Header X-Albert-User binds sandboxes to an ALBERT user (required unless the
+client has legacy access, see access.py).
 
-Admin UI: /admin/ (behind nginx: /manager/admin/), JSON API under /admin/api/.
-Authentication with admin users (session cookie + CSRF header).
+Admin UI: /admin/ (behind nginx: /manager/admin/ on the admin port only),
+JSON API under /admin/api/. Authentication with admin users (session cookie +
+CSRF header).
+
+Internal (nginx only, never reachable from outside):
+  GET    /internal/auth/<kind>/<name>   auth_request for MCP, files, desktop
+  GET    /internal/desktop/<name>/entry desktop entry (one-time link -> cookie)
 """
 from __future__ import annotations
 
@@ -25,10 +33,12 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from flask import Blueprint, Flask, g, jsonify, redirect, request, send_from_directory, session
+from flask import Blueprint, Flask, Response, g, jsonify, redirect, request, send_from_directory, session
+from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, admins, clients, db, dockerctl, profiles, reconcile, sandboxes, storage
+from . import __version__, access, admins, clients, db, dockerctl, nginxctl, profiles, reconcile, sandboxes, \
+    storage, tlsctl
 from .config import settings
 from .errors import BadRequest, SandboxError
 
@@ -36,6 +46,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static" / "admin"
 
 client_api = Blueprint("client_api", __name__)
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
+internal_bp = Blueprint("internal", __name__, url_prefix="/internal")
 
 
 # --------------------------------------------------------------------------
@@ -92,14 +103,25 @@ def _client_auth() -> Tuple[Optional[Any], Optional[Tuple[Any, int]]]:
 
 
 def client_required(fn: Callable) -> Callable:
+    """API key of a client; X-Albert-User (user binding) unless the client has legacy access."""
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         client, err = _client_auth()
         if err:
             return err
         g.client = client
+        g.albert_user = access.clean_user(request.headers.get(access.USER_HEADER))
+        g.client_actor = f"client:{client['id']}" + (f"/{g.albert_user}" if g.albert_user else "")
+        if fn.__name__ != "health":
+            access.require_user(client, g.albert_user)
         return fn(*args, **kwargs)
     return wrapper
+
+
+def _own_sandbox(name: str) -> None:
+    """404 unless the sandbox belongs to this client (and, with X-Albert-User, to this user)."""
+    with db.session() as conn:
+        access.check_sandbox(conn, name, g.client, g.albert_user, g.client_actor)
 
 
 @client_api.get("/health")
@@ -134,14 +156,14 @@ def create_container() -> Any:
             resources[key] = body[key]
     result = sandboxes.create(g.client["id"], requested_name=body.get("name") or None,
                               persistent=_bool(body.get("persistent")), resources=resources,
-                              actor=f"client:{g.client['id']}")
+                              actor=g.client_actor, owner=g.albert_user)
     return jsonify({"container": result}), 201
 
 
 @client_api.get("/containers")
 @client_required
 def list_containers() -> Any:
-    items = sandboxes.list_sandboxes(g.client["id"])
+    items = sandboxes.list_sandboxes(g.client["id"], owner=g.albert_user)
     for item in items:
         item.pop("clientLabel", None)
     return jsonify({"containers": items})
@@ -150,40 +172,113 @@ def list_containers() -> Any:
 @client_api.get("/containers/<name>")
 @client_required
 def get_container(name: str) -> Any:
+    _own_sandbox(name)
     return jsonify({"container": sandboxes.describe(name, g.client["id"])})
 
 
 @client_api.post("/containers/<name>/start")
 @client_required
 def start_container(name: str) -> Any:
-    return jsonify({"container": sandboxes.start(name, g.client["id"], actor=f"client:{g.client['id']}")})
+    _own_sandbox(name)
+    return jsonify({"container": sandboxes.start(name, g.client["id"], actor=g.client_actor)})
 
 
 @client_api.post("/containers/<name>/stop")
 @client_required
 def stop_container(name: str) -> Any:
-    return jsonify({"container": sandboxes.stop(name, g.client["id"], actor=f"client:{g.client['id']}")})
+    _own_sandbox(name)
+    return jsonify({"container": sandboxes.stop(name, g.client["id"], actor=g.client_actor)})
 
 
 @client_api.post("/containers/<name>/restart")
 @client_required
 def restart_container(name: str) -> Any:
-    return jsonify({"container": sandboxes.restart(name, g.client["id"], actor=f"client:{g.client['id']}")})
+    _own_sandbox(name)
+    return jsonify({"container": sandboxes.restart(name, g.client["id"], actor=g.client_actor)})
 
 
 @client_api.route("/containers/<name>/persistent", methods=["PATCH", "POST"])
 @client_required
 def persistent_container(name: str) -> Any:
+    _own_sandbox(name)
     body = _body()
     return jsonify(sandboxes.set_persistent(name, _bool(body.get("persistent"), True), g.client["id"],
-                                            actor=f"client:{g.client['id']}"))
+                                            actor=g.client_actor))
+
+
+@client_api.post("/containers/<name>/desktop")
+@client_required
+def desktop_container(name: str) -> Any:
+    """One-time link to the desktop (valid for a short time, opens a desktop session in the browser)."""
+    with db.session() as conn:
+        access.check_sandbox(conn, name, g.client, g.albert_user, g.client_actor)
+        link = access.create_desktop_link(conn, name, g.client_actor)
+    return jsonify({"desktop": link}), 201
 
 
 @client_api.delete("/containers/<name>")
 @client_required
 def delete_container(name: str) -> Any:
-    sandboxes.remove(name, g.client["id"], actor=f"client:{g.client['id']}")
+    _own_sandbox(name)
+    sandboxes.remove(name, g.client["id"], actor=g.client_actor)
     return jsonify({"deleted": name})
+
+
+# --------------------------------------------------------------------------
+# internal endpoints for nginx (auth_request, desktop entry)
+# --------------------------------------------------------------------------
+
+@internal_bp.before_request
+def internal_only() -> Any:
+    # nginx sets this header only on its internal routes and clears it on /manager/.
+    if request.headers.get("X-Albert-Internal") != "1":
+        return jsonify({"error": "Not found", "message": "Not found"}), 404
+    return None
+
+
+@internal_bp.get("/auth/<kind>/<name>")
+def internal_auth(kind: str, name: str) -> Any:
+    running = dockerctl.running_names() if kind == "desktop-page" else None
+    status, reason = access.authorize(kind, name, authorization=request.headers.get("Authorization"),
+                                      user_header=request.headers.get(access.USER_HEADER),
+                                      desktop_cookie=request.cookies.get(access.DESKTOP_COOKIE),
+                                      running=running)
+    response = Response(status=status)
+    response.headers["X-Albert-Reason"] = reason
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@internal_bp.get("/desktop/<name>/entry")
+def internal_desktop_entry(name: str) -> Any:
+    """/<name>/ of a sandbox: a one-time link becomes a desktop session (cookie), then the noVNC page.
+
+    Without a valid link or session the browser lands on the noVNC page, where
+    nginx shows "link expired" instead.
+    """
+    if not nginxctl.NAME_RE.match(name):
+        return jsonify({"error": "Not found", "message": "Not found"}), 404
+    ticket = request.args.get("ticket", "")
+    with db.session() as conn:
+        row = conn.execute("SELECT * FROM sandboxes WHERE name=?", (name,)).fetchone()
+        if not row:
+            return jsonify({"error": "Not found", "message": "Not found"}), 404
+        client = conn.execute("SELECT * FROM api_keys WHERE id=?", (row["api_key_id"],)).fetchone()
+        session_cookie = access.redeem_ticket(conn, name, ticket) if ticket else None
+        allowed = bool(session_cookie) or access.session_valid(
+            conn, name, request.cookies.get(access.DESKTOP_COOKIE, "")) or bool(client and clients.legacy_access(client))
+        if session_cookie:
+            db.audit(conn, f"ip:{request.remote_addr}", "sandbox.desktop_open", name)
+    response = Response(status=302)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Location"] = access.desktop_location(name, row["vnc_password"]) if allowed \
+        else f"/{name}/vnc.html"
+    if session_cookie:
+        value, max_age = session_cookie
+        response.set_cookie(access.DESKTOP_COOKIE, value, max_age=max_age, path=f"/{name}/",
+                            secure=request.scheme == "https", httponly=True, samesite="Lax")
+    return response
 
 
 # --------------------------------------------------------------------------
@@ -230,6 +325,18 @@ def _current_admin() -> Optional[Any]:
         session.clear()
         return None
     return row
+
+
+@admin_bp.before_request
+def admin_gate() -> Any:
+    """The admin UI only answers on its own nginx server (port), from allowed addresses."""
+    if request.headers.get("X-Albert-Admin-Gate") != "1":
+        return jsonify({"error": "Not found", "message": "Not found"}), 404
+    with db.session() as conn:
+        allowed = access.admin_allow(conn)
+    if not access.ip_allowed(request.remote_addr, allowed):
+        return jsonify({"error": "forbidden", "message": "Address not allowed"}), 403
+    return None
 
 
 def admin_required(fn: Callable) -> Callable:
@@ -339,6 +446,7 @@ def _client_dict(conn: Any, client: Any, running: set) -> Dict[str, Any]:
         "usage": clients.usage(conn, client["id"], running),
         "allowPersistent": clients.persistent_allowed(client),
         "allowInternet": clients.internet_allowed(client),
+        "legacyAccess": clients.legacy_access(client),
         "profileId": client["profile_id"],
         "profile": {"id": profile["id"], "name": profile["name"]} if profile else None,
     }
@@ -353,6 +461,7 @@ _CLIENT_FIELD_MAP = {
     "quotaRunning": "quota_running",
     "allowPersistent": "allow_persistent",
     "allowInternet": "allow_internet",
+    "legacyAccess": "legacy_access",
     "profileId": "profile_id",
     "defaultCpus": "default_cpus",
     "defaultMemoryMb": "default_memory_mb",
@@ -594,6 +703,78 @@ def admin_delete_sandbox(name: str) -> Any:
     return jsonify({"deleted": name})
 
 
+@admin_bp.post("/api/sandboxes/<name>/desktop")
+@admin_required
+def admin_sandbox_desktop(name: str) -> Any:
+    """One-time desktop link for an administrator."""
+    sandboxes.describe(name)  # 404 if unknown
+    with db.session() as conn:
+        link = access.create_desktop_link(conn, name, g.actor)
+    return jsonify({"desktop": link}), 201
+
+
+# --------------------------------------------------------------------------
+# settings: HTTPS certificate, admin addresses
+# --------------------------------------------------------------------------
+
+def _settings_view() -> Dict[str, Any]:
+    data = tlsctl.status()
+    data["yourAddress"] = request.remote_addr
+    return data
+
+
+@admin_bp.get("/api/settings")
+@admin_required
+def admin_settings() -> Any:
+    return jsonify({"settings": _settings_view()})
+
+
+@admin_bp.put("/api/settings/admin-access")
+@admin_required
+def admin_set_access() -> Any:
+    body = _body()
+    values = body.get("allow")
+    if isinstance(values, str):
+        values = values.replace(",", "\n").splitlines()
+    if not isinstance(values, list):
+        raise BadRequest("allow must be a list of addresses or networks")
+    with db.session() as conn:
+        previous = access.admin_allow(conn)
+        nets = access.set_admin_allow(conn, [str(v) for v in values], request.remote_addr)
+        try:
+            tlsctl.apply_site()
+        except nginxctl.NginxError as exc:
+            db.kv_set(conn, access.ADMIN_ALLOW_KEY, previous)
+            raise SandboxError(f"nginx refused the change, nothing was changed: {exc}", code="nginx_failed")
+        db.audit(conn, g.actor, "settings.admin_access", None, {"allow": nets})
+    return jsonify({"settings": _settings_view()})
+
+
+@admin_bp.post("/api/settings/tls/custom")
+@admin_required
+def admin_tls_custom() -> Any:
+    body = _body()
+    tlsctl.install_custom(body.get("certificate"), body.get("chain"), body.get("privateKey"),
+                          body.get("host"), actor=g.actor)
+    return jsonify({"settings": _settings_view()})
+
+
+@admin_bp.post("/api/settings/tls/letsencrypt")
+@admin_required
+def admin_tls_letsencrypt() -> Any:
+    body = _body()
+    tlsctl.start_letsencrypt(body.get("host"), body.get("email"), body.get("acceptTerms"), actor=g.actor)
+    run_in_background(tlsctl.run_letsencrypt, g.actor)
+    return jsonify({"settings": _settings_view()}), 202
+
+
+@admin_bp.delete("/api/settings/tls")
+@admin_required
+def admin_tls_disable() -> Any:
+    tlsctl.disable(actor=g.actor)
+    return jsonify({"settings": _settings_view()})
+
+
 @admin_bp.get("/api/admins")
 @admin_required
 def admin_list_admins() -> Any:
@@ -667,10 +848,22 @@ def admin_audit() -> Any:
 # app factory
 # --------------------------------------------------------------------------
 
+class _SessionInterface(SecureCookieSessionInterface):
+    """Admin cookie: only for the manager's own paths (behind nginx: /manager/), never
+    for the pages of sandboxes; Secure whenever the admin UI is used over HTTPS."""
+
+    def get_cookie_path(self, app: Flask) -> str:
+        return (request.script_root or "").rstrip("/") + "/"
+
+    def get_cookie_secure(self, app: Flask) -> bool:
+        return bool(app.config.get("SESSION_COOKIE_SECURE")) or request.scheme == "https"
+
+
 def create_app() -> Flask:
     s = settings()
     db.init_db()
     app = Flask(__name__, static_folder=None)
+    app.session_interface = _SessionInterface()
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)  # type: ignore[assignment]
     app.config.update(
         SECRET_KEY=_secret_key(),
@@ -684,6 +877,7 @@ def create_app() -> Flask:
     app.json.sort_keys = False  # type: ignore[attr-defined]
     app.register_blueprint(client_api)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(internal_bp)
 
     @app.get("/admin")
     def admin_redirect() -> Any:
