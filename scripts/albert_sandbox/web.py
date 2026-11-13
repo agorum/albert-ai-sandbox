@@ -932,6 +932,10 @@ def serve() -> None:
     except ImportError:  # pragma: no cover - fallback for dev setups
         app.run(host=s.bind_host, port=s.port, threaded=True)
         return
-    # Forwarded headers from nginx are evaluated by ProxyFix (one trusted hop).
+    # Forwarded headers from nginx are evaluated by ProxyFix (one trusted hop: the
+    # service only listens on loopback and nginx sets them on every route).
+    # waitress would otherwise drop X-Forwarded-For/-Proto, and every request
+    # would look like 127.0.0.1 over HTTP (login throttle per address, admin
+    # address list, Secure cookies behind HTTPS).
     waitress_serve(app, host=s.bind_host, port=s.port, threads=int(s.extra.get("MANAGER_THREADS", "16")),
-                   ident="albert-sandbox-manager")
+                   ident="albert-sandbox-manager", clear_untrusted_proxy_headers=False)

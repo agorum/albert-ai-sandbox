@@ -455,3 +455,14 @@ def test_letsencrypt_failure_keeps_http(env, tls_env):
     info = tlsctl.status()
     assert info["active"] is False and info["job"]["state"] == "failed"
     assert "Challenge failed" in info["job"]["error"]
+
+
+def test_waitress_keeps_forwarded_headers(env, monkeypatch):
+    """waitress drops X-Forwarded-* by default: every request would look like 127.0.0.1 over HTTP."""
+    import waitress
+    from albert_sandbox import netctl
+    seen = {}
+    monkeypatch.setattr(netctl, "ensure_ready", lambda *a, **k: None)
+    monkeypatch.setattr(waitress, "serve", lambda app, **kw: seen.update(kw))
+    web.serve()
+    assert seen["clear_untrusted_proxy_headers"] is False and seen["host"] == "127.0.0.1"
