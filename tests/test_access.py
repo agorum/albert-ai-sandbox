@@ -492,3 +492,18 @@ def test_waitress_keeps_forwarded_headers(env, monkeypatch):
     monkeypatch.setattr(waitress, "serve", lambda app, **kw: seen.update(kw))
     web.serve()
     assert seen["clear_untrusted_proxy_headers"] is False and seen["host"] == "127.0.0.1"
+
+
+def test_reload_waits_for_new_nginx_workers(env, monkeypatch):
+    """systemctl reload returns before nginx uses the new routes; the manager waits for new workers."""
+    config.configure(nginx_reload=True)
+    calls = []
+    states = iter([{10, 11}, {10, 11}, {10, 11}, {20, 21}])
+    monkeypatch.setattr(nginxctl, "_workers", lambda: next(states))
+    monkeypatch.setattr(nginxctl.subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(nginxctl.time, "sleep", lambda s: None)
+    nginxctl.reload()
+    assert calls == [["nginx", "-t"], ["systemctl", "reload", "nginx"]]
+    with pytest.raises(StopIteration):
+        next(states)  # polled until the new workers showed up

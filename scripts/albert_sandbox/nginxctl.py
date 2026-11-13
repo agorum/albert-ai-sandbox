@@ -24,8 +24,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 from .config import settings
 
@@ -196,14 +197,49 @@ def stray_files() -> List[Path]:
     return [p for p in directory.iterdir() if p.is_file() and p.suffix != ".conf"]
 
 
+NGINX_PID_FILE = Path("/run/nginx.pid")
+
+
+def _workers() -> Set[int]:
+    """Process ids of the current nginx worker processes (children of the master)."""
+    try:
+        master = int(NGINX_PID_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return set()
+    try:
+        out = subprocess.run(["pgrep", "-P", str(master)], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {int(x) for x in out.split() if x.isdigit()}
+
+
+def _wait_for_new_workers(before: Set[int], timeout: float = 5.0) -> bool:
+    """``systemctl reload`` returns before nginx serves the new configuration:
+    wait until the master has started new workers (they take new connections),
+    so a sandbox route is usable as soon as the API call that created it returns."""
+    if not before:
+        time.sleep(0.5)  # cannot tell: give nginx a moment
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _workers() - before:
+            time.sleep(0.05)  # old workers close their listening sockets right after
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def reload() -> None:
-    """Validate and reload nginx. No-op if reloads are disabled (tests)."""
+    """Validate and reload nginx and wait until it serves the new configuration.
+    No-op if reloads are disabled (tests)."""
     if not settings().nginx_reload:
         return
     test()
+    before = _workers()
     proc = subprocess.run(["systemctl", "reload", "nginx"], capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
         raise NginxError(f"nginx reload failed: {proc.stderr.strip()}")
+    _wait_for_new_workers(before)
 
 
 def test() -> None:
