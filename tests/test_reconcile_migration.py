@@ -112,7 +112,7 @@ def test_port_allocation_skips_reserved_and_listening(env, make_client, monkeypa
 
 
 def test_watcher_stops_idle_and_removes_expired(env, make_client, monkeypatch):
-    client, _ = make_client()
+    client, _ = make_client(allow_persistent=True)
     idle = sandboxes.create(client["id"])["name"]
     busy = sandboxes.create(client["id"])["name"]
     old = sandboxes.create(client["id"])["name"]

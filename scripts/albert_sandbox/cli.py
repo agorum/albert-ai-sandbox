@@ -135,6 +135,9 @@ def _client_options(p: argparse.ArgumentParser) -> None:
     for flag in ("--default-cpus", "--default-memory-mb", "--default-disk-gb",
                  "--quota-cpus", "--quota-memory-mb", "--quota-disk-gb", "--quota-sandboxes"):
         p.add_argument(flag)
+    p.add_argument("--quota-running", help="sandboxes running at the same time")
+    p.add_argument("--allow-persistent", choices=("yes", "no"),
+                   help="may the client create persistent sandboxes (new clients: no)")
 
 
 # --------------------------------------------------------------------------
@@ -282,10 +285,12 @@ def _parse_optional(value: Optional[str]) -> Any:
 def _client_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
     for attr in ("default_cpus", "default_memory_mb", "default_disk_gb",
-                 "quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes"):
+                 "quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes", "quota_running"):
         value = _parse_optional(getattr(args, attr, None))
         if value is not None:
             fields[attr] = value
+    if getattr(args, "allow_persistent", None):
+        fields["allow_persistent"] = args.allow_persistent == "yes"
     return fields
 
 
@@ -296,6 +301,7 @@ def _client_summary(conn: Any, row: Any, running: set) -> Dict[str, Any]:
         "defaults": {"cpus": row["default_cpus"], "memoryMb": row["default_memory_mb"],
                      "diskGb": row["default_disk_gb"]},
         "quota": clients.quotas(row), "usage": clients.usage(conn, row["id"], running),
+        "allowPersistent": clients.persistent_allowed(row),
     }
 
 
@@ -321,7 +327,9 @@ def cmd_client(args: argparse.Namespace, out: Out) -> None:
             q, u = c["quota"], c["usage"]
             print(f"id={c['id']} label={c['label']} created={c['createdAt']} key_hash_prefix={c['keyHashPrefix']} "
                   f"sandboxes={u['sandboxes']}/{q['sandboxes'] if q['sandboxes'] is not None else '∞'} "
-                  f"running={u['running']} cpus={u['cpus']:g}/{q['cpus'] if q['cpus'] is not None else '∞'} "
+                  f"running={u['running']}/{q['running'] if q['running'] is not None else '∞'} "
+                  f"persistent={'yes' if c['allowPersistent'] else 'no'} "
+                  f"cpus={u['cpus']:g}/{q['cpus'] if q['cpus'] is not None else '∞'} "
                   f"memMb={u['memoryMb']}/{q['memoryMb'] if q['memoryMb'] is not None else '∞'} "
                   f"diskGb={u['diskGb']}/{q['diskGb'] if q['diskGb'] is not None else '∞'}")
     elif sub == "show":

@@ -157,7 +157,7 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
   display: flex;
   align-items: center;
   gap: 24px;
-  max-width: 1480px;
+  max-width: 1840px;
   margin: 0 auto;
   padding: 0 24px;
   min-height: 54px;
@@ -201,7 +201,7 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 
 /* ---------- layout ---------- */
 
-.view { max-width: 1480px; margin: 0 auto; padding: 24px 24px 64px; outline: none; }
+.view { max-width: 1840px; margin: 0 auto; padding: 24px 24px 64px; outline: none; }
 .boot { color: var(--text-muted); padding: 48px 0; text-align: center; }
 
 .page-head {
@@ -246,15 +246,17 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 }
 
 .grid { display: grid; gap: 16px; }
+.grid.cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 1100px) {
+  .grid.cols-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
-  .grid.cols-4, .grid.cols-3, .grid.cols-2 { grid-template-columns: 1fr; }
+  .grid.cols-5, .grid.cols-4, .grid.cols-3, .grid.cols-2 { grid-template-columns: 1fr; }
 }
 
 /* ---------- KPI tiles ---------- */
@@ -395,6 +397,10 @@ dl.kv dd { margin: 0; font-variant-numeric: tabular-nums; min-width: 0; overflow
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.ghost:hover:not(:disabled) { background: var(--surface-2); }
 .btn.small { min-height: 26px; padding: 2px 9px; font-size: .88rem; }
+/* square icon button (sandbox actions); the label is in title/aria-label */
+.btn.small.icon-only { width: 30px; min-height: 28px; padding: 0; }
+.btn.icon-only svg { display: block; }
+.btn.icon-only.busy::before { margin: 0; }
 .btn.block { width: 100%; }
 .btn.busy { position: relative; }
 .btn.busy::before {
@@ -499,7 +505,7 @@ table.data td.empty {
 .cell-main { font-weight: 500; }
 .cell-sub { color: var(--text-muted); font-size: .84rem; margin-top: 1px; }
 .cell-sub.mono { white-space: nowrap; font-size: .8rem; }
-.sbx-name { font-family: var(--mono); font-size: .9rem; }
+.sbx-name { font-family: var(--mono); font-size: .9rem; white-space: nowrap; }
 .err-line {
   color: var(--danger);
   font-size: .82rem;
@@ -554,9 +560,17 @@ legend { padding: 0 6px; font-weight: 600; font-size: .92rem; }
 fieldset .legend-hint { color: var(--text-muted); font-size: .84rem; margin: -2px 0 10px; }
 .field-grid { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .field-grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.field-grid.cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+/* "Limit pro Sandbox" and "Gesamtkontingent" next to each other when there is room */
+.limit-groups { display: grid; gap: 0 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr)); }
+/* label + switch in one row */
+.form-row { display: grid; gap: 12px 24px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; }
+.switch-field { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; padding-top: 22px; }
+.switch-field input.switch { flex: none; margin-top: 1px; }
+.switch-field .field-label, .switch-field .field-hint { display: block; }
 .field-grid .field + .field { margin-top: 0; }
 @media (max-width: 640px) {
-  .field-grid, .field-grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field-grid, .field-grid.cols-4, .field-grid.cols-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .input-unit { position: relative; }
 .input-unit input { padding-right: 52px; }
@@ -656,7 +670,7 @@ dialog.dlg {
   color: var(--text);
   box-shadow: var(--shadow-2);
 }
-dialog.dlg.wide { width: min(760px, calc(100vw - 32px)); }
+dialog.dlg.wide { width: min(960px, calc(100vw - 32px)); }
 dialog.dlg::backdrop { background: var(--backdrop); }
 .dlg-form { display: flex; flex-direction: column; max-height: calc(100vh - 50px); }
 .dlg-head {
@@ -799,6 +813,7 @@ details.json pre {
 .grow-input input { font-size: 1rem; }
 .mt-8 { margin-top: 8px; }
 .mt-12 { margin-top: 12px; }
+.metric-note .sep { margin: 0 10px; color: var(--text-faint); }
 .mt-16 { margin-top: 16px; }
 .over-note { color: var(--danger); font-weight: 600; }
 .warn-note { color: var(--warn); font-weight: 600; }

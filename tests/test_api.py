@@ -21,7 +21,8 @@ def auth(key):
 
 
 def test_client_api_is_compatible(env, make_client, http):
-    _, key = make_client()
+    # Clients that existed before the upgrade keep persistent sandboxes (see test_client_policies).
+    _, key = make_client(allow_persistent=True)
     assert http.get("/containers").status_code == 401
     assert http.get("/containers", headers=auth("wrong")).status_code == 401
 
@@ -100,11 +101,13 @@ def test_admin_client_management_flow(env, http):
     csrf = _login(http)
     h = {"X-CSRF-Token": csrf}
     created = http.post("/admin/api/clients", headers=h, json={
-        "label": "Kunde X", "defaultCpus": 2, "defaultMemoryMb": 2048, "quotaCpus": 4, "quotaSandboxes": 3})
+        "label": "Kunde X", "defaultCpus": 2, "defaultMemoryMb": 2048, "quotaCpus": 4, "quotaSandboxes": 3,
+        "quotaRunning": 2, "allowPersistent": True})
     client = created.get_json()["client"]
     key = created.get_json()["apiKey"]
     assert client["defaults"]["effective"] == {"cpus": 2.0, "memoryMb": 2048, "diskGb": 10}
     assert client["quota"]["cpus"] == 4 and client["quota"]["memoryMb"] is None
+    assert client["quota"]["running"] == 2 and client["allowPersistent"] is True
 
     sbx = http.post("/containers", json={}, headers=auth(key)).get_json()["container"]["name"]
     detail = http.get(f"/admin/api/clients/{client['id']}").get_json()["client"]

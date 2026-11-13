@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from .config import settings
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -100,6 +100,15 @@ ADMIN_V3_COLUMNS = {
     "session_epoch": "INTEGER NOT NULL DEFAULT 0",
 }
 
+# v4: limit of sandboxes running at the same time; persistent sandboxes only
+# for clients that are allowed to have them. New clients start without that
+# permission (column default 0); clients that existed before the upgrade keep
+# the previous behaviour (set to 1 once, when the column is added).
+API_KEY_V4_COLUMNS = {
+    "quota_running": ("INTEGER", None),
+    "allow_persistent": ("INTEGER NOT NULL DEFAULT 0", "UPDATE api_keys SET allow_persistent=1"),
+}
+
 
 def connect() -> sqlite3.Connection:
     path = settings().db_path
@@ -150,6 +159,12 @@ def init_db() -> None:
         for column, ctype in API_KEY_V2_COLUMNS.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
+        for column, (ctype, backfill) in API_KEY_V4_COLUMNS.items():
+            if column not in existing:
+                with transaction(conn):
+                    conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
+                    if backfill:
+                        conn.execute(backfill)
         existing = _columns(conn, "admin_users")
         for column, ctype in ADMIN_V3_COLUMNS.items():
             if column not in existing:

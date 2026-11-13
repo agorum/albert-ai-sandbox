@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from . import clients, db, dockerctl, netctl, nginxctl, ports, storage
 from .config import settings
-from .errors import BadRequest, Conflict, NotFound, QuotaExceeded, SandboxError, Unavailable
+from .errors import BadRequest, Conflict, Forbidden, NotFound, QuotaExceeded, SandboxError, Unavailable
 from .locking import host_lock
 
 STATE_CREATING = "creating"
@@ -166,7 +166,8 @@ def _docker_time(value: Optional[str]) -> Optional[str]:
 
 def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
               include_secrets: bool = False, client_label: Optional[str] = None,
-              current_image_id: Optional[str] = None) -> Dict[str, Any]:
+              current_image_id: Optional[str] = None,
+              persistent_allowed: Optional[bool] = None) -> Dict[str, Any]:
     """Public representation; keeps the field names of the previous API."""
     name = row["name"]
     state = (info or {}).get("State") or {}
@@ -214,6 +215,9 @@ def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
     }
     if client_label is not None:
         data["clientLabel"] = client_label
+    if persistent_allowed is not None:
+        # Whether the owning client may switch this sandbox to persistent.
+        data["persistentAllowed"] = persistent_allowed
     if row["error"]:
         data["lastError"] = row["error"]
     if include_secrets:
@@ -341,6 +345,8 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
     s = settings()
     with db.session() as conn:
         client = clients.get(conn, client_id)
+        if persistent:
+            _require_persistent_allowed(client)
         res = resolve_resources(client, resources)
         image = s.docker_image
         if not dockerctl.image_id(image):
@@ -350,7 +356,7 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
         with host_lock():
             running = _running()
             clients.check_quota(conn, client, running, add_cpus=res["cpus"], add_memory_mb=res["memory_mb"],
-                                add_disk_gb=res["disk_gb"], add_sandboxes=1)
+                                add_disk_gb=res["disk_gb"], add_sandboxes=1, add_running=1)
             name = generate_name(conn, requested_name)
             novnc, mcphub, filesvc = ports.allocate(conn, 3)
             now = int(time.time())
@@ -394,8 +400,10 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
 def describe(name: str, client_id: Optional[int] = None) -> Dict[str, Any]:
     with db.session() as conn:
         row = get_row(conn, name, client_id)
+        owner = clients.get(conn, row["api_key_id"])
         return serialize(row, dockerctl.inspect_one(name),
-                         current_image_id=dockerctl.image_id(settings().docker_image))
+                         current_image_id=dockerctl.image_id(settings().docker_image),
+                         persistent_allowed=clients.persistent_allowed(owner))
 
 
 def list_sandboxes(client_id: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -405,12 +413,16 @@ def list_sandboxes(client_id: Optional[int] = None) -> List[Dict[str, Any]]:
         else:
             rows = conn.execute("SELECT * FROM sandboxes WHERE api_key_id=? ORDER BY created_at",
                                 (client_id,)).fetchall()
-        labels = {r["id"]: r["label"] for r in conn.execute("SELECT id, label FROM api_keys")}
+        owners = {r["id"]: r for r in conn.execute("SELECT id, label, allow_persistent FROM api_keys")}
     infos = dockerctl.inspect([r["name"] for r in rows]) if rows else {}
     image_id = dockerctl.image_id(settings().docker_image) if rows else None
-    return [serialize(r, infos.get(r["name"]), client_label=labels.get(r["api_key_id"]) or "",
-                      current_image_id=image_id)
-            for r in rows]
+    result = []
+    for r in rows:
+        owner = owners.get(r["api_key_id"])
+        result.append(serialize(r, infos.get(r["name"]), client_label=(owner["label"] if owner else "") or "",
+                                current_image_id=image_id,
+                                persistent_allowed=bool(owner and owner["allow_persistent"])))
+    return result
 
 
 def start(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dict[str, Any]:
@@ -426,7 +438,7 @@ def start(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dic
             netctl.ensure_ready()
             with host_lock():
                 clients.check_quota(conn, client, _running(), add_cpus=row["cpus"] or 0,
-                                    add_memory_mb=row["memory_mb"] or 0, exclude=name)
+                                    add_memory_mb=row["memory_mb"] or 0, add_running=1, exclude=name)
                 if row["storage"] == "image":
                     storage.mount(name)
                 # Containers from older versions sit in the shared default
@@ -547,10 +559,24 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
                          current_image_id=dockerctl.image_id(s.docker_image))
 
 
+def _require_persistent_allowed(client: sqlite3.Row) -> None:
+    if clients.persistent_allowed(client):
+        return
+    hours = settings().max_age_seconds / 3600
+    raise Forbidden(
+        "Persistent sandboxes are not allowed for this client. Use a non-persistent sandbox instead "
+        f"(it is removed automatically {hours:g} hours after creation) or ask an administrator to allow "
+        "persistent sandboxes for this client.",
+        code="persistent_not_allowed")
+
+
 def set_persistent(name: str, persistent: bool, client_id: Optional[int] = None,
                    actor: str = "api") -> Dict[str, Any]:
     with db.session() as conn:
-        get_row(conn, name, client_id)
+        row = get_row(conn, name, client_id)
+        if persistent and not row["persistent"]:
+            # Switching it off is always possible, also after the permission was withdrawn.
+            _require_persistent_allowed(clients.get(conn, row["api_key_id"]))
         conn.execute("UPDATE sandboxes SET persistent=? WHERE name=?", (1 if persistent else 0, name))
         db.audit(conn, actor, "sandbox.persistent", name, {"persistent": bool(persistent)})
         return {"name": name, "persistent": bool(persistent)}
@@ -799,5 +825,7 @@ def host_overview() -> Dict[str, Any]:
         "defaults": {"cpus": s.default_cpus, "memoryMb": s.default_memory_mb, "diskGb": s.default_disk_gb},
         "limits": {"maxCpus": host_cpus(), "minMemoryMb": s.min_memory_mb, "maxMemoryMb": host_memory_mb(),
                    "maxDiskGb": s.max_disk_gb},
+        # Non-persistent sandboxes are removed after maxAgeSeconds; all stop when idle.
+        "lifecycle": {"maxAgeSeconds": s.max_age_seconds, "inactivitySeconds": s.inactivity_seconds},
         "publicUrl": s.public_url,
     }

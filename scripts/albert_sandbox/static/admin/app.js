@@ -334,6 +334,9 @@
   const ERROR_TITLES = {
     quota_exceeded: "Kontingent überschritten",
     sandbox_limit_exceeded: "Limit pro Sandbox überschritten",
+    running_limit_exceeded: "Zu viele laufende Sandboxen",
+    persistent_not_allowed: "Persistenz nicht freigegeben",
+    forbidden: "Nicht erlaubt",
     conflict: "Konflikt",
     not_found: "Nicht gefunden",
     bad_request: "Ungültige Eingabe",
@@ -618,7 +621,11 @@
     { key: "quotaCpus", group: "quota", label: "CPU", unit: "Kerne", kind: "cpus", min: 0 },
     { key: "quotaMemoryMb", group: "quota", label: "RAM", unit: "GB", kind: "mem", min: 0 },
     { key: "quotaDiskGb", group: "quota", label: "Disk", unit: "GB", kind: "int", min: 0 },
-    { key: "quotaSandboxes", group: "quota", label: "max. Sandboxen", unit: "", kind: "int", min: 0 },
+    { key: "quotaSandboxes", group: "quota", label: "Sandboxen", unit: "", kind: "int", min: 0,
+      title: "Anzahl Sandboxen insgesamt (laufend und gestoppt)" },
+    { key: "quotaRunning", group: "quota", label: "davon laufend", unit: "", kind: "int", min: 0,
+      title: "Wie viele Sandboxen gleichzeitig laufen dürfen. Ein weiterer Start oder eine weitere "
+        + "Sandbox wird abgelehnt (running_limit_exceeded). Leer = unbegrenzt." },
   ];
 
   function clientValue(client, key) {
@@ -633,6 +640,7 @@
       case "quotaMemoryMb": return q.memoryMb;
       case "quotaDiskGb": return q.diskGb;
       case "quotaSandboxes": return q.sandboxes;
+      case "quotaRunning": return q.running;
       default: return null;
     }
   }
@@ -649,8 +657,37 @@
     return Math.round(n * 100) / 100;
   }
 
+  function hoursText(seconds) {
+    if (!isNum(seconds)) return null;
+    const hours = seconds / 3600;
+    return hours >= 1 ? `${fmtNum(hours, 1)} Stunde${hours === 1 ? "" : "n"}` : `${fmtNum(seconds / 60, 0)} Minuten`;
+  }
+
   /**
-   * "Limit pro Sandbox" + "Gesamtkontingent" fieldsets.
+   * "Persistente Sandboxen erlauben" switch.
+   * Returns {node, input, value(), changed()}.
+   */
+  function persistentPolicyField(client, overview) {
+    const initial = !!(client && client.allowPersistent);
+    const input = h("input", { type: "checkbox", class: "switch", name: "allowPersistent", checked: initial });
+    const maxAge = hoursText(((overview && overview.lifecycle) || {}).maxAgeSeconds);
+    const node = h("label", { class: "switch-field" },
+      input,
+      h("span", null,
+        h("span", { class: "field-label" }, "Persistente Sandboxen erlauben"),
+        h("span", { class: "field-hint" },
+          "Ohne Freigabe lehnt die API persistente Sandboxen ab (persistent_not_allowed)"
+          + (maxAge ? `; alle anderen werden nach ${maxAge} automatisch gelöscht.` : "."))));
+    return {
+      node,
+      input,
+      value: () => input.checked,
+      changed: () => input.checked !== initial,
+    };
+  }
+
+  /**
+   * "Limit pro Sandbox" + "Gesamtkontingent" fieldsets, side by side.
    * Returns {nodes, values(), changedValues()}.
    */
   function clientLimitFields(client, overview) {
@@ -678,23 +715,23 @@
         unit: spec.unit,
       });
       inputs[spec.key] = { input: ni.input, spec };
-      return field(spec.label, ni.node);
+      const f = field(spec.label, ni.node);
+      if (spec.title) f.title = spec.title;
+      return f;
     };
     const defaults = CLIENT_FIELDS.filter((f) => f.group === "default").map(build);
     const quotas = CLIENT_FIELDS.filter((f) => f.group === "quota").map(build);
     const nodes = [
-      h("fieldset", null,
-        h("legend", null, "Limit pro Sandbox"),
-        h("p", { class: "legend-hint" },
-          "Obergrenze für jede einzelne Sandbox; per API darf weniger angefordert werden. "
-          + "Leer = globaler Standard."),
-        h("div", { class: "field-grid" }, defaults)),
-      h("fieldset", null,
-        h("legend", null, "Gesamtkontingent"),
-        h("p", { class: "legend-hint" },
-          "Leer = unbegrenzt. CPU und RAM zählen die Limits laufender Sandboxen, "
-          + "Disk die konfigurierte Größe aller Sandboxen."),
-        h("div", { class: "field-grid cols-4" }, quotas)),
+      h("div", { class: "limit-groups" },
+        h("fieldset", null,
+          h("legend", null, "Limit pro Sandbox"),
+          h("p", { class: "legend-hint" }, "Obergrenze je Sandbox, per API darf weniger angefordert werden. Leer = Standard."),
+          h("div", { class: "field-grid" }, defaults)),
+        h("fieldset", null,
+          h("legend", null, "Gesamtkontingent"),
+          h("p", { class: "legend-hint" },
+            "Leer = unbegrenzt. CPU, RAM und „davon laufend“ zählen laufende Sandboxen, Disk alle."),
+          h("div", { class: "field-grid cols-5" }, quotas))),
     ];
     return {
       nodes,
@@ -1149,15 +1186,27 @@
       h("div", { class: "cell-sub" }, source));
   }
 
+  function persistentPolicyText(client) {
+    const n = (client.usage || {}).persistent || 0;
+    const count = n ? `${fmtNum(n, 0)} persistent` : null;
+    if (client.allowPersistent) {
+      return h("div", null, h("span", { class: "badge ok" }, "erlaubt"), count ? h("div", { class: "cell-sub" }, count) : null);
+    }
+    return h("div", null, h("span", { class: "badge" }, "gesperrt"),
+      count ? h("div", { class: "cell-sub", title: "Vor der Sperre persistent gesetzt; bleiben erhalten" }, count) : null);
+  }
+
   function clientsTable(list) {
     const head = h("thead", null, h("tr", null,
       h("th", null, "Client"),
       h("th", null, "Angelegt"),
       h("th", null, "Sandboxen"),
+      h("th", null, "Laufend"),
       h("th", null, "CPU (laufend)"),
       h("th", null, "RAM (laufend)"),
       h("th", null, "Disk (alle)"),
-      h("th", null, "Limit pro Sandbox")));
+      h("th", null, "Limit pro Sandbox"),
+      h("th", null, "Persistenz")));
     const rows = list.map((c) => {
       const u = c.usage || {};
       const q = c.quota || {};
@@ -1166,14 +1215,16 @@
           h("a", { href: "#/clients/" + enc(c.id), class: "cell-main" }, c.label || `Client ${c.id}`),
           h("div", { class: "cell-sub mono" }, "Key " + (c.keyHashPrefix || "") + "…")),
         h("td", null, timeEl(c.createdAt)),
-        h("td", null, usageCell(u.sandboxes, q.sandboxes, (n) => fmtNum(n, 0), `${fmtNum(u.running, 0)} laufend`)),
+        h("td", null, usageCell(u.sandboxes, q.sandboxes, (n) => fmtNum(n, 0))),
+        h("td", null, usageCell(u.running, q.running, (n) => fmtNum(n, 0))),
         h("td", null, usageCell(u.cpus, q.cpus, (n) => fmtNum(n, 2))),
         h("td", null, usageCell(u.memoryMb, q.memoryMb, fmtMb)),
         h("td", null, usageCell(u.diskGb, q.diskGb, (n) => fmtNum(n, 0) + " GB")),
-        h("td", null, perSandboxText(c)));
+        h("td", null, perSandboxText(c)),
+        h("td", null, persistentPolicyText(c)));
     });
     if (!rows.length) {
-      rows.push(h("tr", null, h("td", { class: "empty", colspan: "7" },
+      rows.push(h("tr", null, h("td", { class: "empty", colspan: "9" },
         "Noch keine Clients angelegt. Mit „Client anlegen“ wird ein Client samt API-Key erzeugt.")));
     }
     return h("div", { class: "table-wrap" }, h("table", { class: "data" }, head, h("tbody", null, rows)));
@@ -1183,11 +1234,15 @@
     const ov = await getOverview().catch(() => null);
     const label = h("input", { type: "text", name: "label", required: true, maxlength: "200", autocomplete: "off" });
     const limits = clientLimitFields(null, ov);
+    const policy = persistentPolicyField(null, ov);
     const created = await modal({
       title: "Client anlegen",
       wide: true,
       submitLabel: "Client anlegen",
-      body: [field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), limits.nodes],
+      body: [
+        h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), policy.node),
+        limits.nodes,
+      ],
       onSubmit: async () => {
         const text = label.value.trim();
         if (!text) {
@@ -1196,7 +1251,9 @@
           label.setCustomValidity("");
           return false;
         }
-        return api("clients", { method: "POST", body: { label: text, ...limits.values() } });
+        return api("clients", {
+          method: "POST", body: { label: text, ...limits.values(), allowPersistent: policy.value() },
+        });
       },
     });
     if (!created || !created.client) return;
@@ -1264,17 +1321,21 @@
       quotaBox.replaceChildren(
         h("div", { class: "section-head" }, h("h2", null, "Kontingent")),
         h("div", { class: "panel" }, h("div", { class: "panel-body" },
-          h("div", { class: "grid cols-4" },
-            metric("Sandboxen", limitText(u.sandboxes, q.sandboxes, (n) => fmtNum(n, 0)), u.sandboxes, q.sandboxes,
-              `${fmtNum(u.running, 0)} laufend`),
+          h("div", { class: "grid cols-5" },
+            metric("Sandboxen", limitText(u.sandboxes, q.sandboxes, (n) => fmtNum(n, 0)), u.sandboxes, q.sandboxes),
+            metric("Laufend", limitText(u.running, q.running, (n) => fmtNum(n, 0)), u.running, q.running),
             metric("CPU (laufend)", limitText(u.cpus, q.cpus, (n) => fmtNum(n, 2)), u.cpus, q.cpus),
             metric("RAM (laufend)", limitText(u.memoryMb, q.memoryMb, fmtMb), u.memoryMb, q.memoryMb),
-            metric("Disk (alle Sandboxen)", limitText(u.diskGb, q.diskGb, (n) => fmtNum(n, 0) + " GB"), u.diskGb, q.diskGb)),
-          h("p", { class: "metric-note mt-16" },
+            metric("Disk (alle)", limitText(u.diskGb, q.diskGb, (n) => fmtNum(n, 0) + " GB"), u.diskGb, q.diskGb)),
+          h("p", { class: "metric-note mt-12" },
             "Limit pro Sandbox: ",
             h("strong", null, fmtCores(e.cpus)), src(d.cpus), " · ",
             h("strong", null, fmtMb(e.memoryMb) + " RAM"), src(d.memoryMb), " · ",
-            h("strong", null, fmtNum(e.diskGb, 0) + " GB Disk"), src(d.diskGb)))));
+            h("strong", null, fmtNum(e.diskGb, 0) + " GB Disk"), src(d.diskGb),
+            h("span", { class: "sep" }, "|"),
+            "Persistente Sandboxen: ",
+            h("strong", null, client.allowPersistent ? "erlaubt" : "gesperrt"),
+            u.persistent ? ` (${fmtNum(u.persistent, 0)} persistent${client.allowPersistent ? "" : ", vor der Sperre gesetzt"})` : null))));
     }
 
     async function renderForm() {
@@ -1286,11 +1347,12 @@
       });
       label.dataset.initial = client.label || "";
       const limits = clientLimitFields(client, ov);
+      const policy = persistentPolicyField(client, ov);
       const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Änderungen speichern");
       const resetBtn = h("button", { type: "button", class: "btn" }, "Zurücksetzen");
       const status = h("span", { class: "state" });
       const form = h("form", { class: "panel panel-body" },
-        field("Bezeichnung", label),
+        h("div", { class: "form-row" }, field("Bezeichnung", label), policy.node),
         limits.nodes,
         h("div", { class: "form-actions" }, saveBtn, resetBtn, status));
       resetBtn.addEventListener("click", () => renderForm());
@@ -1301,6 +1363,7 @@
           return;
         }
         const payload = limits.changedValues();
+        if (policy.changed()) payload.allowPersistent = policy.value();
         if (changed(label)) {
           const text = label.value.trim();
           if (!text) {
@@ -1325,6 +1388,7 @@
           renderHead();
           renderQuota();
           renderForm();
+          if ("allowPersistent" in payload) refresh({ silent: true }); // persistence switches in the table
         } catch (err) {
           showError(err, "Speichern fehlgeschlagen");
         } finally {
@@ -1475,34 +1539,47 @@
     const u = s.usage || {};
     const r = s.resources || {};
     const used = u.diskUsedBytes;
-    const title = u.updatedAt ? "Gemessen " + fmtDate(u.updatedAt, true) : "Noch nicht gemessen";
+    const title = (u.updatedAt ? "Gemessen " + fmtDate(u.updatedAt, true) : "Noch nicht gemessen")
+      + ". Container-Layer = beschreibbare Schicht außerhalb des Home-Verzeichnisses.";
+    const layer = isNum(u.rootfsUsedBytes) ? h("div", { class: "cell-sub" }, "Layer " + fmtBytes(u.rootfsUsedBytes)) : null;
     if (isNum(r.diskGb) && r.diskGb > 0) {
       return h("div", { class: "usage", title },
         h("div", { class: "usage-text" }, fmtBytes(used), h("span", { class: "of" }, " / " + fmtNum(r.diskGb, 0) + " GB")),
-        bar(isNum(used) ? used : 0, r.diskGb * GIB));
+        bar(isNum(used) ? used : 0, r.diskGb * GIB),
+        layer);
     }
-    return h("div", { class: "usage-text", title }, fmtBytes(used));
+    return h("div", { title }, h("div", { class: "usage-text" }, fmtBytes(used)), layer);
+  }
+
+  function activityCell(s) {
+    return h("div", { class: "nowrap" },
+      h("div", { title: "Letzte Aktivität" }, timeEl(s.lastActivityAt, true)),
+      h("div", { class: "cell-sub" }, "angelegt ", timeEl(s.createdAt)));
   }
 
   function sandboxTable(list, { showClient = false, emptyText = "Keine Sandboxen." } = {}) {
-    const cols = ["Sandbox", showClient ? "Client" : null, "Status", "Angelegt", "Letzte Aktivität", "Persistent",
-      "Limits (CPU · RAM · Disk)", "Disk belegt", "Container-Layer", "Aktionen"].filter(Boolean);
+    const cols = ["Sandbox", showClient ? "Client" : null, "Status", "Aktivität", "Persistent",
+      "Limits (CPU · RAM · Disk)", "Disk belegt", "Aktionen"].filter(Boolean);
     const head = h("thead", null, h("tr", null, cols.map((c) => h("th", null, c))));
     const rows = list.map((s) => sandboxRow(s, showClient));
     if (!rows.length) rows.push(h("tr", null, h("td", { class: "empty", colspan: String(cols.length) }, emptyText)));
-    return h("div", { class: "table-wrap" }, h("table", { class: "data" }, head, h("tbody", null, rows)));
+    return h("div", { class: "table-wrap" }, h("table", { class: "data sandboxes" }, head, h("tbody", null, rows)));
   }
 
   function sandboxRow(s, showClient) {
     const pending = state.pending.get(s.name) || null;
     const url = safeUrl(s.urls && s.urls.desktop);
+    // The desktop is only reachable while the sandbox runs.
     const nameCell = h("td", null,
-      url
+      url && s.status === "running"
         ? h("a", {
           href: url, target: "_blank", rel: "noopener noreferrer", class: "sbx-name",
           title: "Desktop in neuem Tab öffnen",
         }, s.name, " ↗")
-        : h("span", { class: "sbx-name" }, s.name),
+        : h("span", {
+          class: "sbx-name",
+          title: s.status === "stopped" ? "Desktop erst nach dem Start erreichbar" : null,
+        }, s.name),
       s.lastError ? h("div", { class: "err-line", title: s.lastError }, "Fehler: " + s.lastError) : null);
 
     const clientCell = showClient
@@ -1511,12 +1588,16 @@
         : h("span", { class: "faint" }, "–"))
       : null;
 
+    // Switching off is always possible; switching on needs the client's permission.
+    const locked = !s.persistent && s.persistentAllowed === false;
     const persistent = h("input", {
       type: "checkbox", class: "switch", checked: !!s.persistent,
-      disabled: !!pending || s.status === "removing",
+      disabled: !!pending || s.status === "removing" || locked,
       "aria-label": `Sandbox ${s.name} persistent`,
-      title: "Persistente Sandboxen werden nicht nach Ablauf der maximalen Lebensdauer automatisch gelöscht "
-        + "(Stopp bei Inaktivität gilt weiterhin).",
+      title: locked
+        ? "Persistente Sandboxen sind für diesen Client nicht freigegeben (Client-Einstellungen)."
+        : "Persistente Sandboxen werden nicht nach Ablauf der maximalen Lebensdauer automatisch gelöscht "
+          + "(Stopp bei Inaktivität gilt weiterhin).",
     });
     persistent.addEventListener("change", () => togglePersistent(s, persistent));
 
@@ -1524,52 +1605,79 @@
       nameCell,
       clientCell,
       h("td", null, statusBadge(s.status, pending), pending ? null : outdatedBadge(s)),
-      h("td", null, timeEl(s.createdAt)),
-      h("td", null, timeEl(s.lastActivityAt, true)),
+      h("td", null, activityCell(s)),
       h("td", null, persistent),
       h("td", null, limitsCell(s)),
       h("td", null, diskCell(s)),
-      h("td", { class: "num", title: "Beschreibbare Container-Schicht (außerhalb des Home-Verzeichnisses)" },
-        fmtBytes((s.usage || {}).rootfsUsedBytes)),
       h("td", { class: "actions" }, sandboxActions(s, pending)));
+  }
+
+  // Inline SVG icons (24x24, stroke = currentColor); built with DOM APIs because of the CSP.
+  const ICONS = {
+    start: [["path", { d: "M7 4.5v15l12-7.5z" }]],
+    stop: [["rect", { x: "6", y: "6", width: "12", height: "12", rx: "1.5" }]],
+    restart: [["path", { d: "M20 12a8 8 0 1 1-2.34-5.66" }], ["path", { d: "M20 4v5h-5" }]],
+    limits: [["path", { d: "M4 6h8M16 6h4M4 12h3M11 12h9M4 18h10M18 18h2" }],
+      ["circle", { cx: "14", cy: "6", r: "2" }], ["circle", { cx: "9", cy: "12", r: "2" }],
+      ["circle", { cx: "16", cy: "18", r: "2" }]],
+    rebuild: [["path", { d: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94"
+      + "l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" }]],
+    live: [["path", { d: "M3 12h4l3-8 4 16 3-8h4" }]],
+    remove: [["path", { d: "M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" }]],
+  };
+
+  function icon(name) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    for (const [k, v] of Object.entries({
+      viewBox: "0 0 24 24", width: "16", height: "16", fill: "none", stroke: "currentColor",
+      "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true",
+    })) svg.setAttribute(k, v);
+    for (const [tag, attrs] of ICONS[name] || []) {
+      const el = document.createElementNS(NS, tag);
+      for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+      svg.append(el);
+    }
+    return svg;
   }
 
   function sandboxActions(s, pending) {
     const busy = !!pending;
     const transitional = s.status === "creating" || s.status === "removing" || s.status === "rebuilding";
     const running = s.status === "running";
-    const mk = (label, cls, onClick, { disabled = false, busyFor = null, title = null } = {}) => {
+    const mk = (iconName, label, cls, onClick, { disabled = false, busyFor = null, title = null } = {}) => {
       const isBusy = busy && pending.action === busyFor;
       const b = h("button", {
         type: "button",
-        class: ["btn small", cls, isBusy && "busy"],
+        class: ["btn small icon-only", cls, isBusy && "busy"],
         disabled: busy || disabled,
-        title,
-      }, isBusy ? PENDING_LABEL[busyFor] : label);
+        title: title ? `${label} – ${title}` : label,
+        "aria-label": label,
+      }, isBusy ? null : icon(iconName));
       b.addEventListener("click", onClick);
       return b;
     };
     const buttons = [];
     if (running || (busy && pending.action === "stop")) {
-      buttons.push(mk("Stop", "", () => sandboxAction(s, "stop"), { disabled: transitional, busyFor: "stop" }));
+      buttons.push(mk("stop", "Stoppen", "", () => sandboxAction(s, "stop"), { disabled: transitional, busyFor: "stop" }));
     } else {
-      buttons.push(mk("Start", "", () => sandboxAction(s, "start"), {
-        disabled: transitional, busyFor: "start", title: "Wartet auf den MCP Hub (bis zu ca. 2 Minuten)",
+      buttons.push(mk("start", "Starten", "", () => sandboxAction(s, "start"), {
+        disabled: transitional, busyFor: "start", title: "wartet auf den MCP Hub (bis zu ca. 2 Minuten)",
       }));
     }
-    buttons.push(mk("Neustart", "", () => sandboxAction(s, "restart"), {
+    buttons.push(mk("restart", "Neu starten", "", () => sandboxAction(s, "restart"), {
       disabled: transitional || !running, busyFor: "restart",
     }));
-    buttons.push(mk("Limits", "", () => openLimitsDialog(s), {
-      disabled: transitional || s.status === "error", title: "Limits ändern",
+    buttons.push(mk("limits", "Limits ändern", "", () => openLimitsDialog(s), {
+      disabled: transitional || s.status === "error",
     }));
-    buttons.push(mk("Neu aufbauen", (s.outdated || []).length || s.status === "error" ? "primary" : "",
+    buttons.push(mk("rebuild", "Neu aufbauen", (s.outdated || []).length || s.status === "error" ? "primary" : "",
       () => recreateSandbox(s), {
         disabled: transitional, busyFor: "recreate",
-        title: "Container mit aktuellem Image, Härtung und Netz neu erstellen – Daten, Ports und Zugangsdaten bleiben",
+        title: "Container mit aktuellem Image, Härtung und Netz neu erstellen; Daten, Ports und Zugangsdaten bleiben",
       }));
-    buttons.push(mk("Live", "", () => openStatsDialog(s), { title: "Live-Werte (docker stats)" }));
-    buttons.push(mk("Löschen", "danger-outline", () => deleteSandbox(s), {
+    buttons.push(mk("live", "Live-Werte", "", () => openStatsDialog(s), { title: "CPU, RAM, Netz (docker stats)" }));
+    buttons.push(mk("remove", "Löschen", "danger-outline", () => deleteSandbox(s), {
       disabled: s.status === "creating", busyFor: "delete",
     }));
     return h("div", { class: "btn-row" }, buttons);

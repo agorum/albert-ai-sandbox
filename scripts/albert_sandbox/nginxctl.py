@@ -53,6 +53,8 @@ def render(name: str, novnc_port: int, mcphub_port: Optional[int], filesvc_port:
         f"location /{name}/ {{",
         f"    proxy_pass http://127.0.0.1:{int(novnc_port)}/;",
         proxy_common,
+        "    # stopped sandbox: explanation page instead of 502 (nginx/sandbox-offline.conf)",
+        "    error_page 502 504 = @albert_sandbox_offline;",
         "}",
         "",
         f"location /{name}/websockify {{",

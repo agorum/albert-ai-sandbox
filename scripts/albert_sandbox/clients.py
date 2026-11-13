@@ -13,7 +13,13 @@ Quota semantics:
   * The disk quota counts the configured disk size of *all* sandboxes of the
     client, running or stopped, because stopped sandboxes keep their data.
   * The sandbox quota counts all sandboxes of the client.
+  * The running quota counts sandboxes that are running (or being created);
+    starting or creating one more is refused with ``running_limit_exceeded``.
   * ``None`` means unlimited. Legacy sandboxes without limits count as 0.
+
+Persistent sandboxes (excluded from the automatic max-age removal) are only
+possible for clients with ``allow_persistent``; otherwise creating one or
+switching a sandbox to persistent is refused with ``persistent_not_allowed``.
 """
 from __future__ import annotations
 
@@ -26,9 +32,10 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 from .config import settings
 from .errors import BadRequest, NotFound, QuotaExceeded
 
-QUOTA_FIELDS = ("quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes")
+QUOTA_FIELDS = ("quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes", "quota_running")
 DEFAULT_FIELDS = ("default_cpus", "default_memory_mb", "default_disk_gb")
-EDITABLE_FIELDS = ("label",) + QUOTA_FIELDS + DEFAULT_FIELDS
+FLAG_FIELDS = ("allow_persistent",)
+EDITABLE_FIELDS = ("label",) + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS
 
 
 def hash_key(raw: str) -> str:
@@ -74,6 +81,19 @@ def _clean_number(field: str, value: Any) -> Optional[float]:
     return int(number)
 
 
+def _clean_flag(field: str, value: Any) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return int(value)
+    text = str(value).strip().lower() if value is not None else ""
+    if text in ("1", "true", "yes", "on", "ja"):
+        return 1
+    if text in ("0", "false", "no", "off", "nein"):
+        return 0
+    raise BadRequest(f"{field} must be true or false")
+
+
 def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     clean: Dict[str, Any] = {}
     for key, value in fields.items():
@@ -86,6 +106,8 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
             if len(label) > 200:
                 raise BadRequest("label too long (max 200 characters)")
             clean[key] = label
+        elif key in FLAG_FIELDS:
+            clean[key] = _clean_flag(key, value)
         else:
             clean[key] = _clean_number(key, value)
     for key in DEFAULT_FIELDS:
@@ -149,35 +171,59 @@ def quotas(client: sqlite3.Row) -> Dict[str, Any]:
         "memoryMb": client["quota_memory_mb"],
         "diskGb": client["quota_disk_gb"],
         "sandboxes": client["quota_sandboxes"],
+        "running": client["quota_running"],
     }
+
+
+def persistent_allowed(client: sqlite3.Row) -> bool:
+    return bool(client["allow_persistent"])
 
 
 def usage(conn: sqlite3.Connection, client_id: int, running: Iterable[str],
           exclude: Optional[str] = None) -> Dict[str, Any]:
     """Current consumption of a client against its quotas."""
     running_set = set(running)
-    totals = {"cpus": 0.0, "memoryMb": 0, "diskGb": 0, "sandboxes": 0, "running": 0}
+    totals: Dict[str, Any] = {"cpus": 0.0, "memoryMb": 0, "diskGb": 0, "sandboxes": 0, "running": 0,
+                              "persistent": 0}
+    names = []
     for row in conn.execute(
-        "SELECT name, state, cpus, memory_mb, disk_gb FROM sandboxes WHERE api_key_id=?", (client_id,)
+        "SELECT name, state, persistent, cpus, memory_mb, disk_gb FROM sandboxes WHERE api_key_id=?",
+        (client_id,)
     ):
         if exclude and row["name"] == exclude:
             continue
         totals["sandboxes"] += 1
         totals["diskGb"] += row["disk_gb"] or 0
+        totals["persistent"] += 1 if row["persistent"] else 0
         active = row["name"] in running_set or row["state"] == "creating"
         if active:
             totals["running"] += 1
             totals["cpus"] += row["cpus"] or 0
             totals["memoryMb"] += row["memory_mb"] or 0
+            names.append(row["name"])
     totals["cpus"] = round(totals["cpus"], 2)
+    totals["runningNames"] = sorted(names)
     return totals
 
 
 def check_quota(conn: sqlite3.Connection, client: sqlite3.Row, running: Iterable[str], *,
                 add_cpus: float = 0, add_memory_mb: int = 0, add_disk_gb: int = 0,
-                add_sandboxes: int = 0, exclude: Optional[str] = None) -> None:
+                add_sandboxes: int = 0, add_running: int = 0, exclude: Optional[str] = None) -> None:
     current = usage(conn, client["id"], running, exclude=exclude)
     limits = quotas(client)
+    # Checked first: it is the most specific answer when a sandbox cannot start.
+    limit = limits["running"]
+    if add_running and limit is not None and current["running"] + add_running > limit:
+        names = current["runningNames"]
+        if limit == 0:
+            message = "This client is not allowed to run sandboxes (limit of running sandboxes is 0)."
+        else:
+            message = (f"This client may run at most {limit} sandbox(es) at the same time and "
+                       f"{current['running']} already running: {', '.join(names)}. "
+                       "Stop one of them first (POST /containers/<name>/stop), then try again.")
+        raise QuotaExceeded(message, code="running_limit_exceeded",
+                            details={"resource": "running", "limit": limit, "used": current["running"],
+                                     "requested": add_running, "runningSandboxes": names})
     checks = [
         ("cpus", current["cpus"] + add_cpus, limits["cpus"], add_cpus, "CPU cores (running sandboxes)"),
         ("memoryMb", current["memoryMb"] + add_memory_mb, limits["memoryMb"], add_memory_mb,

@@ -71,12 +71,14 @@ A client is an API key plus settings:
 - **Overall quota** (empty = unlimited):
   - CPU cores and RAM count the limits of the client's **running** sandboxes, i.e. what is used at the same time. Starting or creating a sandbox beyond the quota is refused with HTTP 409 `quota_exceeded`.
   - Disk counts the configured size of **all** sandboxes of the client, running or stopped.
-  - Maximum number of sandboxes.
+  - Maximum number of sandboxes (running or stopped).
+  - Maximum number of sandboxes **running at the same time** ("davon laufend"). Creating or starting one more is refused with HTTP 409 `running_limit_exceeded`; the message names the running sandboxes so the agent can stop one first. `0` = the client may not run sandboxes. Lowering the limit stops nothing; it applies to the next start.
+- **Persistent sandboxes** ("Persistente Sandboxen erlauben"): only clients with this permission may create persistent sandboxes or switch one to persistent; otherwise the request is refused with HTTP 403 `persistent_not_allowed`. New clients start without it. Clients that existed before the update keep it, so nothing changes for them until an admin switches it off. Withdrawing the permission leaves existing persistent sandboxes as they are (they can still be switched off, not on again).
 
 Manage clients in the admin UI or on the host:
 ```bash
 albert-ai-sandbox-manager client create --label "Customer A" --default-cpus 2 --default-memory-mb 2048 \
-    --quota-cpus 10 --quota-memory-mb 20480 --quota-disk-gb 200
+    --quota-cpus 10 --quota-memory-mb 20480 --quota-disk-gb 200 --quota-running 2 --allow-persistent no
 albert-ai-sandbox-manager client list
 albert-ai-sandbox-manager client set 3 --quota-cpus none      # none = unlimited / global default
 albert-ai-sandbox-manager client rotate 3                       # new API key, sandboxes stay
@@ -105,7 +107,7 @@ Sandboxes run code an AI agent controls, so they are isolated from everything bu
 ## Admin Web UI
 Open `https://<host>/manager/admin/` and sign in. Pages:
 - **Übersicht**: host resources, allocated CPU/RAM of running sandboxes, disk usage.
-- **Clients**: create (the API key is shown once), edit per-sandbox limits and quotas, rotate the key, delete a client with all its sandboxes; per client all sandboxes with status, limits, disk usage, last activity and actions (start, stop, restart, change limits, live values, delete).
+- **Clients**: create (the API key is shown once), edit per-sandbox limits, quotas, running limit and the persistence permission, rotate the key, delete a client with all its sandboxes; per client all sandboxes with status, limits, disk usage, last activity and actions (start, stop, restart, change limits, live values, delete).
 - **Sandboxen**: all sandboxes across clients.
 - **Admins**: add admin users, change passwords, delete admins.
 - **Wartung**: preview and run the cleanup (reconcile), audit log of all changes.
@@ -152,7 +154,9 @@ The watcher (`albert-inactivity-watcher.timer`, every minute):
 
 Every removal deletes the container, its disk image (or legacy volume), its nginx route and its database row. If a step fails, the sandbox stays in state `removing` and the next watcher run finishes the job. A failed creation is rolled back completely.
 
-Persistent sandboxes are excluded from max-age removal (`"persistent": true` at creation, `PATCH /containers/<name>/persistent`, CLI `--persistent`, or in the admin UI).
+Persistent sandboxes are excluded from max-age removal (`"persistent": true` at creation, `PATCH /containers/<name>/persistent`, CLI `--persistent`, or in the admin UI) — only for clients that are allowed to have them.
+
+Opening the desktop of a stopped sandbox shows a short explanation page (HTTP 503, reloads every 30 seconds) instead of "502 Bad Gateway".
 
 ## Development
 ```bash

@@ -246,7 +246,9 @@ if [ -f "${CONFD}/albert-security.conf" ]; then
 	install -m 0644 "${INSTALL_DIR}/nginx/albert-security.conf" "${CONFD}/albert-security.conf"
 fi
 install -m 0644 "${INSTALL_DIR}/nginx/manager.conf" "${NGINX_ALBERT_DIR}/manager.conf"
-cat > "${NGINX_ALBERT_DIR}/sandboxes.conf" <<EOF
+# Must be in place before the routes below refer to it.
+install -m 0644 "${INSTALL_DIR}/nginx/sandbox-offline.conf" "${NGINX_ALBERT_DIR}/sandbox-offline.conf"
+cat >"${NGINX_ALBERT_DIR}/sandboxes.conf" <<EOF
 # Managed by albert-ai-sandbox install.sh - one file per sandbox, written by the manager.
 include ${NGINX_ALBERT_DIR}/sandboxes/*.conf;
 EOF

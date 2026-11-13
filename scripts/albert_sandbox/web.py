@@ -2,7 +2,7 @@
 
 Client API (unchanged paths and payloads, plus additions):
   GET    /health
-  GET    /quota                         (new) quota, usage and defaults
+  GET    /quota                         (new) quota, usage, defaults, persistentAllowed
   POST   /containers                    body: name, persistent, resources{cpus,memoryMb,diskGb}
   GET    /containers
   GET    /containers/<name>
@@ -114,7 +114,8 @@ def client_quota() -> Any:
         client = clients.get(conn, g.client["id"])
         usage = clients.usage(conn, client["id"], dockerctl.running_names())
     return jsonify({"quota": clients.quotas(client), "usage": usage,
-                    "defaults": _defaults_dict(client)})
+                    "defaults": _defaults_dict(client),
+                    "persistentAllowed": clients.persistent_allowed(client)})
 
 
 @client_api.post("/containers")
@@ -327,6 +328,7 @@ def _client_dict(conn: Any, client: Any, running: set) -> Dict[str, Any]:
         "defaults": _defaults_dict(client),
         "quota": clients.quotas(client),
         "usage": clients.usage(conn, client["id"], running),
+        "allowPersistent": clients.persistent_allowed(client),
     }
 
 
@@ -336,6 +338,8 @@ _CLIENT_FIELD_MAP = {
     "quotaMemoryMb": "quota_memory_mb",
     "quotaDiskGb": "quota_disk_gb",
     "quotaSandboxes": "quota_sandboxes",
+    "quotaRunning": "quota_running",
+    "allowPersistent": "allow_persistent",
     "defaultCpus": "default_cpus",
     "defaultMemoryMb": "default_memory_mb",
     "defaultDiskGb": "default_disk_gb",

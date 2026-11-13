@@ -11,7 +11,9 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 |---|---|---|
 | 400 | `bad_request` | invalid input (e.g. non-numeric resources) |
 | 401 | – | missing/invalid API key |
+| 403 | `persistent_not_allowed` | the client may not have persistent sandboxes (`POST /containers` with `"persistent": true`, or switching a sandbox to persistent) |
 | 404 | `not_found` | unknown sandbox (or owned by another client) |
+| 409 | `running_limit_exceeded` | the client already runs as many sandboxes as allowed (create or start); details: `limit`, `used`, `runningSandboxes` – stop one of them first |
 | 409 | `quota_exceeded` | client quota (CPU/RAM of running sandboxes, disk, count) would be exceeded; details: `resource`, `limit`, `used`, `requested` |
 | 409 | `sandbox_limit_exceeded` | requested resources above the client's per-sandbox limit |
 | 409 | `conflict` | sandbox is being created/removed |
@@ -45,7 +47,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
   "clientId": 3
 }
 ```
-`status` is `running`, `stopped`, `creating`, `removing`, `rebuilding` or `error` (a rebuild failed; the sandbox and its data are kept until an admin acts). `outdated` lists why the container should be rebuilt (`image`, `hardening`, `network`); empty when up to date. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
+`status` is `running`, `stopped`, `creating`, `removing`, `rebuilding` or `error` (a rebuild failed; the sandbox and its data are kept until an admin acts). `outdated` lists why the container should be rebuilt (`image`, `hardening`, `network`); empty when up to date. `persistentAllowed` tells whether the owning client may switch the sandbox to persistent. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
 
 ### `GET /health`
 `{"status": "ok", "docker": "up"}`
@@ -53,20 +55,22 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 ### `GET /quota` (new)
 ```json
 {
-  "quota": {"cpus": 10, "memoryMb": 20480, "diskGb": 200, "sandboxes": null},
-  "usage": {"cpus": 2.0, "memoryMb": 2048, "diskGb": 30, "sandboxes": 3, "running": 2},
+  "quota": {"cpus": 10, "memoryMb": 20480, "diskGb": 200, "sandboxes": null, "running": 2},
+  "usage": {"cpus": 2.0, "memoryMb": 2048, "diskGb": 30, "sandboxes": 3, "running": 2, "persistent": 0,
+            "runningNames": ["sbx-a-…", "sbx-b-…"]},
   "defaults": {"cpus": null, "memoryMb": null, "diskGb": null,
-               "effective": {"cpus": 1.0, "memoryMb": 2048, "diskGb": 10}}
+               "effective": {"cpus": 1.0, "memoryMb": 2048, "diskGb": 10}},
+  "persistentAllowed": false
 }
 ```
-`null` quota = unlimited; `defaults.effective` is the per-sandbox limit that applies.
+`null` quota = unlimited; `quota.running` limits the sandboxes running at the same time; `defaults.effective` is the per-sandbox limit that applies; `persistentAllowed` tells whether persistent sandboxes may be created.
 
 ### `POST /containers`
 Body (all optional):
 ```json
 {"name": "agent-lab-01", "persistent": false, "resources": {"cpus": 1, "memoryMb": 2048, "diskGb": 10}}
 ```
-`name` is a hint; the final name gets a random suffix. Missing resources default to the client's per-sandbox limit; larger values are refused (`sandbox_limit_exceeded`). Response `201 {"container": {…sandbox object…, "vncPassword": "…", "fileServiceToken": "…", "result": "created"}}`. The secrets are only returned here. The call returns when MCP Hub inside the sandbox answers (up to ~2 minutes).
+`name` is a hint; the final name gets a random suffix. Missing resources default to the client's per-sandbox limit; larger values are refused (`sandbox_limit_exceeded`). `"persistent": true` needs the client's permission (`persistent_not_allowed` otherwise); a new sandbox counts against the running limit (`running_limit_exceeded`). Response `201 {"container": {…sandbox object…, "vncPassword": "…", "fileServiceToken": "…", "result": "created"}}`. The secrets are only returned here. The call returns when MCP Hub inside the sandbox answers (up to ~2 minutes).
 
 ### `GET /containers`
 `{"containers": [ …sandbox objects… ]}`
@@ -75,10 +79,10 @@ Body (all optional):
 `{"container": { … }}`
 
 ### `POST /containers/{name}/start` · `/stop` · `/restart`
-`{"container": { … }}`. Start checks the CPU/RAM quota and waits for MCP Hub.
+`{"container": { … }}`. Start checks the running limit and the CPU/RAM quota and waits for MCP Hub.
 
 ### `PATCH|POST /containers/{name}/persistent`
-Body `{"persistent": true}` → `{"name": "…", "persistent": true}`
+Body `{"persistent": true}` → `{"name": "…", "persistent": true}`. Switching on needs the client's permission (403 `persistent_not_allowed`), switching off always works.
 
 ### `DELETE /containers/{name}`
 Removes container, disk image, nginx route and database entry → `{"deleted": "…"}`
@@ -92,7 +96,7 @@ Used by the web UI under `/manager/admin/`; JSON under `/manager/admin/api/`. Se
 | POST | `api/login`, `api/logout` | session |
 | GET | `api/overview` | host resources, totals, defaults, network isolation status |
 | GET/POST | `api/clients` | list (with usage) / create (returns `apiKey` once) |
-| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes` (null = unset) / delete with all sandboxes |
+| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes`, `quotaRunning` (null = unset), `allowPersistent` (bool) / delete with all sandboxes |
 | POST | `api/clients/{id}/rotate-key` | new API key, sandboxes stay |
 | GET | `api/sandboxes[?client=id]` | all sandboxes |
 | PATCH/DELETE | `api/sandboxes/{name}` | `persistent`, `cpus`, `memoryMb`, `diskGb` (disk can only grow) / delete |

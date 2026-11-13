@@ -34,6 +34,12 @@ class BadRequest(SandboxError):
     code = "bad_request"
 
 
+class Forbidden(SandboxError):
+    """The client is authenticated but its settings do not allow the operation."""
+    status = 403
+    code = "forbidden"
+
+
 class Conflict(SandboxError):
     status = 409
     code = "conflict"
