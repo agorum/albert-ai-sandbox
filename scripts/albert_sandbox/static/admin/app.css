@@ -4,6 +4,23 @@
    blue #006bff (brand, links, navigation, bars), orange #eb4d27 (primary actions).
    Theme: <html data-theme="auto|light|dark">, auto follows the OS (static/theme.js). */
 
+/* The agorum font "New Science" is used when it is installed locally (nothing is downloaded).
+   It sets USE_TYPO_METRICS, and its typo ascender (868 of 1080 units) is barely above the cap
+   height (778) while the descender is 212 - browsers then draw the text 1-2 px too high in
+   buttons, badges and inputs. "ALBERT UI" is the same local font with the balanced hhea values
+   (1036/258, cap height exactly centred). Without New Science the faces fail silently and the
+   next font of --font is used. */
+@font-face { font-family: "ALBERT UI"; font-weight: 300; src: local("New Science Light"), local("NewScience-Light");
+             ascent-override: 95.93%; descent-override: 23.89%; line-gap-override: 0%; }
+@font-face { font-family: "ALBERT UI"; font-weight: 400; src: local("New Science Regular"), local("NewScience-Regular");
+             ascent-override: 95.93%; descent-override: 23.89%; line-gap-override: 0%; }
+@font-face { font-family: "ALBERT UI"; font-weight: 500; src: local("New Science Medium"), local("NewScience-Medium");
+             ascent-override: 95.93%; descent-override: 23.89%; line-gap-override: 0%; }
+@font-face { font-family: "ALBERT UI"; font-weight: 600; src: local("New Science SemiBold"), local("NewScience-SemiBold");
+             ascent-override: 95.93%; descent-override: 23.89%; line-gap-override: 0%; }
+@font-face { font-family: "ALBERT UI"; font-weight: 700; src: local("New Science Bold"), local("NewScience-Bold");
+             ascent-override: 95.93%; descent-override: 23.89%; line-gap-override: 0%; }
+
 :root {
   color-scheme: light;
   --brand-blue: #006bff;
@@ -37,7 +54,7 @@
   --backdrop: rgba(11, 29, 58, .45);
   --radius: 8px;
   --radius-sm: 6px;
-  --font: "New Science", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --font: "ALBERT UI", "New Science", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
