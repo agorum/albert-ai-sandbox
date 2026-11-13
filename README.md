@@ -8,7 +8,8 @@ ALBERT | AI Sandbox provides isolated, browser-ready compute environments for AI
 - Run MCP Hub with Playwright inside every container to orchestrate browser sessions for the AI agent.
 - **Resource limits per sandbox**: CPU cores, RAM and a hard disk limit (default: 1 core, 2 GB RAM, 10 GB disk).
 - **Clients with quotas**: every API key is a client with its own per-sandbox limit and an overall quota (cores and RAM used at the same time, total disk, number of sandboxes).
-- **Admin web UI** (`/manager/admin/`): manage admin users and clients, see every sandbox with status and disk usage, start/stop/resize/delete sandboxes or whole clients.
+- **Admin web UI** (own port, default `:8443/manager/admin/`): manage admin users and clients, see every sandbox with status and disk usage, start/stop/resize/delete sandboxes or whole clients, set up HTTPS (Let's Encrypt or own certificate) and limit the admin UI to certain addresses.
+- **Access only with the API key**: MCP Hub, file service and desktop of a sandbox are checked by nginx through the manager on every request; sandboxes are bound to the ALBERT user that created them; the desktop opens with one-time links.
 - Auto-stop sandboxes after 10 minutes of inactivity, auto-delete non-persistent sandboxes after a maximum age (default 24 hours).
 - **Self-cleaning**: a reconcile step removes everything that has no sandbox any more (containers, disk images, volumes, nginx routes) and repairs missing routes and mounts.
 - **Network isolation**: sandboxes reach the internet, but neither each other nor internal networks nor services of the host. **Internet access can be switched off per client.**
@@ -18,8 +19,11 @@ ALBERT | AI Sandbox provides isolated, browser-ready compute environments for AI
 
 ## Architecture
 ```
-nginx ── /manager/          → manager service (127.0.0.1:5001): client REST API + admin UI
-      ── /<sandbox>/...     → per-sandbox routes (noVNC, MCP Hub, file service) on 127.0.0.1 ports
+nginx :80/:443 ── /manager/       → manager service (127.0.0.1:5001): client REST API
+               ── /<sandbox>/...  → per-sandbox routes; every request checked by the manager first
+                                    (auth_request): MCP Hub, file service (API key + user),
+                                    desktop (one-time link → cookie); noVNC files served by nginx
+nginx :8443    ── /manager/admin/ → admin UI (own origin, optional address list)
 
 manager service, CLI, watcher ─→ scripts/albert_sandbox (Python)
                                    ├─ SQLite (data/manager.db): clients, sandboxes, admins, audit log
@@ -45,14 +49,21 @@ The installer provisions all required packages, builds the sandbox image, instal
 
 **Updating** works the same way: pull the new version and run `sudo bash install.sh` again. Running sandboxes keep running; only the manager service restarts briefly. The database schema is migrated automatically. Installations of the former Bash version (JSON registry) are migrated as well: existing sandboxes, their data volumes, ports and credentials are taken over, API keys stay valid. The sandbox image is only rebuilt when `docker/` changed (`--skip-build` / `--force-build` override this). Replaced configuration is backed up to `/opt/albert-ai-sandbox-manager/backups/<timestamp>/`.
 
-Optional host hardening (TLS via Let's Encrypt, firewall, fail2ban, SSH): `sudo bash scripts/setup-tls.sh --fqdn sandbox.example.com --email admin@example.com`.
+**HTTPS** is set up in the admin UI under *Einstellungen*: request a Let's Encrypt certificate (host name must point to the host, port 80 reachable) or upload an own certificate (PEM certificate, intermediates, private key without passphrase). Each change is tested with `nginx -t`; if nginx refuses it, the previous configuration stays active. With HTTPS active the host accepts API, MCP and file requests only over HTTPS (`https_required` over HTTP). CLI: `albert-ai-sandbox-manager tls status|letsencrypt|custom|disable`.
+
+Optional host hardening (firewall, fail2ban, SSH, Let's Encrypt through the manager): `sudo bash scripts/setup-tls.sh --fqdn sandbox.example.com --email admin@example.com` (after `install.sh`).
+
+The installer writes the nginx site `/etc/nginx/sites-available/albert-sandbox` (main server on 80/443, admin UI on its own port) and disables the Debian default site; a certificate set up by an older `setup-tls.sh` is taken over.
 
 ## Configuration
 `/opt/albert-ai-sandbox-manager/config/albert.env` (KEY=VALUE, never overwritten by updates) is read by the manager service, the watcher and the CLI. Restart the manager after changes (`systemctl restart albert-container-manager`).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ALBERT_PUBLIC_URL` | `http://<primary IP>` | Base URL used in API responses (set by `setup-tls.sh`) |
+| `ALBERT_PUBLIC_URL` | `http://<primary IP>` | Base URL used in API responses while HTTPS is off (with HTTPS: `https://<host name of the certificate>`) |
+| `ALBERT_ADMIN_PORT` | `8443` | Port of the admin UI (own origin; HTTPS once a certificate is active) |
+| `ALBERT_DESKTOP_LINK_SECONDS` | `120` | Validity of a one-time desktop link |
+| `ALBERT_DESKTOP_SESSION_HOURS` | `8` | Validity of the desktop session (cookie) a link opens |
 | `ALBERT_DEFAULT_CPUS` | `1` | Global per-sandbox CPU limit (if the client has none) |
 | `ALBERT_DEFAULT_MEMORY_MB` | `2048` | Global per-sandbox RAM limit (an idle desktop needs ~450 MB, one browser page ~900 MB) |
 | `ALBERT_DEFAULT_DISK_GB` | `10` | Global per-sandbox disk size |
@@ -125,19 +136,30 @@ Sandboxes run code an AI agent controls, so they are isolated from everything bu
 - **Clients without internet access**: their sandboxes live in the second network `albert-sandbox-offline` (`ALBERT_OFFLINE_SUBNET`, created on first use). The firewall drops every connection from it except to `ALBERT_ALLOW_NETS`. The containers also get a DNS server nothing answers on (`ALBERT_OFFLINE_DNS`): Docker's embedded DNS resolves names from the host's network namespace and would otherwise bypass the firewall.
 - The rules are applied at boot before Docker starts (`albert-sandbox-firewall.service`), before every create/start, and checked by the watcher every minute; missing or outdated rules are restored automatically. A sandbox is never created or started without them. Status: `albert-ai-sandbox-manager firewall status`, also shown in the admin UI (Übersicht → Netz-Isolation).
 - **Container hardening**: no `CAP_SYS_ADMIN`, Docker's default seccomp profile, no `NET_RAW`/`MKNOD`, a real init process (`--init`, fast clean stops), process limit. Chrome runs with `--no-sandbox`, so it needs no extra privileges.
-- **Existing sandboxes**: containers in the old shared network are moved into the isolated network automatically (live, without restart). Hardening and a new image need a rebuild: `albert-ai-sandbox-manager recreate --outdated`, or "Neu aufbauen" in the admin UI. The rebuild keeps home directory, uploads, ports, URLs, credentials and limits; if it fails, the previous image is restored. Outdated sandboxes are marked "veraltet" in the admin UI and listed after every update by `install.sh`.
+- **Existing sandboxes**: containers in the old shared network are moved into the isolated network automatically (live, without restart). Hardening, the internal tokens and a new image need a rebuild: `albert-ai-sandbox-manager recreate --outdated`, or "Neu aufbauen" in the admin UI. The rebuild keeps home directory, uploads, ports, URLs and limits and renews VNC password and internal tokens (values that ever showed up in chats or logs become worthless); if it fails, the previous image is restored.
+
+## Access to Sandboxes
+Sandboxes run code an AI controls; whoever reaches a sandbox's shell reaches its data. Therefore:
+
+- **API key for everything**: MCP Hub and file service need `Authorization: Bearer <API key of the client>` like the REST API. nginx asks the manager before every request (`auth_request`) and forwards it with the sandbox's internal token; MCP Hub and file service check that token as well. Rotating or deleting the key in the admin UI closes MCP and files at once.
+- **User binding**: ALBERT | AI sends `X-Albert-User` (pseudonymous id of the user) with every request. A sandbox belongs to the user that created it; other users of the same client neither see nor reach it.
+- **Desktop with one-time links**: `POST /containers/<name>/desktop` returns a link that works once within two minutes and sets a desktop cookie for that sandbox only. The plain URL, a used or an expired link shows "link expired". The VNC password travels only in the URL fragment (never logged).
+- **No secrets in API answers**: VNC password and internal tokens are no longer returned.
+- **Admin UI on its own origin** (own port): pages served from sandboxes can never act in it; the admin cookie is limited to `/manager/`; nginx strips cookies before forwarding to a container; files from a sandbox are delivered with `Content-Security-Policy: sandbox`; the noVNC client files come from the host, not from the container.
+- **Legacy access** ("Alte Anbindung erlauben", per client): keeps ALBERT | AI versions without this update working (MCP with the fixed key, files without key, plain desktop URL, no user binding). On for clients that existed before the update, off for new clients. The overview warns while a client still has it. Outdated sandboxes are marked "veraltet" in the admin UI and listed after every update by `install.sh`.
 
 ## Sandbox Image
 `docker/Dockerfile` pins everything installed on top of Ubuntu (Node.js major line, MCP Hub, Playwright MCP, bash-mcp, Flask) via build arguments at the top of the file. MCP servers are installed at build time — nothing is downloaded when a sandbox starts. OS packages, Google Chrome and Firefox (from Mozilla's APT repository) are taken from their vendors with security updates. To update a component, change its version argument, run `install.sh` (rebuilds when `docker/` changed), test, then rebuild existing sandboxes with `recreate --outdated`.
 
 ## Admin Web UI
-Open `https://<host>/manager/admin/` and sign in. Pages:
+Open `https://<host>:8443/manager/admin/` (`/manager/admin/` on the main port redirects there) and sign in. Pages:
 - **Übersicht**: host resources, allocated CPU/RAM of running sandboxes, disk usage.
-- **Clients**: create (the API key is shown once), edit per-sandbox limits, quotas, running limit, the persistence permission, software profile and internet access, rotate the key, delete a client with all its sandboxes; per client all sandboxes with status, limits, disk usage, last activity and actions (start, stop, restart, change limits, live values, delete).
+- **Clients**: create (the API key is shown once), edit per-sandbox limits, quotas, running limit, the persistence permission, software profile, internet access and legacy access, rotate the key, delete a client with all its sandboxes; per client all sandboxes with status, user, limits, disk usage, last activity and actions (start, stop, restart, change limits, live values, delete). The sandbox name opens the desktop with a one-time link.
 - **Sandboxen**: all sandboxes across clients.
 - **Profile**: sandbox profiles with their packages, build status, build log and the clients using them.
 - **Admins**: add admin users, change passwords, delete admins.
 - **Wartung**: preview and run the cleanup (reconcile), audit log of all changes.
+- **Einstellungen**: HTTPS certificate (Let's Encrypt or own certificate, expiry, renewal) and the addresses allowed to open the admin UI (empty = all; loopback for an SSH tunnel always works; your own address must be in the list).
 
 Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove <username>`.
 
@@ -149,6 +171,9 @@ Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove
 - `recreate <name>` / `recreate --outdated` – rebuild with current image and hardening, data is kept
 - `firewall apply|status|remove` – network isolation
 - `profile list|show|create|set|delete|build|log|rebuild-outdated` – sandbox profiles
+- `desktop <name>` – one-time link to the desktop
+- `tls status|letsencrypt|custom|disable` – HTTPS certificate; `admin-access show|set <addr…>|clear` – addresses allowed for the admin UI; `site apply|show` – nginx site
+- `client set <id> --legacy-access yes|no` – former access without API key / user binding
 - `reconcile [--dry-run]` – clean up leftovers, `selfcheck`, `build` – rebuild the image
 
 Add `--json` for machine-readable output.
@@ -156,20 +181,22 @@ Add `--json` for machine-readable output.
 ## Manage Sandboxes over REST
 Integrators talk to the manager through nginx (`https://<host>/manager/`) or locally (`http://127.0.0.1:5001`) with Bearer authentication. See [SERVICES.md](SERVICES.md) for all endpoints.
 ```bash
-curl -X POST -H "Authorization: Bearer $ALBERT_API_KEY" -H "Content-Type: application/json" \
+curl -X POST -H "Authorization: Bearer $ALBERT_API_KEY" -H "X-Albert-User: $USER_PSEUDONYM" \
+     -H "Content-Type: application/json" \
      -d '{"name": "agent-lab-01", "resources": {"cpus": 1, "memoryMb": 2048}}' \
      https://<host>/manager/containers
 ```
-Responses include the noVNC desktop URL, the MCP Hub endpoint, the file service URLs, limits and usage.
+Responses include the MCP Hub endpoint, the file service URLs, limits and usage; `POST /containers/<name>/desktop` returns a one-time desktop link.
 
 ## File Transfer Services
 Each sandbox exposes a lightweight file bridge so agents can move artifacts in and out of the container. The service sits behind nginx and is namespaced per sandbox.
 
 ```bash
-curl -X POST -F "file=@model-output.json" http://<host>/<sandbox>/files/upload
-curl "http://<host>/<sandbox>/files/download?path=/tmp/albert-files/<uuid.ext>" --output ./downloaded.json
+H=(-H "Authorization: Bearer $ALBERT_API_KEY" -H "X-Albert-User: $USER_PSEUDONYM")
+curl "${H[@]}" -X POST -F "file=@model-output.json" https://<host>/<sandbox>/files/upload
+curl "${H[@]}" "https://<host>/<sandbox>/files/download?path=/tmp/albert-files/<uuid.ext>" --output ./downloaded.json
 ```
-Uploads land in `/tmp/albert-files` inside the sandbox and count towards the sandbox disk limit. Note: the file service does not enforce the per-sandbox `fileServiceToken` yet; access is protected by the unguessable sandbox name only.
+Uploads land in `/tmp/albert-files` inside the sandbox (owned by the desktop user, so the AI writes there without sudo) and count towards the sandbox disk limit. Without the client's API key (and the right user) the file service answers `401`/`403`, except for clients with legacy access.
 
 ## Container Lifecycle & Automatic Cleanup
 The watcher (`albert-inactivity-watcher.timer`, every minute):
@@ -184,7 +211,7 @@ Every removal deletes the container, its disk image (or legacy volume), its ngin
 
 Persistent sandboxes are excluded from max-age removal (`"persistent": true` at creation, `PATCH /containers/<name>/persistent`, CLI `--persistent`, or in the admin UI) — only for clients that are allowed to have them.
 
-Opening the desktop of a stopped sandbox shows a short explanation page (HTTP 503, reloads every 30 seconds) instead of "502 Bad Gateway".
+Opening the desktop of a stopped sandbox shows a short explanation page (HTTP 503, reloads every 30 seconds) instead of "502 Bad Gateway"; an expired or used desktop link shows "link expired" (HTTP 401).
 
 ## Development
 ```bash

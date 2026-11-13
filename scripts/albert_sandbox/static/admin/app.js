@@ -369,10 +369,22 @@
     csrf: "Sicherheits-Token ungültig",
     throttled: "Zu viele Fehlversuche",
     network: "Keine Verbindung",
+    lockout: "Eigene Adresse fehlt",
+    invalid_address: "Ungültige Adresse",
+    nginx_failed: "nginx hat die Änderung abgelehnt",
+    tls_key_mismatch: "Schlüssel passt nicht",
+    tls_name_mismatch: "Zertifikat passt nicht zum Namen",
+    tls_expired: "Zertifikat abgelaufen",
+    tls_key_encrypted: "Schlüssel mit Passwort",
+    tls_terms: "Nutzungsbedingungen",
+    tls_certbot_missing: "certbot fehlt",
+    tls_busy: "Anfrage läuft bereits",
   };
 
   function errorTitle(err) {
-    return (err && ERROR_TITLES[err.code]) || "Fehler";
+    if (err && ERROR_TITLES[err.code]) return ERROR_TITLES[err.code];
+    if (err && typeof err.code === "string" && err.code.startsWith("tls_")) return "Zertifikat";
+    return "Fehler";
   }
 
   function errorText(err) {
@@ -724,6 +736,25 @@
     };
   }
 
+  /** "Alte Anbindung erlauben" switch. Returns {node, input, value(), changed()}. */
+  function legacyAccessField(client) {
+    const initial = !!(client && client.legacyAccess);
+    const input = h("input", { type: "checkbox", class: "switch", name: "legacyAccess", checked: initial });
+    const node = h("label", { class: "switch-field" },
+      input,
+      h("span", null,
+        h("span", { class: "field-label" }, "Alte Anbindung erlauben"),
+        h("span", { class: "field-hint" },
+          "Nur für ALBERT | AI ohne Sicherheitsupdate: MCP mit festem Schlüssel, Dateien ohne Schlüssel, "
+          + "Desktop ohne Einmal-Link, keine Bindung an Benutzer. Nach dem Update von ALBERT ausschalten.")));
+    return {
+      node,
+      input,
+      value: () => input.checked,
+      changed: () => input.checked !== initial,
+    };
+  }
+
   /** "Software-Profil" select. Returns {node, value(), changed()}. */
   function profileSelectField(client, profiles) {
     const initial = client && client.profileId ? String(client.profileId) : "";
@@ -944,6 +975,7 @@
     profile: { title: "Profil", nav: "profiles", fn: viewProfileDetail },
     admins: { title: "Admins", nav: "admins", fn: viewAdmins },
     maintenance: { title: "Wartung", nav: "maintenance", fn: viewMaintenance },
+    settings: { title: "Einstellungen", nav: "settings", fn: viewSettings },
   };
 
   function parseRoute() {
@@ -1119,6 +1151,18 @@
         "Der Watcher repariert das innerhalb einer Minute automatisch. Bleibt der Hinweis, auf dem Host prüfen: "
         + "albert-ai-sandbox-manager firewall status"));
     }
+    if (ov.clientsLegacy) {
+      out.push(notice("warn", `${fmtNum(ov.clientsLegacy, 0)} Client${ov.clientsLegacy === 1 ? " nutzt" : "s nutzen"} `
+        + "noch die alte Anbindung.",
+        "MCP und Dateien ihrer Sandboxen sind ohne API-Key erreichbar, der Desktop ohne Einmal-Link. Sobald ALBERT | AI "
+        + "das Sicherheitsupdate hat, beim Client „Alte Anbindung erlauben“ ausschalten.",
+        h("a", { href: "#/clients" }, "Zu den Clients")));
+    }
+    if (ov.https && ov.https.active === false) {
+      out.push(notice("warn", "HTTPS ist nicht eingerichtet.",
+        "API-Keys, Dateien und MCP-Aufrufe gehen unverschlüsselt über das Netz.",
+        h("a", { href: "#/settings" }, "Zertifikat einrichten")));
+    }
 
     out.push(h("div", { class: "grid cols-4" + (out.length ? " mt-16" : "") },
       kpi("Clients", fmtNum(ov.clients, 0), null,
@@ -1279,7 +1323,10 @@
         : h("span", { class: "muted", title: "Mitgeliefertes Sandbox-Image" }, "Standard"),
       h("div", { class: "cell-sub" }, client.allowInternet === false
         ? h("span", { class: "badge warn" }, "ohne Internet")
-        : "mit Internet"));
+        : "mit Internet"),
+      client.legacyAccess ? h("div", { class: "cell-sub" }, h("span", {
+        class: "badge warn", title: "MCP und Dateien ohne API-Key, Desktop ohne Einmal-Link (Client-Einstellungen)",
+      }, "alte Anbindung")) : null);
   }
 
   function clientsTable(list) {
@@ -1324,6 +1371,7 @@
     const limits = clientLimitFields(null, ov);
     const policy = persistentPolicyField(null, ov);
     const internet = internetPolicyField(null);
+    const legacy = legacyAccessField(null);
     const profile = profileSelectField(null, profiles);
     const created = await modal({
       title: "Client anlegen",
@@ -1332,6 +1380,7 @@
       body: [
         h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), profile.node,
           policy.node, internet.node),
+        h("div", { class: "form-row" }, legacy.node),
         limits.nodes,
       ],
       onSubmit: async () => {
@@ -1346,7 +1395,7 @@
           method: "POST",
           body: {
             label: text, ...limits.values(), allowPersistent: policy.value(), allowInternet: internet.value(),
-            profileId: profile.value(),
+            profileId: profile.value(), legacyAccess: legacy.value(),
           },
         });
       },
@@ -1438,7 +1487,10 @@
               : h("strong", null, "Standard"),
             h("span", { class: "sep" }, "|"),
             "Internet: ",
-            h("strong", null, client.allowInternet === false ? "gesperrt" : "erlaubt")))));
+            h("strong", null, client.allowInternet === false ? "gesperrt" : "erlaubt"),
+            h("span", { class: "sep" }, "|"),
+            "Anbindung: ",
+            h("strong", null, client.legacyAccess ? "alt (ohne API-Key für MCP und Dateien)" : "mit API-Key und Benutzer")))));
     }
 
     /** Asks before the internet access of a client with sandboxes is switched. */
@@ -1455,7 +1507,8 @@
             allow ? "Verbindungen nach außen und Namensauflösung werden wieder möglich."
               : "Verbindungen nach außen und die Namensauflösung werden gesperrt."),
           notice("ok", "Daten bleiben erhalten.",
-            "Die Container werden dafür neu aufgebaut; Home-Verzeichnis, Uploads, Ports und Zugangsdaten bleiben gleich."
+            "Die Container werden dafür neu aufgebaut; Home-Verzeichnis, Uploads und Ports bleiben gleich, "
+            + "VNC-Passwort und interne Tokens werden erneuert."
             + (running ? ` ${running} laufende Sandbox${running === 1 ? " ist" : "en sind"} dabei kurz nicht erreichbar.` : "")),
         ],
         confirmLabel: "Speichern und umstellen",
@@ -1473,12 +1526,14 @@
       const limits = clientLimitFields(client, ov);
       const policy = persistentPolicyField(client, ov);
       const internet = internetPolicyField(client);
+      const legacy = legacyAccessField(client);
       const profile = profileSelectField(client, profiles);
       const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Änderungen speichern");
       const resetBtn = h("button", { type: "button", class: "btn" }, "Zurücksetzen");
       const status = h("span", { class: "state" });
       const form = h("form", { class: "panel panel-body" },
         h("div", { class: "form-row" }, field("Bezeichnung", label), profile.node, policy.node, internet.node),
+        h("div", { class: "form-row" }, legacy.node),
         limits.nodes,
         h("div", { class: "form-actions" }, saveBtn, resetBtn, status));
       resetBtn.addEventListener("click", () => renderForm());
@@ -1491,6 +1546,7 @@
         const payload = limits.changedValues();
         if (policy.changed()) payload.allowPersistent = policy.value();
         if (profile.changed()) payload.profileId = profile.value();
+        if (legacy.changed()) payload.legacyAccess = legacy.value();
         if (internet.changed()) {
           if (!(await confirmInternetSwitch(internet.value()))) return;
           payload.allowInternet = internet.value();
@@ -1633,6 +1689,7 @@
     image: "älteres Image (Sandbox-Image oder Software-Profil)",
     hardening: "ohne aktuelle Container-Härtung",
     network: "Netz passt nicht zur Client-Einstellung",
+    auth: "ohne Zugangsschutz für MCP und Dateien (interne Tokens)",
   };
 
   function outdatedBadge(s) {
@@ -1641,7 +1698,7 @@
     return h("div", null, h("span", {
       class: "badge warn",
       title: "Veraltet: " + reasons.join(", ") + ". „Neu aufbauen“ bringt die Sandbox auf den aktuellen Stand "
-        + "(Daten, Ports und Zugangsdaten bleiben erhalten).",
+        + "(Daten und Ports bleiben erhalten, Zugangsdaten werden erneuert).",
     }, "veraltet"));
   }
 
@@ -1706,19 +1763,28 @@
 
   function sandboxRow(s, showClient) {
     const pending = state.pending.get(s.name) || null;
-    const url = safeUrl(s.urls && s.urls.desktop);
-    // The desktop is only reachable while the sandbox runs.
+    // The desktop is only reachable while the sandbox runs; it opens with a one-time link.
+    let nameEl;
+    if (s.status === "running") {
+      nameEl = h("a", {
+        href: "#", class: "sbx-name", role: "button",
+        title: "Desktop in neuem Tab öffnen (Einmal-Link)",
+      }, s.name, " ↗");
+      nameEl.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        openDesktop(s.name);
+      });
+    } else {
+      nameEl = h("span", {
+        class: "sbx-name",
+        title: s.status === "stopped" ? "Desktop erst nach dem Start erreichbar" : null,
+      }, s.name);
+    }
     const nameCell = h("td", null,
-      url && s.status === "running"
-        ? h("a", {
-          href: url, target: "_blank", rel: "noopener noreferrer", class: "sbx-name",
-          title: "Desktop in neuem Tab öffnen",
-        }, s.name, " ↗")
-        : h("span", {
-          class: "sbx-name",
-          title: s.status === "stopped" ? "Desktop erst nach dem Start erreichbar" : null,
-        }, s.name),
-      (s.profile || s.internet === false) ? h("div", { class: "cell-tags" },
+      nameEl,
+      (s.profile || s.internet === false || s.user) ? h("div", { class: "cell-tags" },
+        s.user ? h("span", { class: "tag", title: "Gebunden an diesen ALBERT-Benutzer (Pseudonym)" },
+          "Benutzer " + s.user) : null,
         s.profile ? h("span", { class: "tag", title: "Software-Profil des Clients" }, s.profile.name) : null,
         s.internet === false ? h("span", { class: "tag warn", title: "Kein Internetzugriff, keine Namensauflösung" },
           "ohne Internet") : null) : null,
@@ -1752,6 +1818,23 @@
       h("td", null, limitsCell(s)),
       h("td", null, diskCell(s)),
       h("td", { class: "actions" }, sandboxActions(s, pending)));
+  }
+
+  /** Opens the desktop of a sandbox with a fresh one-time link (valid once, for two minutes). */
+  async function openDesktop(name) {
+    // Open the tab right away (popup blockers allow it only during the click), then point it to the link.
+    const win = window.open("", "_blank");
+    if (win) win.opener = null;
+    try {
+      const data = await api(`sandboxes/${enc(name)}/desktop`, { method: "POST" });
+      const url = safeUrl(data.desktop && data.desktop.url);
+      if (!url) throw new Error("Kein Desktop-Link erhalten.");
+      if (win) win.location.href = url;
+      else window.location.href = url;
+    } catch (err) {
+      if (win) win.close();
+      showError(err, "Desktop nicht geöffnet");
+    }
   }
 
   // Inline SVG icons (24x24, stroke = currentColor); built with DOM APIs because of the CSP.
@@ -1817,7 +1900,8 @@
     buttons.push(mk("rebuild", "Neu aufbauen", (s.outdated || []).length || s.status === "error" ? "primary" : "",
       () => recreateSandbox(s), {
         disabled: transitional, busyFor: "recreate",
-        title: "Container mit aktuellem Image, Härtung und Netz neu erstellen; Daten, Ports und Zugangsdaten bleiben",
+        title: "Container mit aktuellem Image, Härtung und Netz neu erstellen; Daten und Ports bleiben, "
+          + "Zugangsdaten werden erneuert",
       }));
     buttons.push(mk("live", "Live-Werte", "", () => openStatsDialog(s), { title: "CPU, RAM, Netz (docker stats)" }));
     buttons.push(mk("remove", "Löschen", "danger-outline", () => deleteSandbox(s), {
@@ -1855,7 +1939,8 @@
           s.internet === false ? "ohne Internet" : "mit Internet", ") neu erstellt."),
         reasons.length ? h("p", null, "Grund: " + reasons.join(", ") + ".") : null,
         notice("ok", "Daten bleiben erhalten.",
-          "Home-Verzeichnis, Uploads, Ports, Desktop-URL und Zugangsdaten bleiben gleich. "
+          "Home-Verzeichnis, Uploads, Ports und Desktop-URL bleiben gleich; VNC-Passwort und interne Tokens werden "
+          + "erneuert, ein offener Desktop muss neu geöffnet werden. "
           + (s.status === "running"
             ? "Die Sandbox ist dabei kurz nicht erreichbar, laufende Programme im Desktop werden beendet."
             : "Die Sandbox bleibt danach gestoppt.")),
@@ -2711,6 +2796,243 @@
     }
     return h("details", { class: "json" }, h("summary", null, summary),
       h("pre", null, JSON.stringify(parsed, null, 2)));
+  }
+
+  // ------------------------------------------------------------------------
+  // view: Einstellungen (HTTPS certificate, admin addresses)
+  // ------------------------------------------------------------------------
+
+  const TLS_MODE = { letsencrypt: "Let's Encrypt", custom: "eigenes Zertifikat" };
+
+  function viewSettings(root, _params, ctx) {
+    root.append(pageHead("Einstellungen", "HTTPS-Zertifikat des Hosts und Zugriff auf diese Verwaltung"));
+    const body = h("div", null, loadingEl());
+    root.append(body);
+    let data = null;
+    let poll = null;
+
+    function stopPoll() {
+      if (poll) clearTimeout(poll);
+      poll = null;
+    }
+
+    async function load() {
+      const res = await api("settings");
+      if (!ctx.alive()) return;
+      data = res.settings;
+      body.replaceChildren(...renderSettings(data));
+      stopPoll();
+      if (data.job && data.job.state === "running") {
+        poll = setTimeout(() => { if (ctx.alive()) refresh({ silent: true }); }, 2500);
+      }
+    }
+
+    function renderSettings(st) {
+      const cert = st.certificate || {};
+      const job = st.job || {};
+      const out = [];
+      const leBtn = h("button", {
+        type: "button", class: "btn", disabled: !st.certbotAvailable || job.state === "running",
+        title: st.certbotAvailable ? null : "certbot ist auf dem Host nicht installiert (install.sh installiert es).",
+      }, "Let's Encrypt einrichten");
+      leBtn.addEventListener("click", () => openLetsEncrypt(st));
+      const customBtn = h("button", { type: "button", class: "btn" }, "Eigenes Zertifikat hochladen");
+      customBtn.addEventListener("click", () => openCustomCert(st));
+      const offBtn = st.active ? h("button", { type: "button", class: "btn danger-outline" }, "HTTPS ausschalten") : null;
+      if (offBtn) offBtn.addEventListener("click", () => disableTls(st));
+      const daysText = isNum(cert.daysLeft) ? ` (noch ${fmtNum(cert.daysLeft, 0)} Tage)` : "";
+      const tlsPanel = h("div", { class: "panel" }, h("div", { class: "panel-body" },
+        h("div", { class: "panel-title" }, "HTTPS-Zertifikat"),
+        h("dl", { class: "kv" },
+          h("dt", null, "Status"),
+          h("dd", null, st.active ? h("span", { class: "badge ok" }, "aktiv") : h("span", { class: "badge warn" }, "aus – nur HTTP")),
+          st.mode ? h("dt", null, "Art") : null, st.mode ? h("dd", null, TLS_MODE[st.mode] || st.mode) : null,
+          st.host ? h("dt", null, "Host-Name") : null, st.host ? h("dd", { class: "mono" }, st.host) : null,
+          cert.issuer ? h("dt", null, "Aussteller") : null,
+          cert.issuer ? h("dd", { class: "small" }, cert.issuer, cert.selfSigned ? " (selbst signiert)" : null) : null,
+          cert.notAfter ? h("dt", null, "Gültig bis") : null,
+          cert.notAfter ? h("dd", null, timeEl(cert.notAfter), daysText) : null,
+          (cert.names || []).length ? h("dt", null, "Gilt für") : null,
+          (cert.names || []).length ? h("dd", { class: "mono small" }, cert.names.join(", ")) : null,
+          h("dt", null, "Öffentliche Adresse"), h("dd", { class: "mono" }, st.publicUrl || "–")),
+        (st.warnings || []).map((w) => notice("warn", null, w)),
+        job.state === "running" ? notice("ok", "Zertifikat wird bei Let's Encrypt angefordert …",
+          `Für ${job.host}. Das dauert meist unter einer Minute.`) : null,
+        job.state === "failed" ? notice("danger", "Die letzte Anforderung ist fehlgeschlagen.",
+          h("pre", { class: "build-log compact" }, job.error || "")) : null,
+        h("p", { class: "metric-note mt-12" },
+          "Mit HTTPS nimmt der Host API-, MCP- und Datei-Aufrufe nur noch verschlüsselt an; ALBERT | AI muss dann "
+          + "„https://“ in der Adresse des Sandbox-Servers verwenden. Diese Verwaltung läuft dann ebenfalls über HTTPS."),
+        h("div", { class: "form-actions" }, leBtn, customBtn, offBtn)));
+
+      const allow = h("textarea", {
+        class: "mono", rows: "5", name: "allow", spellcheck: "false",
+        placeholder: "z. B.\n203.0.113.7\n10.0.0.0/16",
+      });
+      allow.value = (st.adminAllow || []).join("\n");
+      const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Speichern");
+      const accessForm = h("form", { class: "panel" }, h("div", { class: "panel-body" },
+        h("div", { class: "panel-title" }, "Zugriff auf die Verwaltung"),
+        h("dl", { class: "kv" },
+          h("dt", null, "Adresse der Verwaltung"),
+          h("dd", null, safeUrl(st.adminUrl)
+            ? h("a", { href: safeUrl(st.adminUrl), class: "mono" }, st.adminUrl) : h("span", { class: "mono" }, st.adminUrl || "–")),
+          h("dt", null, "Deine Adresse"), h("dd", { class: "mono" }, st.yourAddress || "–")),
+        field("Erlaubte Adressen", allow,
+          "Eine IP-Adresse oder ein Netz (CIDR) pro Zeile. Leer = von überall erreichbar. "
+          + "127.0.0.1 (SSH-Tunnel auf dem Host) ist immer erlaubt; deine eigene Adresse muss enthalten sein."),
+        h("div", { class: "form-actions" }, saveBtn)));
+      accessForm.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        saveBtn.disabled = true;
+        saveBtn.classList.add("busy");
+        try {
+          const res = await api("settings/admin-access", { method: "PUT", body: { allow: allow.value } });
+          toast((res.settings.adminAllow || []).length ? "Zugriff eingeschränkt." : "Verwaltung ist von überall erreichbar.",
+            { type: "success" });
+          if (ctx.alive()) refresh({ silent: true });
+        } catch (err) {
+          showError(err, "Speichern fehlgeschlagen");
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.classList.remove("busy");
+        }
+      });
+      out.push(h("div", { class: "grid cols-2" }, tlsPanel, accessForm));
+      return out;
+    }
+
+    /** After HTTPS was switched on or off the admin UI moves (http <-> https); offer the new address. */
+    async function showMoved(url, title, text) {
+      const target = safeUrl(url);
+      await modal({
+        title,
+        noCancel: true,
+        submitLabel: "Zur neuen Adresse",
+        body: [h("p", null, text), target ? h("p", { class: "mono" }, target) : null],
+      });
+      if (target) window.location.href = target;
+    }
+
+    function pemField(label, name, required, hint) {
+      const area = h("textarea", { class: "mono", rows: "6", name, required, spellcheck: "false",
+        placeholder: "-----BEGIN ...-----" });
+      const file = h("input", { type: "file", accept: ".pem,.crt,.cer,.key,.txt", class: "file-input",
+        "aria-label": label + " aus Datei laden" });
+      file.addEventListener("change", () => {
+        const f = file.files && file.files[0];
+        if (!f) return;
+        if (f.size > 65536) {
+          toast("Die Datei ist zu groß (max. 64 KB).", { type: "error" });
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => { area.value = String(reader.result || ""); };
+        reader.readAsText(f);
+      });
+      return { area, node: field(label, h("div", null, area, h("div", { class: "mt-8" }, file)), hint) };
+    }
+
+    async function openCustomCert(st) {
+      const host = h("input", { type: "text", name: "host", required: true, autocomplete: "off", spellcheck: "false",
+        placeholder: "sandbox.example.com", value: st.host || "" });
+      const cert = pemField("Zertifikat", "certificate", true, "PEM; darf die Zwischenzertifikate schon enthalten.");
+      const chain = pemField("Zwischenzertifikate (optional)", "chain", false, null);
+      const key = pemField("Privater Schlüssel", "privateKey", true,
+        "PEM ohne Passwort. Wird nur auf dem Host gespeichert (nur für root lesbar) und nicht wieder angezeigt.");
+      const res = await modal({
+        title: "Eigenes Zertifikat hochladen",
+        wide: true,
+        submitLabel: "Prüfen und aktivieren",
+        body: [
+          field("Host-Name", host, "Unter diesem Namen (oder dieser IP) erreichen ALBERT | AI und die Browser den Host."),
+          cert.node, chain.node, key.node,
+        ],
+        onSubmit: () => api("settings/tls/custom", {
+          method: "POST",
+          body: { host: host.value.trim(), certificate: cert.area.value, chain: chain.area.value,
+            privateKey: key.area.value },
+        }),
+      });
+      if (!res || !res.settings) return;
+      await showMoved(res.settings.adminUrl, "HTTPS ist aktiv",
+        "Das Zertifikat ist geprüft und aktiv. Die Verwaltung ist jetzt nur noch über HTTPS erreichbar:");
+    }
+
+    async function openLetsEncrypt(st) {
+      const host = h("input", { type: "text", name: "host", required: true, autocomplete: "off", spellcheck: "false",
+        placeholder: "sandbox.example.com", value: st.mode === "letsencrypt" ? st.host || "" : "" });
+      const email = h("input", { type: "email", name: "email", required: true, autocomplete: "email",
+        placeholder: "it@example.com" });
+      const terms = h("input", { type: "checkbox", class: "switch", name: "acceptTerms" });
+      const res = await modal({
+        title: "Let's Encrypt einrichten",
+        submitLabel: "Zertifikat anfordern",
+        body: [
+          field("Host-Name", host, "Muss im DNS auf diesen Host zeigen; Port 80 muss aus dem Internet erreichbar sein."),
+          field("E-Mail-Adresse", email, "Let's Encrypt schickt Hinweise zum Ablauf an diese Adresse."),
+          h("label", { class: "switch-field" }, terms, h("span", null,
+            h("span", { class: "field-label" }, "Nutzungsbedingungen von Let's Encrypt akzeptieren"),
+            h("span", { class: "field-hint" }, h("a", {
+              href: "https://letsencrypt.org/repository/", target: "_blank", rel: "noopener noreferrer",
+            }, "letsencrypt.org/repository")))),
+          notice("ok", null, "Die Erneuerung läuft danach automatisch (certbot-Timer des Hosts)."),
+        ],
+        onSubmit: () => {
+          if (!terms.checked) throw new Error("Bitte die Nutzungsbedingungen von Let's Encrypt akzeptieren.");
+          return api("settings/tls/letsencrypt", {
+            method: "POST", body: { host: host.value.trim(), email: email.value.trim(), acceptTerms: true },
+          });
+        },
+      });
+      if (!res || !res.settings) return;
+      toast("Zertifikat wird angefordert …", { type: "info" });
+      const target = `https://${host.value.trim()}:${res.settings.adminPort}/manager/admin/#/settings`;
+      // Poll until the job is done; once HTTPS is active this page (HTTP) loses its connection.
+      for (let i = 0; i < 90 && ctx.alive(); i += 1) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let now;
+        try {
+          now = (await api("settings")).settings;
+        } catch (_) {
+          await showMoved(target, "HTTPS ist aktiv", "Die Verwaltung ist jetzt nur noch über HTTPS erreichbar:");
+          return;
+        }
+        const job = now.job || {};
+        if (job.state === "done" || now.active) {
+          await showMoved(now.adminUrl, "HTTPS ist aktiv", "Das Zertifikat ist ausgestellt und aktiv. Die Verwaltung "
+            + "ist jetzt nur noch über HTTPS erreichbar:");
+          return;
+        }
+        if (job.state === "failed") {
+          if (ctx.alive()) refresh({ silent: true });
+          showError({ code: "tls_letsencrypt_failed", message: job.error || "Unbekannter Fehler" },
+            "Let's Encrypt fehlgeschlagen");
+          return;
+        }
+      }
+      if (ctx.alive()) refresh({ silent: true });
+    }
+
+    async function disableTls(st) {
+      const res = await confirmDialog({
+        title: "HTTPS ausschalten",
+        message: [
+          h("p", null, "Der Host nimmt danach wieder unverschlüsselte Verbindungen an."),
+          notice("warn", "API-Keys und Dateien gehen dann wieder im Klartext über das Netz.",
+            "ALBERT | AI muss danach „http://“ in der Adresse des Sandbox-Servers verwenden."),
+        ],
+        confirmLabel: "HTTPS ausschalten",
+        danger: true,
+        onConfirm: () => api("settings/tls", { method: "DELETE" }),
+      });
+      if (!res || !res.settings) return;
+      await showMoved(res.settings.adminUrl, "HTTPS ist aus", "Die Verwaltung ist jetzt über HTTP erreichbar:");
+    }
+
+    const refresh = ({ silent = false } = {}) => guarded(ctx, body, load, silent && data !== null);
+    refresh();
+    return { refresh };
   }
 
   function viewMaintenance(root, _params, ctx) {
