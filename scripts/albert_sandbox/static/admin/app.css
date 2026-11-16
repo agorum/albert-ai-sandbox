@@ -632,9 +632,10 @@ dialog .limit-groups { grid-template-columns: minmax(0, 1fr); }
 .switch-stack > * + * { margin-top: 14px; }
 /* lifetime: one row per value, label left, input right (labels never push inputs down) */
 .life-rows { display: grid; gap: 12px; }
-.life-row { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 14px; align-items: center; cursor: default; }
+.life-row { display: grid; grid-template-columns: minmax(0, 1fr) 130px; gap: 12px; align-items: center; cursor: default; }
 .life-row .field-label, .life-row .field-hint { display: block; }
 .life-settings { display: grid; gap: 14px 32px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); align-items: start; }
+.life-settings td:nth-child(2) { white-space: nowrap; }
 @media (max-width: 900px) { .life-settings { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 420px) { .life-row { grid-template-columns: minmax(0, 1fr); } }
 /* label + switch in one row */

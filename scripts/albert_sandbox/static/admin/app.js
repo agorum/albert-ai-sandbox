@@ -735,9 +735,9 @@
     { key: "inactivitySeconds", label: "Anhalten nach Inaktivität", unit: "Min.", factor: 60, persistent: true,
       hint: "ohne Zugriff und ohne offene Verbindung (Desktop, MCP, Dateien); Daten bleiben",
       short: "alle Sandboxen · Daten bleiben" },
-    { key: "maxAgeSeconds", label: "Löschen, wenn ungenutzt, nach", unit: "Std.", factor: 3600, persistent: false,
+    { key: "maxAgeSeconds", label: "Ungenutzt löschen nach", unit: "Std.", factor: 3600, persistent: false,
       hint: "ab diesem Alter, sobald die Sandbox nicht mehr genutzt wird",
-      short: "nur nicht-persistente · sobald ungenutzt" },
+      short: "nur nicht-persistente" },
     { key: "maxLifetimeSeconds", label: "Höchstlaufzeit", unit: "Std.", factor: 3600, persistent: false,
       hint: "spätestens dann gelöscht, auch bei offenem Desktop",
       short: "nur nicht-persistente · auch bei Nutzung" },
@@ -768,7 +768,7 @@
       const n = numInput({
         name: f.key, min: 0, step: "any", unit: f.unit,
         value: isNum(shown) ? +(shown / f.factor).toFixed(2) : "",
-        placeholder: perClient && isNum(glob) ? `global: ${isNum(glob) && glob ? +(glob / f.factor).toFixed(2) : "aus"}` : "",
+        placeholder: perClient && isNum(glob) ? `global ${glob ? +(glob / f.factor).toFixed(2) : "aus"}` : "",
       });
       return { f, n };
     });
