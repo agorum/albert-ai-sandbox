@@ -1323,6 +1323,7 @@
       const ov = await api("overview");
       state.overview = ov;
       state.overviewAt = Date.now();
+      setProposalBadge(ov.profileProposals || 0);
       if (!ctx.alive()) return;
       body.replaceChildren(...renderOverview(ov));
     }
@@ -2387,7 +2388,7 @@
       rows.push(h("dt", null, "Nicht übernommen"), h("dd", null, h("ul", { class: "capture-list" },
         hints.map((x) => h("li", null, h("span", { class: "mono small" }, x.path + (x.kind === "dir" ? "/" : "")), " ",
           h("span", { class: "faint" }, (x.change === "added" ? "neu" : "geändert")
-            + (x.files ? ` · ${x.files} Dateien darin` : "")))),
+            + (x.files ? ` · ${x.files} ${x.files === 1 ? "Datei" : "Dateien"} darin` : "")))),
         cap.hintsMore ? h("li", { class: "faint" }, `… und ${cap.hintsMore} weitere`) : null)));
     }
     if ((cap.skipped || []).length) {
@@ -2957,8 +2958,11 @@
       storeProfiles(data);
       if (!ctx.alive()) return;
       const proposals = state.profiles.filter((p) => p.proposal);
-      body.replaceChildren(...(proposals.length ? [proposalsSection(proposals, refresh)] : []),
-        profilesTable(state.profiles.filter((p) => !p.proposal), refresh),
+      const table = profilesTable(state.profiles.filter((p) => !p.proposal), refresh);
+      body.replaceChildren(...(proposals.length
+        ? [proposalsSection(proposals, refresh),
+          h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", null, "Profile")), table)]
+        : [table]),
         h("p", { class: "metric-note mt-12" },
           "Basis aller Profile: ", h("span", { class: "mono" }, data.baseImage || "–"),
           ". Wird das Sandbox-Image bei einem Update neu gebaut, baut install.sh die Profile automatisch nach; "
@@ -3060,7 +3064,9 @@
       let actions = [buildBtn, cloneBtn, deleteBtn];
       if (profile.proposal) {
         const acceptBtn = h("button", { type: "button", class: "btn primary" }, "Annehmen und bauen");
-        acceptBtn.addEventListener("click", () => acceptProposal(profile, { after: () => refresh({ silent: true }) }));
+        acceptBtn.addEventListener("click", () => acceptProposal(profile, {
+          after: () => { formRendered = false; refresh({ silent: true }); },
+        }));
         deleteBtn.textContent = "Verwerfen";
         actions = [acceptBtn, cloneBtn, deleteBtn];
       }
@@ -3187,7 +3193,9 @@
         h("summary", null, "Erzeugtes Dockerfile"),
         h("pre", { class: "build-log compact" }, profile.dockerfile || ""));
       const saveBtn = h("button", { type: "submit", class: "btn" }, "Speichern");
-      const saveBuildBtn = h("button", { type: "button", class: "btn primary" }, "Speichern und bauen");
+      // a proposal is built with "Annehmen und bauen" (head), which also allows it for the client
+      const saveBuildBtn = h("button", { type: "button", class: "btn primary", hidden: !!profile.proposal },
+        "Speichern und bauen");
       const resetBtn = h("button", { type: "button", class: "btn ghost" }, "Zurücksetzen");
       const form = h("form", { class: "panel panel-body" },
         h("div", { class: "form-row" }, field("Name", name),
