@@ -1,6 +1,7 @@
 """Internal targets ("allow nets"): global (admin settings / ALBERT_ALLOW_NETS)
 and per client, with an own sandbox network for clients with own targets."""
 import sqlite3
+import subprocess
 
 import pytest
 
@@ -8,6 +9,7 @@ from albert_sandbox import cli, clients, config, db, netctl, reconcile, sandboxe
 from albert_sandbox.errors import BadRequest
 
 NET = "albert-sandbox"
+REAL_APPLY = netctl.apply_firewall  # conftest replaces it by a fake for every test
 
 
 @pytest.fixture
@@ -189,8 +191,12 @@ def test_reconcile_removes_networks_of_deleted_clients(env, make_client):
     for c in (keep, gone):
         netctl.ensure_network(netctl.placement(_client(c["id"])))
     name = sandboxes.create(gone["id"])["name"]
+    env["firewall"]["ok"] = False  # the rules still contain the client network
+    applied = env["firewall"]["applied"]
     sandboxes.delete_client(gone["id"])
     assert name not in env["docker"].containers
+    assert env["firewall"]["applied"] == applied + 1  # its rules are dropped at once
+    assert netctl.policy()[1] == [netctl.ClientRule("172.29.0.0/24", False, ("10.0.5.0/24",))]
     result = reconcile.reconcile()
     assert {"action": "remove-network", "target": f"{NET}-c{gone['id']}",
             "detail": "network of a deleted client"} in result["actions"]
@@ -256,3 +262,32 @@ def test_upgrade_adds_the_target_columns(env):
         assert row["allow_nets"] is None and row["net_subnet"] is None
         assert netctl.placement(row).network == NET
         assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 7
+
+
+def test_firewall_is_replaced_in_one_step(env, make_client, monkeypatch):
+    make_client("x", allow_nets="10.0.7.0/24")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((list(cmd), kw.get("input")))
+        return subprocess.CompletedProcess(cmd, 1 if "-C" in cmd else 0, "", "")
+    monkeypatch.setattr(netctl.subprocess, "run", fake_run)
+    REAL_APPLY(use_docker=False)
+    restores = [inp for cmd, inp in calls if cmd[0] == "iptables-restore"]
+    assert len(restores) == 1 and calls[0][0] == ["iptables-restore", "-w", "10", "--noflush"]
+    text = restores[0]
+    assert text.splitlines()[:3] == ["*filter", ":ALBERT-SANDBOX - [0:0]", ":ALBERT-SANDBOX-IN - [0:0]"]
+    assert '-m comment --comment "albert-sandbox ' in text and text.splitlines()[-1] == "COMMIT"
+    assert "-A ALBERT-SANDBOX -s 172.29.0.0/24 -d 10.0.7.0/24 -j RETURN" in text
+    assert "-A ALBERT-SANDBOX-IN -j DROP" in text
+    # never flushed rule by rule (that would leave the chain open for a moment)
+    assert not any("-F" in cmd or "-A" in cmd for cmd, _ in calls if cmd[0] == "iptables")
+    inserted = [cmd for cmd, _ in calls if cmd[:4] == ["iptables", "-w", "10", "-I"]]
+    assert ["iptables", "-w", "10", "-I", "INPUT", "1", "-s", "172.29.0.0/16", "-j", "ALBERT-SANDBOX-IN"] in inserted
+
+
+def test_client_network_outside_a_changed_pool_stays_cut_off_from_the_host(env):
+    config.configure(client_subnet_pool="172.28.0.0/16")
+    rules = [netctl.ClientRule("172.28.1.0/24", False, ()), netctl.ClientRule("172.29.0.0/24", False, ())]
+    assert netctl._input_sources("172.30.0.0/16", "172.31.0.0/16", rules) == [
+        "172.30.0.0/16", "172.31.0.0/16", "172.28.0.0/16", "172.29.0.0/24"]

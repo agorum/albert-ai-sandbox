@@ -843,6 +843,12 @@ def delete_client(client_id: int, actor: str = "admin") -> Dict[str, Any]:
             clients.delete_record(conn, client_id)
             db.audit(conn, actor, "client.delete", client["label"] or str(client_id),
                      {"clientId": client_id, "sandboxes": removed})
+    if client["net_subnet"]:
+        # Drop the rules of its own network at once (reconcile removes the network itself).
+        try:
+            netctl.ensure_firewall()
+        except SandboxError:
+            pass  # the watcher re-applies the rules within a minute
     return {"deleted": client_id, "removedSandboxes": removed}
 
 

@@ -455,8 +455,43 @@ def _subnets(use_docker: bool) -> Tuple[str, str]:
     return network_subnet(use_docker=use_docker), network_subnet(use_docker=use_docker, offline=True)
 
 
-def _input_sources(subnet: str, offline_subnet: str) -> List[str]:
-    return [subnet, offline_subnet, settings().client_subnet_pool]
+def _input_sources(subnet: str, offline_subnet: str, client_rules: Iterable[ClientRule] = ()) -> List[str]:
+    """Sources whose connections to the host go through CHAIN_IN: the shared networks,
+    the client pool and client networks outside the pool (pool changed later)."""
+    pool = settings().client_subnet_pool
+    sources = [subnet, offline_subnet, pool]
+    try:
+        pool_net: Optional[ipaddress.IPv4Network] = ipaddress.ip_network(pool, strict=False)
+    except ValueError:
+        pool_net = None
+    for rule in client_rules:
+        try:
+            inside = pool_net is not None and ipaddress.ip_network(rule.subnet, strict=False).subnet_of(pool_net)
+        except (TypeError, ValueError):
+            inside = False
+        if not inside and rule.subnet not in sources:
+            sources.append(rule.subnet)
+    return sources
+
+
+def _restore(chains: Sequence[Tuple[str, List[List[str]]]], fingerprint: str) -> None:
+    """Replace the chains in one step (iptables-restore): flushing them first and
+    adding the rules one by one would leave them empty - i.e. open - for a moment."""
+    lines = ["*filter"]
+    lines += [f":{chain} - [0:0]" for chain, _ in chains]
+    marker = " ".join(_marker(fingerprint)).replace(f"albert-sandbox {fingerprint}",
+                                                     f'"albert-sandbox {fingerprint}"')
+    for chain, rules in chains:
+        lines.append(f"-A {chain} {marker}")
+        lines += [" ".join(["-A", chain, *rule]) for rule in rules]
+    lines.append("COMMIT")
+    try:
+        proc = subprocess.run(["iptables-restore", "-w", "10", "--noflush"], input="\n".join(lines) + "\n",
+                              capture_output=True, text=True, timeout=60)
+    except FileNotFoundError as exc:
+        raise NetworkError("iptables-restore not found - cannot isolate sandboxes") from exc
+    if proc.returncode != 0:
+        raise NetworkError(f"iptables-restore failed: {proc.stderr.strip()}")
 
 
 def firewall_status(use_docker: bool = True) -> Dict[str, Any]:
@@ -473,8 +508,9 @@ def firewall_status(use_docker: bool = True) -> Dict[str, Any]:
         "inputJump": _iptables(["-C", "INPUT", "-s", subnet, "-j", CHAIN_IN], check=False).returncode == 0,
         "inputJumpOffline": _iptables(["-C", "INPUT", "-s", offline_subnet, "-j", CHAIN_IN],
                                       check=False).returncode == 0,
-        "inputJumpClients": _iptables(["-C", "INPUT", "-s", s.client_subnet_pool, "-j", CHAIN_IN],
-                                      check=False).returncode == 0,
+        "inputJumpClients": all(
+            _iptables(["-C", "INPUT", "-s", net, "-j", CHAIN_IN], check=False).returncode == 0
+            for net in _input_sources(subnet, offline_subnet, rules)[2:]),
     }
     return {"enabled": True, "ok": all(checks.values()), "subnet": subnet, "offlineSubnet": offline_subnet,
             "clientSubnetPool": s.client_subnet_pool, "clientNetworks": len(rules),
@@ -492,19 +528,13 @@ def apply_firewall(use_docker: bool = True) -> Dict[str, Any]:
     subnet, offline_subnet = _subnets(use_docker)
     global_nets, rules = policy()
     fwd, inp, fingerprint = desired_rules(subnet, offline_subnet, global_nets, rules)
-    for chain, chain_rules in ((CHAIN_FWD, fwd), (CHAIN_IN, inp)):
-        if _iptables(["-n", "-L", chain], check=False).returncode != 0:
-            _iptables(["-N", chain])
-        _iptables(["-F", chain])
-        _iptables(["-A", chain, *_marker(fingerprint)])
-        for rule in chain_rules:
-            _iptables(["-A", chain, *rule])
+    _restore(((CHAIN_FWD, fwd), (CHAIN_IN, inp)), fingerprint)
     # DOCKER-USER exists once dockerd ran; create it otherwise (dockerd keeps it).
     if _iptables(["-n", "-L", "DOCKER-USER"], check=False).returncode != 0:
         _iptables(["-N", "DOCKER-USER"])
     if _iptables(["-C", "DOCKER-USER", "-j", CHAIN_FWD], check=False).returncode != 0:
         _iptables(["-I", "DOCKER-USER", "1", "-j", CHAIN_FWD])
-    for net in _input_sources(subnet, offline_subnet):
+    for net in _input_sources(subnet, offline_subnet, rules):
         if _iptables(["-C", "INPUT", "-s", net, "-j", CHAIN_IN], check=False).returncode != 0:
             _iptables(["-I", "INPUT", "1", "-s", net, "-j", CHAIN_IN])
     return {"enabled": True, "applied": True, "subnet": subnet, "offlineSubnet": offline_subnet,
@@ -525,7 +555,7 @@ def remove_firewall() -> None:
     """Unhook and delete both chains (uninstall)."""
     while _iptables(["-D", "DOCKER-USER", "-j", CHAIN_FWD], check=False).returncode == 0:
         pass
-    for net in _input_sources(*_subnets(use_docker=True)):
+    for net in _input_sources(*_subnets(use_docker=True), policy()[1]):
         while _iptables(["-D", "INPUT", "-s", net, "-j", CHAIN_IN], check=False).returncode == 0:
             pass
     for chain in (CHAIN_FWD, CHAIN_IN):
