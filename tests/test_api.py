@@ -142,18 +142,20 @@ def test_admin_client_management_flow(env, http):
 def test_admin_user_management(env, http):
     csrf = _login(http)
     h = {"X-CSRF-Token": csrf}
-    assert http.post("/admin/api/admins", headers=h, json={"username": "zwei", "password": "kurz"}).status_code == 400
-    second = http.post("/admin/api/admins", headers=h, json={"username": "zwei", "password": "langes-passwort-1"})
+    assert http.post("/admin/api/admins", headers=h, json={"username": "zwei", "password": "kurz", "confirmPassword": "sehr-geheim-123"}).status_code == 400
+    second = http.post("/admin/api/admins", headers=h, json={"username": "zwei", "password": "langes-passwort-1", "confirmPassword": "sehr-geheim-123"})
     assert second.status_code == 201
     admins_list = http.get("/admin/api/admins").get_json()["admins"]
     me = next(a for a in admins_list if a["self"])
-    assert http.delete(f"/admin/api/admins/{me['id']}", headers=h).status_code == 400
+    assert http.delete(f"/admin/api/admins/{me['id']}", headers=h, json={"confirmPassword": "sehr-geheim-123"}).status_code == 400
     assert http.post(f"/admin/api/admins/{me['id']}/password", headers=h,
                      json={"currentPassword": "falsch", "password": "neues-passwort-1"}).status_code == 400
     assert http.post(f"/admin/api/admins/{me['id']}/password", headers=h,
                      json={"currentPassword": "sehr-geheim-123", "password": "neues-passwort-1"}).status_code == 200
     other = second.get_json()["admin"]["id"]
-    assert http.delete(f"/admin/api/admins/{other}", headers=h).status_code == 200
+    assert http.delete(f"/admin/api/admins/{other}", headers=h).status_code == 403  # password needed
+    assert http.delete(f"/admin/api/admins/{other}", headers=h,
+                       json={"confirmPassword": "neues-passwort-1"}).status_code == 200
 
 
 def test_password_change_logs_out_other_sessions(env, app):
@@ -181,8 +183,8 @@ def test_admin_input_validation(env, http):
 
 def test_admin_password_min_length_is_8(env, http):
     h = {"X-CSRF-Token": _login(http)}
-    assert http.post("/admin/api/admins", headers=h, json={"username": "sieben", "password": "1234567"}).status_code == 400
-    assert http.post("/admin/api/admins", headers=h, json={"username": "acht", "password": "12345678"}).status_code == 201
+    assert http.post("/admin/api/admins", headers=h, json={"username": "sieben", "password": "1234567", "confirmPassword": "sehr-geheim-123"}).status_code == 400
+    assert http.post("/admin/api/admins", headers=h, json={"username": "acht", "password": "12345678", "confirmPassword": "sehr-geheim-123"}).status_code == 201
 
 
 def test_login_throttle(env, http):

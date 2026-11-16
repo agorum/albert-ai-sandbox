@@ -24,6 +24,8 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 | 409 | `running_limit_exceeded` | the client already runs as many sandboxes as allowed (create or start); details: `limit`, `used`, `runningSandboxes` (only the asking user's own) – stop one of them first |
 | 409 | `quota_exceeded` | client quota (CPU/RAM of running sandboxes, disk, count) would be exceeded; details: `resource`, `limit`, `used`, `requested` |
 | 503 | `host_full` | the host cannot hold another running sandbox (memory guard: RAM limits of all running sandboxes, or free memory below the reserve); create, start or more RAM; details: `limit`, `used`, `requested`, `availableMb`, `runningSandboxes` (only the asking user's own) – stop one of them or retry later |
+| 403 | `password_required` | (admin API) critical action without the admin's password in `confirmPassword` |
+| 400 | `invalid_lifecycle` | (admin API) lifetime value out of range, or max lifetime shorter than the removal when unused |
 | 429 | `rate_limited` | too many requests to `/manager/` (per API key or per address, answered by nginx with `Retry-After: 1`) – wait and retry once |
 | 409 | `sandbox_limit_exceeded` | requested resources above the client's per-sandbox limit |
 | 409 | `conflict` | sandbox is being created/removed |
@@ -77,10 +79,13 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
                "effective": {"cpus": 1.0, "memoryMb": 2048, "diskGb": 10}},
   "persistentAllowed": false,
   "internetAccess": true,
-  "profile": null
+  "profile": null,
+  "lifecycle": {"stopAfterIdleSeconds": 600, "deleteNonPersistentAfterSeconds": 14400, "maxLifetimeSeconds": 86400}
 }
 ```
-`null` quota = unlimited; quota and usage totals cover the whole client (all users), `usage.runningNames` only lists the asking user's sandboxes (`X-Albert-User`); `quota.running` limits the sandboxes running at the same time; `defaults.effective` is the per-sandbox limit that applies; `persistentAllowed` tells whether persistent sandboxes may be created; `internetAccess` false means the sandboxes cannot reach the internet (install nothing at runtime, use the software of `profile`).
+`null` quota = unlimited; quota and usage totals cover the whole client (all users), `usage.runningNames` only lists the asking user's sandboxes (`X-Albert-User`); `quota.running` limits the sandboxes running at the same time; `defaults.effective` is the per-sandbox limit that applies; `persistentAllowed` tells whether persistent sandboxes may be created; `internetAccess` false means the sandboxes cannot reach the internet (install nothing at runtime, use the software of `profile`); `lifecycle`: a sandbox without access and open connection is stopped after `stopAfterIdleSeconds` (all sandboxes, data kept); a non-persistent one is deleted once unused after `deleteNonPersistentAfterSeconds` and at the latest after `maxLifetimeSeconds`, even while in use (`0` = off). Persistent sandboxes are never deleted because of their age.
+
+Every sandbox object carries `lifecycle` (`stopAfterIdleSeconds`, `deleteWhenUnusedAfter`, `deleteAtLatest` as timestamps, `null` for persistent sandboxes) and `expiresAt` (`deleteAtLatest`, or `deleteWhenUnusedAfter` without max lifetime; `null` = no automatic deletion).
 
 ### `POST /containers`
 Body (all optional):
@@ -116,7 +121,7 @@ Used by the web UI under `/manager/admin/` on its **own port** (`ALBERT_ADMIN_PO
 | POST | `api/login`, `api/logout` | session |
 | GET | `api/overview` | host resources, totals, defaults, network isolation status |
 | GET/POST | `api/clients` | list (with usage) / create (returns `apiKey` once) |
-| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes`, `quotaRunning` (null = unset), `allowPersistent` (bool), `allowInternet` (bool; a change moves and rebuilds the client's sandboxes in the background, response field `networkPolicy: "applying"`), `profileId` (null = standard image), `legacyAccess` (bool, former access without API key / user binding), `allowNets` (list of IPv4 addresses/networks the client's sandboxes may reach in addition to the global ones, `[]` = none, `400 invalid_net`; the first own target gives the client an own network: `netSubnet`, `network`, existing sandboxes are moved without rebuild, `networkPolicy: "applying"`) / delete with all sandboxes |
+| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes`, `quotaRunning` (null = unset), `allowPersistent` (bool), `allowInternet` (bool; a change moves and rebuilds the client's sandboxes in the background, response field `networkPolicy: "applying"`), `profileId` (null = standard image), `legacyAccess` (bool, former access without API key / user binding), `inactivitySeconds`, `maxAgeSeconds`, `maxLifetimeSeconds` (own lifetime of the client's sandboxes, null = global value, 0 = off), `allowNets` (list of IPv4 addresses/networks the client's sandboxes may reach in addition to the global ones, `[]` = none, `400 invalid_net`; the first own target gives the client an own network: `netSubnet`, `network`, existing sandboxes are moved without rebuild, `networkPolicy: "applying"`) / delete with all sandboxes |
 | POST | `api/clients/{id}/rotate-key` | new API key, sandboxes stay |
 | GET/POST | `api/profiles` | list (status, image, clients) / create `{name, description, packages: {apt, pip, npm}, setupScript}` |
 | GET/PATCH/DELETE | `api/profiles/{id}` | detail incl. generated `dockerfile` / change (same fields) / delete (400 `profile_in_use` while assigned) |
@@ -126,6 +131,8 @@ Used by the web UI under `/manager/admin/` on its **own port** (`ALBERT_ADMIN_PO
 | PATCH/DELETE | `api/sandboxes/{name}` | `persistent`, `cpus`, `memoryMb`, `diskGb` (disk can only grow) / delete |
 | POST | `api/sandboxes/{name}/start|stop|restart|recreate` | lifecycle; `recreate` rebuilds the container with the current image/hardening/network, keeping data and ports; VNC password and internal tokens are renewed |
 | POST | `api/sandboxes/{name}/desktop` | one-time desktop link for the admin |
+| PUT | `api/settings/lifecycle` | `{"inactivitySeconds", "maxAgeSeconds", "maxLifetimeSeconds"}` (0 = off) – lifetime of sandboxes for all clients without own values; `{"reset": true}` = back to albert.env. Shorter deadlines give existing sandboxes the full new period from now |
+| POST | `api/profiles/{id}/clone` | `{"name"}` (optional, default "‹name› (Kopie)") – new profile with the same description, packages and setup script; not built, assigned to no client |
 | GET | `api/settings` | HTTPS state (certificate, job), admin URL/port, allowed admin addresses, own address, internal targets (`allowNets`: `nets`, `source` = `settings` or `config` for `ALBERT_ALLOW_NETS`, `configNets`, `clients` with own targets), `blockedNets` |
 | PUT | `api/settings/allow-nets` | `{"allowNets": ["10.0.5.20", "10.0.6.0/24"]}` – internal targets of all sandboxes, applied to the firewall at once (`[]` = none); `{"reset": true}` = back to `ALBERT_ALLOW_NETS`; `400 invalid_net`, `firewall_failed` (nothing changed) |
 | PUT | `api/settings/admin-access` | `{"allow": ["203.0.113.7", "10.0.0.0/16"]}` (or a newline separated string; empty = all); refused (`lockout`) if the own address is missing |
@@ -134,6 +141,8 @@ Used by the web UI under `/manager/admin/` on its **own port** (`ALBERT_ADMIN_PO
 | DELETE | `api/settings/tls` | back to HTTP |
 | GET | `api/sandboxes/{name}/stats` | live docker stats + disk usage |
 | GET/POST | `api/admins`, `api/admins/{id}/password`, DELETE `api/admins/{id}` | admin users |
+
+Critical admin actions need the signed-in admin's password in the body as `confirmPassword` (otherwise `403 password_required`; wrong passwords count towards the login lockout): `PUT api/settings/admin-access`, `DELETE api/settings/tls`, `POST api/admins`, `POST api/admins/{id}/password` for another admin (the own password is confirmed with `currentPassword`) and `DELETE api/admins/{id}`.
 | GET/POST | `api/reconcile` | cleanup preview / run |
 | GET | `api/audit?limit=200` | audit log |
 

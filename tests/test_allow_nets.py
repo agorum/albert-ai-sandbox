@@ -261,7 +261,7 @@ def test_upgrade_adds_the_target_columns(env):
         row = c.execute("SELECT * FROM api_keys WHERE label='Bestand'").fetchone()
         assert row["allow_nets"] is None and row["net_subnet"] is None
         assert netctl.placement(row).network == NET
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 7
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_firewall_is_replaced_in_one_step(env, make_client, monkeypatch):

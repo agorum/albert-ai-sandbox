@@ -629,6 +629,7 @@ dialog .limit-groups { grid-template-columns: minmax(0, 1fr); }
 /* "Berechtigungen" and "Netz" of a client next to each other when there is room */
 .policy-groups { display: grid; gap: 0 24px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
 .switch-stack > .switch-field { padding-top: 0; }
+.policy-groups .field-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)); }
 .switch-stack > * + * { margin-top: 14px; }
 /* label + switch in one row */
 .form-row { display: grid; gap: 12px 24px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; }

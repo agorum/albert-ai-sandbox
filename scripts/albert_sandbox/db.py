@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from .config import settings
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -192,6 +192,15 @@ V7_SCHEMA = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_net_subnet ON api_keys(net_subnet) WHERE net_subnet IS NOT NULL;
 """
 
+# v8: lifetime of sandboxes per client (NULL = global value, see lifecycle.py)
+# and the time its removal deadlines were last shortened.
+API_KEY_V8_COLUMNS = {
+    "inactivity_seconds": "INTEGER",
+    "max_age_seconds": "INTEGER",
+    "max_lifetime_seconds": "INTEGER",
+    "lifecycle_changed_at": "INTEGER",
+}
+
 
 def connect() -> sqlite3.Connection:
     path = settings().db_path
@@ -262,6 +271,13 @@ def init_db() -> None:
             if column not in existing:
                 conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
         conn.executescript(V7_SCHEMA)
+        for column, ctype in API_KEY_V8_COLUMNS.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
+        if 0 < version < 8:
+            # The default removal of non-persistent sandboxes went from 24 to 4
+            # hours: existing sandboxes get the full new period from now on.
+            kv_set(conn, "lifecycle_changed_at", int(time.time()))
         existing = _columns(conn, "sandboxes")
         for column, ctype in SANDBOX_V6_COLUMNS.items():
             if column not in existing:

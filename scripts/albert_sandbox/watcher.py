@@ -2,8 +2,9 @@
 
 1. Record activity per sandbox from the nginx access log and from open
    connections to the sandbox ports.
-2. Stop sandboxes idle for ``ALBERT_INACTIVITY_SECONDS`` (data is kept).
-3. Remove non-persistent sandboxes older than ``ALBERT_MAX_AGE_SECONDS``.
+2. Stop sandboxes idle for the inactivity time (data is kept).
+3. Remove non-persistent sandboxes past their removal deadlines and warn on
+   the desktop before the max lifetime ends one (see lifecycle.py).
 4. Reconcile Docker / nginx / disks with the database (cleanup).
 5. Refresh disk usage figures for the admin UI.
 """
@@ -17,7 +18,7 @@ import time
 from datetime import datetime
 from typing import Dict, Iterable, Optional, Set
 
-from . import access, db, dockerctl, reconcile, sandboxes
+from . import access, db, dockerctl, lifecycle, reconcile, sandboxes
 from .config import settings
 from .errors import SandboxError
 
@@ -96,8 +97,12 @@ def _ports(row) -> Iterable[int]:
             yield int(row[key])
 
 
+def _effective_by_client(conn) -> Dict[int, Dict]:
+    glob = lifecycle.global_values(conn)
+    return {c["id"]: lifecycle.effective(c, glob) for c in conn.execute("SELECT * FROM api_keys")}
+
+
 def update_activity_and_stop_idle(now: float) -> None:
-    s = settings()
     with db.session() as conn:
         rows = conn.execute("SELECT * FROM sandboxes WHERE state=?", (sandboxes.STATE_READY,)).fetchall()
         names = {r["name"] for r in rows}
@@ -111,19 +116,21 @@ def update_activity_and_stop_idle(now: float) -> None:
             if last and last > (row["last_activity_at"] or 0):
                 conn.execute("UPDATE sandboxes SET last_activity_at=? WHERE name=?", (int(last), name))
         rows = conn.execute("SELECT * FROM sandboxes WHERE state=?", (sandboxes.STATE_READY,)).fetchall()
+        effective = _effective_by_client(conn)
 
-    if s.inactivity_seconds <= 0:
+    if not any(e["inactivitySeconds"] > 0 for e in effective.values()):
         return
     running = dockerctl.running_names()
     infos = dockerctl.inspect([r["name"] for r in rows if r["name"] in running])
     for row in rows:
         name = row["name"]
-        if name not in running:
+        inactivity = (effective.get(row["api_key_id"]) or {}).get("inactivitySeconds", 0)
+        if name not in running or inactivity <= 0:
             continue
         started = sandboxes.parse_time(((infos.get(name) or {}).get("State") or {}).get("StartedAt"))
         last_seen = max(row["last_activity_at"] or 0, row["last_started_at"] or 0, started or 0,
                         row["created_at"] or 0)
-        if now - last_seen < s.inactivity_seconds:
+        if now - last_seen < inactivity:
             continue
         try:
             sandboxes.stop(name, actor="watcher")
@@ -141,20 +148,66 @@ def purge_desktop_links(now: float) -> None:
 
 
 def remove_expired(now: float) -> None:
-    s = settings()
-    if s.max_age_seconds <= 0:
-        return
+    """Non-persistent sandboxes: removed past the max age once not in use, past the
+    max lifetime in any case. Persistent sandboxes are never removed here."""
     with db.session() as conn:
-        rows = conn.execute(
-            "SELECT name, created_at FROM sandboxes WHERE state=? AND persistent=0 AND created_at<=?",
-            (sandboxes.STATE_READY, int(now - s.max_age_seconds)),
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM sandboxes WHERE state=? AND persistent=0",
+                            (sandboxes.STATE_READY,)).fetchall()
+        effective = _effective_by_client(conn)
+    if not rows:
+        return
+    running = dockerctl.running_names()
     for row in rows:
+        eff = effective.get(row["api_key_id"])
+        if not eff:
+            continue
+        due = lifecycle.deadlines(row, eff)
+        if due["latest"] and now >= due["latest"]:
+            reason = "max lifetime reached"
+        elif due["idle"] and now >= due["idle"] and not lifecycle.in_use(row, eff, row["name"] in running, now):
+            reason = "max age reached, not in use"
+        else:
+            continue
         try:
             sandboxes.remove(row["name"], actor="watcher")
-            log(f"[INFO] Removed expired sandbox {row['name']} (age {int(now - row['created_at'])}s)")
+            log(f"[INFO] Removed sandbox {row['name']}: {reason} (age {int(now - row['created_at'])}s)")
         except SandboxError as exc:
             log(f"[WARN] Could not remove expired sandbox {row['name']}: {exc.message}")
+
+
+def warn_lifetime(now: float) -> None:
+    """Tell the desktop user before the max lifetime removes a running sandbox."""
+    with db.session() as conn:
+        rows = conn.execute("SELECT * FROM sandboxes WHERE state=? AND persistent=0",
+                            (sandboxes.STATE_READY,)).fetchall()
+        effective = _effective_by_client(conn)
+        warned = db.kv_get(conn, "lifetime_warned", {}) or {}
+    due_soon = {}
+    for row in rows:
+        eff = effective.get(row["api_key_id"])
+        latest = lifecycle.deadlines(row, eff)["latest"] if eff else None
+        if latest and 0 < latest - now <= lifecycle.WARN_SECONDS:
+            due_soon[row["name"]] = latest
+    if not due_soon:
+        if warned:
+            with db.session() as conn:
+                db.kv_set(conn, "lifetime_warned", {})
+        return
+    running = dockerctl.running_names()
+    for name, latest in due_soon.items():
+        if warned.get(name) == latest or name not in running:
+            continue
+        minutes = max(1, int(round((latest - now) / 60)))
+        try:
+            dockerctl.notify_desktop(name, "Sandbox wird beendet",
+                                     f"Diese Sandbox wird in {minutes} Minuten gelöscht: die maximale "
+                                     "Laufzeit ist erreicht. Bitte Ergebnisse jetzt sichern.")
+            log(f"[INFO] Warned desktop of {name}: removal in {minutes} min (max lifetime)")
+        except dockerctl.DockerError as exc:
+            log(f"[WARN] Could not warn the desktop of {name}: {exc}")
+        warned[name] = latest
+    with db.session() as conn:
+        db.kv_set(conn, "lifetime_warned", {n: t for n, t in warned.items() if n in due_soon})
 
 
 def refresh_usage(now: float) -> None:
@@ -186,7 +239,7 @@ def run_once() -> int:
             log("[WARN] Docker not reachable; skipping run")
             return 0
         now = time.time()
-        for step in (update_activity_and_stop_idle, remove_expired, purge_desktop_links):
+        for step in (update_activity_and_stop_idle, remove_expired, warn_lifetime, purge_desktop_links):
             try:
                 step(now)
             except Exception as exc:  # keep the other steps running

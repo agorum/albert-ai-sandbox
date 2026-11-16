@@ -37,8 +37,8 @@ from flask import Blueprint, Flask, Response, g, jsonify, redirect, request, sen
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, access, admins, clients, db, dockerctl, netctl, nginxctl, profiles, reconcile, \
-    sandboxes, storage, tlsctl
+from . import __version__, access, admins, clients, db, dockerctl, lifecycle, netctl, nginxctl, profiles, \
+    reconcile, sandboxes, storage, tlsctl
 from .config import settings
 from .errors import BadRequest, SandboxError
 
@@ -160,7 +160,11 @@ def client_quota() -> Any:
         # Totals for the whole client; runningNames only the asking user's sandboxes.
         usage = clients.usage(conn, client["id"], dockerctl.running_names(), owner=g.albert_user)
         profile = profiles.get(conn, client["profile_id"]) if client["profile_id"] else None
+        eff = lifecycle.effective(client, lifecycle.global_values(conn))
     return jsonify({"quota": clients.quotas(client), "usage": usage,
+                    # Stopped when idle (all sandboxes); non-persistent ones are removed once unused
+                    # after deleteNonPersistentAfterSeconds and at the latest after maxLifetimeSeconds.
+                    "lifecycle": lifecycle.api_view(eff),
                     "defaults": _defaults_dict(client),
                     "persistentAllowed": clients.persistent_allowed(client),
                     # Without internet access sandboxes cannot download anything (no DNS either);
@@ -362,6 +366,24 @@ def admin_gate() -> Any:
     return None
 
 
+def confirm_password(body: Dict[str, Any]) -> None:
+    """Critical admin actions need the admin's password again (``confirmPassword``):
+    a session left open or a stolen session cookie is not enough for them.
+    Failures count towards the login throttle of the address."""
+    ip = request.remote_addr or "?"
+    wait = throttle.check(ip)
+    if wait > 0:
+        raise SandboxError(f"Too many failed password checks, retry in {int(wait) + 1}s", code="throttled",
+                           status=429)
+    with db.session() as conn:
+        if not admins.verify_password(conn, g.admin["id"], str(body.get("confirmPassword") or "")):
+            throttle.failure(ip)
+            db.audit(conn, g.actor, "admin.confirm_failed", request.path, {"ip": ip})
+            raise SandboxError("Please confirm this action with your password (wrong or missing password).",
+                               code="password_required", status=403)
+    throttle.success(ip)
+
+
 def admin_required(fn: Callable) -> Callable:
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -473,6 +495,8 @@ def _client_dict(conn: Any, client: Any, running: set) -> Dict[str, Any]:
         # Own internal targets (in addition to the global ones) and the client's own network.
         "allowNets": clients.allow_nets(client),
         "network": netctl.placement(client).network,
+        # Lifetime of sandboxes: own values (None = global) and those that apply.
+        "lifecycle": lifecycle.client_view(client, lifecycle.global_values(conn)),
         "netSubnet": client["net_subnet"],
         "profileId": client["profile_id"],
         "profile": {"id": profile["id"], "name": profile["name"]} if profile else None,
@@ -490,6 +514,9 @@ _CLIENT_FIELD_MAP = {
     "allowInternet": "allow_internet",
     "legacyAccess": "legacy_access",
     "allowNets": "allow_nets",
+    "inactivitySeconds": "inactivity_seconds",
+    "maxAgeSeconds": "max_age_seconds",
+    "maxLifetimeSeconds": "max_lifetime_seconds",
     "profileId": "profile_id",
     "defaultCpus": "default_cpus",
     "defaultMemoryMb": "default_memory_mb",
@@ -636,6 +663,17 @@ def admin_create_profile() -> Any:
         return jsonify({"profile": _profile_view(conn, row, with_dockerfile=True)}), 201
 
 
+@admin_bp.post("/api/profiles/<int:profile_id>/clone")
+@admin_required
+def admin_clone_profile(profile_id: int) -> Any:
+    body = _body()
+    with db.session() as conn:
+        source = profiles.get(conn, profile_id)
+        row = profiles.clone(conn, profile_id, body.get("name"))
+        db.audit(conn, g.actor, "profile.clone", row["name"], {"profileId": row["id"], "from": source["name"]})
+        return jsonify({"profile": _profile_view(conn, row, with_dockerfile=True)}), 201
+
+
 @admin_bp.get("/api/profiles/<int:profile_id>")
 @admin_required
 def admin_get_profile(profile_id: int) -> Any:
@@ -758,6 +796,12 @@ def _settings_view() -> Dict[str, Any]:
             {"id": r["id"], "label": r["label"] or "", "nets": clients.allow_nets(r)}
             for r in clients.list_all(conn) if clients.allow_nets(r)]
     data["blockedNets"] = list(settings().block_nets)
+    with db.session() as conn:
+        data["lifecycle"] = lifecycle.global_values(conn)
+        data["lifecycle"]["config"] = lifecycle.config_values()
+        data["lifecycle"]["clientsWithOwn"] = [
+            {"id": r["id"], "label": r["label"] or ""} for r in clients.list_all(conn)
+            if any(v is not None for v in lifecycle.overrides(r).values())]
     return data
 
 
@@ -771,6 +815,7 @@ def admin_settings() -> Any:
 @admin_required
 def admin_set_access() -> Any:
     body = _body()
+    confirm_password(body)
     values = body.get("allow")
     if isinstance(values, str):
         values = values.replace(",", "\n").splitlines()
@@ -812,6 +857,18 @@ def admin_set_allow_nets() -> Any:
     return jsonify({"settings": _settings_view()})
 
 
+@admin_bp.put("/api/settings/lifecycle")
+@admin_required
+def admin_set_lifecycle() -> Any:
+    """Global lifetime of sandboxes; {"reset": true} goes back to albert.env."""
+    body = _body()
+    with db.session() as conn:
+        values = lifecycle.reset_global(conn) if body.get("reset") else lifecycle.set_global(conn, body)
+        db.audit(conn, g.actor, "settings.lifecycle", None,
+                 {k: values[k] for k in ("inactivitySeconds", "maxAgeSeconds", "maxLifetimeSeconds", "source")})
+    return jsonify({"settings": _settings_view()})
+
+
 @admin_bp.post("/api/settings/tls/custom")
 @admin_required
 def admin_tls_custom() -> Any:
@@ -833,6 +890,7 @@ def admin_tls_letsencrypt() -> Any:
 @admin_bp.delete("/api/settings/tls")
 @admin_required
 def admin_tls_disable() -> Any:
+    confirm_password(_body())
     tlsctl.disable(actor=g.actor)
     return jsonify({"settings": _settings_view()})
 
@@ -852,6 +910,7 @@ def admin_list_admins() -> Any:
 @admin_required
 def admin_create_admin() -> Any:
     body = _body()
+    confirm_password(body)
     with db.session() as conn:
         row = admins.create(conn, body.get("username", ""), body.get("password", ""))
         db.audit(conn, g.actor, "admin.create", row["username"])
@@ -862,6 +921,8 @@ def admin_create_admin() -> Any:
 @admin_required
 def admin_set_password(admin_id: int) -> Any:
     body = _body()
+    if admin_id != g.admin["id"]:
+        confirm_password(body)  # own password: checked below with currentPassword
     with db.session() as conn:
         if admin_id == g.admin["id"] and not admins.verify_password(conn, admin_id, body.get("currentPassword", "")):
             raise BadRequest("current password is wrong")
@@ -876,6 +937,7 @@ def admin_set_password(admin_id: int) -> Any:
 @admin_bp.delete("/api/admins/<int:admin_id>")
 @admin_required
 def admin_delete_admin(admin_id: int) -> Any:
+    confirm_password(_body())
     with db.session() as conn:
         row = admins.delete(conn, admin_id, acting_admin_id=g.admin["id"])
         db.audit(conn, g.actor, "admin.delete", row["username"])

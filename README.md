@@ -10,7 +10,7 @@ ALBERT | AI Sandbox provides isolated, browser-ready compute environments for AI
 - **Clients with quotas**: every API key is a client with its own per-sandbox limit and an overall quota (cores and RAM used at the same time, total disk, number of sandboxes).
 - **Admin web UI** (own port, default `:8443/manager/admin/`): manage admin users and clients, see every sandbox with status and disk usage, start/stop/resize/delete sandboxes or whole clients, set up HTTPS (Let's Encrypt or own certificate) and limit the admin UI to certain addresses.
 - **Access only with the API key**: MCP Hub, file service and desktop of a sandbox are checked by nginx through the manager on every request; sandboxes are bound to the ALBERT user that created them; the desktop opens with one-time links.
-- Auto-stop sandboxes after 10 minutes of inactivity, auto-delete non-persistent sandboxes after a maximum age (default 24 hours).
+- **Lifetime of sandboxes** (admin UI, per client): stop after 10 minutes of inactivity; non-persistent sandboxes are deleted once unused after 4 hours and at the latest after 24 hours; persistent sandboxes are never deleted or stopped because of their age.
 - **Self-cleaning**: a reconcile step removes everything that has no sandbox any more (containers, disk images, volumes, nginx routes) and repairs missing routes and mounts.
 - **Network isolation**: sandboxes reach the internet, but neither each other nor internal networks nor services of the host. **Internet access can be switched off per client**; internal targets (e.g. an agorum core system) can be opened for all sandboxes or per client.
 - **Sandbox profiles**: own images per client with extra software (apt, pip, npm packages, optional setup commands), built in the admin UI on top of the shipped image.
@@ -89,7 +89,7 @@ Sandbox server and ALBERT | AI can be updated in any order:
 | old | with security update | Works: ALBERT recognises the old server (no `api` in `GET /manager/health`) and uses the former interface – without the new protection. |
 | new | with security update | Full protection once *Alte Anbindung erlauben* is off: API key and user binding for MCP and files, one-time desktop links, no secrets in API answers. |
 
-**Sandboxes from before the update** belong to no user yet. The first ALBERT user who addresses one after the ALBERT update takes it over (ALBERT does this once with the names it knew before) – but only **while the client still has *Alte Anbindung erlauben***. Sandboxes not taken over by then can no longer be reached through ALBERT afterwards; an administrator can only delete them. Non-persistent sandboxes are removed after 24 hours anyway; for persistent ones, switch the former access off only after their users have used them once.
+**Sandboxes from before the update** belong to no user yet. The first ALBERT user who addresses one after the ALBERT update takes it over (ALBERT does this once with the names it knew before) – but only **while the client still has *Alte Anbindung erlauben***. Sandboxes not taken over by then can no longer be reached through ALBERT afterwards; an administrator can only delete them. Non-persistent sandboxes are removed after at most 24 hours anyway; for persistent ones, switch the former access off only after their users have used them once.
 
 ### Things to keep in mind
 - Certificates: Let's Encrypt renews itself (certbot timer); an own certificate must be replaced before it expires (the admin UI warns 14 days ahead).
@@ -118,8 +118,9 @@ Sandbox server and ALBERT | AI can be updated in any order:
 | `ALBERT_DEFAULT_CPUS` | `1` | Global per-sandbox CPU limit (if the client has none) |
 | `ALBERT_DEFAULT_MEMORY_MB` | `2048` | Global per-sandbox RAM limit (an idle desktop needs ~450 MB, one browser page ~900 MB) |
 | `ALBERT_DEFAULT_DISK_GB` | `10` | Global per-sandbox disk size |
-| `ALBERT_INACTIVITY_SECONDS` | `600` | Stop sandboxes after inactivity (data is kept, `0` = off) |
-| `ALBERT_MAX_AGE_SECONDS` | `86400` | Delete non-persistent sandboxes after this age (`0` = off) |
+| `ALBERT_INACTIVITY_SECONDS` | `600` | Stop sandboxes after inactivity (data is kept, `0` = off) – until set in the admin UI (*Einstellungen*) |
+| `ALBERT_MAX_AGE_SECONDS` | `14400` | Delete non-persistent sandboxes after this age once they are not in use (`0` = off) – until set in the admin UI |
+| `ALBERT_MAX_LIFETIME_SECONDS` | `86400` | Delete non-persistent sandboxes at the latest after this age, even while in use (`0` = off) – until set in the admin UI |
 | `ALBERT_PORT_RANGE` | `20000-29999` | Host ports for sandbox services (bound to 127.0.0.1) |
 | `ALBERT_STORAGE_DIR` | `/var/lib/albert-sandbox` | Disk images and mount points |
 | `ALBERT_NETWORK_SUBNET` | `172.30.0.0/16` | Subnet of the isolated sandbox network (must not overlap your LAN) |
@@ -221,10 +222,12 @@ Open `https://<host>:8443/manager/admin/` (`/manager/admin/` on the main port re
 - **Übersicht**: host resources, allocated CPU/RAM of running sandboxes, disk usage.
 - **Clients**: create (the API key is shown once), edit per-sandbox limits, quotas, running limit, the persistence permission, software profile, internet access, internal targets and legacy access, rotate the key, delete a client with all its sandboxes; per client all sandboxes with status, user, limits, disk usage, last activity and actions (start, stop, restart, change limits, live values, delete). The sandbox name opens the desktop with a one-time link.
 - **Sandboxen**: all sandboxes across clients.
-- **Profile**: sandbox profiles with their packages, build status, build log and the clients using them.
+- **Profile**: sandbox profiles with their packages, build status, build log and the clients using them; "Klonen" creates a copy with the same settings (not built, assigned to no client) to build a variant.
 - **Admins**: add admin users, change passwords, delete admins.
 - **Wartung**: preview and run the cleanup (reconcile), audit log of all changes.
-- **Einstellungen**: HTTPS certificate (Let's Encrypt or own certificate, expiry, renewal), the addresses allowed to open the admin UI (empty = all; loopback for an SSH tunnel always works; your own address must be in the list) and the internal targets of all sandboxes.
+- **Einstellungen**: HTTPS certificate (Let's Encrypt or own certificate, expiry, renewal), the addresses allowed to open the admin UI (empty = all; loopback for an SSH tunnel always works; your own address must be in the list), the internal targets of all sandboxes and the lifetime of sandboxes.
+
+Critical changes ask for the admin's password again: allowed admin addresses, switching HTTPS off, adding or deleting admins and setting another admin's password. Wrong passwords count towards the login lockout.
 
 Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove <username>`.
 
@@ -240,6 +243,8 @@ Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove
 - `tls status|letsencrypt|custom|disable` – HTTPS certificate; `admin-access show|set <addr…>|clear` – addresses allowed for the admin UI; `site apply|show` – nginx site
 - `client set <id> --legacy-access yes|no` – former access without API key / user binding
 - `allow-nets show|set <net…>|reset` – internal targets of all sandboxes; `client set <id> --allow-nets <net,…>|none` – of one client
+- `lifecycle show|set|reset` – lifetime of sandboxes; `client set <id> --inactivity-minutes|--max-age-hours|--max-lifetime-hours <n>|none` – of one client
+- `profile clone <id|name> [--name …]` – copy of a profile's settings
 - `reconcile [--dry-run]` – clean up leftovers, `selfcheck`, `build` – rebuild the image
 
 Add `--json` for machine-readable output.
@@ -267,15 +272,18 @@ Uploads land in `/tmp/albert-files` inside the sandbox (owned by the desktop use
 ## Container Lifecycle & Automatic Cleanup
 The watcher (`albert-inactivity-watcher.timer`, every minute):
 
-| Step | Default | Effect |
-|---|---|---|
-| Inactivity stop | 10 minutes | Stops idle sandboxes (data is kept) |
-| Max age removal | 24 hours | Deletes non-persistent sandboxes **including data** |
-| Reconcile | always | Removes containers, disk images, volumes and nginx routes without a sandbox; finishes interrupted removals; rewrites missing routes; mounts disks |
+| Step | Default | Non-persistent | Persistent | Effect |
+|---|---|---|---|---|
+| Inactivity stop | 10 minutes | yes | yes | Stops a sandbox without access and without open connection (desktop, MCP, files); data is kept |
+| Removal when unused | 4 hours | yes | no | Deletes the sandbox **including data** once it is older than this and not in use (no activity within the inactivity time; an open desktop counts as use) |
+| Max lifetime | 24 hours | yes | no | Deletes the sandbox at the latest this long after creation, even while in use (a forgotten desktop); the desktop shows a warning 15 minutes before |
+| Reconcile | always | | | Removes containers, disk images, volumes and nginx routes without a sandbox; finishes interrupted removals; rewrites missing routes; mounts disks |
 
 Every removal deletes the container, its disk image (or legacy volume), its nginx route and its database row. If a step fails, the sandbox stays in state `removing` and the next watcher run finishes the job. A failed creation is rolled back completely.
 
-Persistent sandboxes are excluded from max-age removal (`"persistent": true` at creation, `PATCH /containers/<name>/persistent`, CLI `--persistent`, or in the admin UI) — only for clients that are allowed to have them.
+The three values are set in the admin UI (*Einstellungen* → "Laufzeit von Sandboxen", CLI `albert-ai-sandbox-manager lifecycle set --inactivity-minutes N --max-age-hours N --max-lifetime-hours N`; until then `albert.env`) and can be overridden per client (client settings → *Laufzeit*, CLI `client set <id> --max-age-hours 8`). `0` switches a value off. When a deadline gets shorter, existing sandboxes get the full new period from the time of the change – nothing disappears at once (also after the update that changed the default from 24 to 4 hours). The client API reports the values (`lifecycle` in `/quota`) and the deadlines of each sandbox (`lifecycle`, `expiresAt`).
+
+Persistent sandboxes are never deleted or stopped because of their age (`"persistent": true` at creation, `PATCH /containers/<name>/persistent`, CLI `--persistent`, or in the admin UI) — only for clients that are allowed to have them.
 
 Opening the desktop of a stopped sandbox shows a short explanation page (HTTP 503, reloads every 30 seconds) instead of "502 Bad Gateway"; an expired or used desktop link shows "link expired" (HTTP 401).
 

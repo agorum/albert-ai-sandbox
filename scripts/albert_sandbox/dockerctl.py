@@ -213,6 +213,19 @@ def network_list() -> List[Dict[str, Any]]:
     return result
 
 
+NOTIFY_SCRIPT = (
+    'if command -v zenity >/dev/null 2>&1; then '
+    'zenity --warning --no-wrap --title="$1" --text="$2" --timeout=900; '
+    'else xmessage -center -timeout 900 "$1: $2"; fi'
+)
+
+
+def notify_desktop(container: str, title: str, text: str) -> None:
+    """Show a message on the sandbox desktop (detached; zenity, else xmessage)."""
+    _run(["exec", "-d", "-u", "ubuntu", "-e", "DISPLAY=:1", container, "sh", "-c", NOTIFY_SCRIPT,
+          "albert-notify", title, text], timeout=30)
+
+
 def copy_out_tar(container: str, path: str) -> Optional[bytes]:
     """Tar stream of a directory inside a (running or stopped) container."""
     proc = _run(["cp", f"{container}:{path}", "-"], timeout=600, check=False)

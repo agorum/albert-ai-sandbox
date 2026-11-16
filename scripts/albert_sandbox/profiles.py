@@ -175,6 +175,28 @@ def create(conn: sqlite3.Connection, name: str, **fields: Any) -> sqlite3.Row:
     return get(conn, cur.lastrowid)
 
 
+CLONE_SUFFIX = " (Kopie)"
+
+
+def _free_clone_name(conn: sqlite3.Connection, source: str) -> str:
+    base = (source + CLONE_SUFFIX)[:80]
+    name, n = base, 2
+    while conn.execute("SELECT 1 FROM profiles WHERE name=?", (name,)).fetchone():
+        suffix = f" {n}"
+        name, n = base[:80 - len(suffix)] + suffix, n + 1
+    return name
+
+
+def clone(conn: sqlite3.Connection, profile_id: int, name: Optional[str] = None) -> sqlite3.Row:
+    """New profile with the settings of another one (description, packages, setup
+    script). Not built, assigned to no client: a variant is edited and built anew."""
+    source = get(conn, profile_id)
+    fields = {"description": source["description"], "setup_script": source["setup_script"],
+              **{column: source[column] for column in PACKAGE_COLUMNS.values()}}
+    wanted = name.strip() if isinstance(name, str) and name.strip() else _free_clone_name(conn, source["name"])
+    return create(conn, wanted, **fields)
+
+
 def update(conn: sqlite3.Connection, profile_id: int, fields: Dict[str, Any]) -> sqlite3.Row:
     get(conn, profile_id)
     clean = validate_fields({k: v for k, v in fields.items() if k in EDITABLE_FIELDS})

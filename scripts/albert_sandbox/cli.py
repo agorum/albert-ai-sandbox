@@ -15,7 +15,7 @@ import secrets
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import access, admins, clients, db, dockerctl, netctl, nginxctl, profiles, reconcile, sandboxes, \
+from . import access, admins, clients, db, dockerctl, lifecycle, netctl, nginxctl, profiles, reconcile, sandboxes, \
     tlsctl, watcher
 from .config import settings
 from .errors import NotFound, SandboxError
@@ -108,6 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", nargs="?", choices=["show", "set", "clear"], default="show")
     p.add_argument("addresses", nargs="*", help="IP addresses or networks (CIDR)")
 
+    p = add("lifecycle", "lifetime of sandboxes: stop when idle, remove non-persistent ones (per client: "
+                         "client set --inactivity-minutes ...)")
+    p.add_argument("action", nargs="?", choices=["show", "set", "reset"], default="show",
+                   help="reset = back to the values of albert.env")
+    _lifecycle_options(p)
+
     p = add("allow-nets", "internal targets all sandboxes may reach (per client: client set --allow-nets)")
     p.add_argument("action", nargs="?", choices=["show", "set", "reset"], default="show",
                    help="reset = back to ALBERT_ALLOW_NETS from the configuration file")
@@ -158,6 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("profile", help="id or name")
     pp.add_argument("--name")
     _profile_options(pp)
+    pp = psub.add_parser("clone", parents=[common], help="new profile with the settings of another one "
+                                                         "(not built, assigned to no client)")
+    pp.add_argument("profile", help="id or name")
+    pp.add_argument("--name", help="name of the copy (default: '<name> (Kopie)')")
     pp = psub.add_parser("delete", parents=[common], help="delete a profile no client uses")
     pp.add_argument("profile", help="id or name")
     pp = psub.add_parser("build", parents=[common], help="build the profile image (shows the build output)")
@@ -189,6 +199,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _lifecycle_options(p: argparse.ArgumentParser, per_client: bool = False) -> None:
+    none = " ('none' = global value)" if per_client else ""
+    p.add_argument("--inactivity-minutes", help="stop a sandbox after this many idle minutes (0 = off)" + none)
+    p.add_argument("--max-age-hours", help="remove unused non-persistent sandboxes after this many hours "
+                                           "(0 = off)" + none)
+    p.add_argument("--max-lifetime-hours", help="remove non-persistent sandboxes at the latest after this many "
+                                                "hours, even while used (0 = off)" + none)
+
+
+def _lifecycle_fields(args: argparse.Namespace, per_client: bool) -> Dict[str, Any]:
+    """Seconds per API name from the minute/hour options (None = global value for a client)."""
+    fields: Dict[str, Any] = {}
+    for attr, api, factor in (("inactivity_minutes", "inactivitySeconds", 60),
+                              ("max_age_hours", "maxAgeSeconds", 3600),
+                              ("max_lifetime_hours", "maxLifetimeSeconds", 3600)):
+        value = getattr(args, attr, None)
+        if value is None:
+            continue
+        if per_client and value.strip().lower() in ("none", "-", "", "global"):
+            fields[api] = None
+            continue
+        try:
+            fields[api] = int(round(float(value.replace(",", ".")) * factor))
+        except ValueError:
+            raise CliError(f"--{attr.replace('_', '-')} must be a number", "bad_request")
+    return fields
+
+
 def _client_options(p: argparse.ArgumentParser) -> None:
     for flag in ("--default-cpus", "--default-memory-mb", "--default-disk-gb",
                  "--quota-cpus", "--quota-memory-mb", "--quota-disk-gb", "--quota-sandboxes"):
@@ -201,6 +239,7 @@ def _client_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--profile", help="sandbox profile (id or name; 'none' = standard image)")
     p.add_argument("--allow-nets", help="internal targets of the client in addition to the global ones, "
                                         "comma separated ('none' = none); the client gets an own network")
+    _lifecycle_options(p, per_client=True)
     p.add_argument("--legacy-access", choices=("yes", "no"),
                    help="keep ALBERT versions without the security update working: MCP with the fixed key, "
                         "files without key, plain desktop URL, no X-Albert-User (new clients: no)")
@@ -368,6 +407,9 @@ def _client_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         fields["allow_internet"] = args.internet == "yes"
     if getattr(args, "legacy_access", None):
         fields["legacy_access"] = args.legacy_access == "yes"
+    columns = {api: column for api, column, _ in lifecycle.FIELDS}
+    for api, value in _lifecycle_fields(args, per_client=True).items():
+        fields[columns[api]] = value
     nets = getattr(args, "allow_nets", None)
     if nets is not None:
         fields["allow_nets"] = "" if nets.strip().lower() in ("none", "-", "") else nets
@@ -564,6 +606,12 @@ def cmd_profile(args: argparse.Namespace, out: Out) -> None:
             db.audit(conn, "cli", "profile.update", row["name"], {"profileId": row["id"], "fields": sorted(fields)})
             item = profiles.serialize(conn, row, base_id)
         out.emit(item, _profile_text(item))
+    elif sub == "clone":
+        with db.session() as conn:
+            copy = profiles.clone(conn, row["id"], args.name)
+            db.audit(conn, "cli", "profile.clone", copy["name"], {"profileId": copy["id"], "from": row["name"]})
+            item = profiles.serialize(conn, copy, base_id)
+        out.emit(item, _profile_text(item) + f"\nBuild it with: albert-ai-sandbox-manager profile build {copy['id']}")
     elif sub == "delete":
         with db.session() as conn:
             profiles.delete(conn, row["id"])
@@ -774,6 +822,34 @@ def cmd_admin_access(args: argparse.Namespace, out: Out) -> None:
              "Admin UI open for: " + (", ".join(nets) + " (+ loopback/SSH tunnel)" if nets else "all addresses"))
 
 
+def _duration(seconds: int) -> str:
+    if not seconds:
+        return "off"
+    return f"{seconds / 60:g} min" if seconds < 3600 else f"{seconds / 3600:g} h"
+
+
+def cmd_lifecycle(args: argparse.Namespace, out: Out) -> None:
+    with db.session() as conn:
+        if args.action == "set":
+            fields = _lifecycle_fields(args, per_client=False)
+            if not fields:
+                raise CliError("nothing to set: use --inactivity-minutes, --max-age-hours or --max-lifetime-hours",
+                               "bad_request")
+            lifecycle.set_global(conn, fields)
+        elif args.action == "reset":
+            lifecycle.reset_global(conn)
+        values = lifecycle.global_values(conn)
+        if args.action != "show":
+            db.audit(conn, "cli", "settings.lifecycle", None,
+                     {k: values[k] for k in ("inactivitySeconds", "maxAgeSeconds", "maxLifetimeSeconds", "source")})
+    out.emit(values, "\n".join([
+        f"Stop when idle (all sandboxes):              {_duration(values['inactivitySeconds'])}",
+        f"Remove unused non-persistent sandboxes after: {_duration(values['maxAgeSeconds'])}",
+        f"Remove non-persistent sandboxes at the latest: {_duration(values['maxLifetimeSeconds'])}",
+        "Persistent sandboxes are never removed or stopped because of their age.",
+        f"Source: {'admin settings' if values['source'] == 'settings' else 'albert.env'}"]))
+
+
 def cmd_allow_nets(args: argparse.Namespace, out: Out) -> None:
     if args.action in ("set", "reset"):
         with db.session() as conn:
@@ -886,6 +962,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd_admin_access(args, out)
         elif command == "allow-nets":
             cmd_allow_nets(args, out)
+        elif command == "lifecycle":
+            cmd_lifecycle(args, out)
         elif command == "migrate":
             cmd_migrate(args, out)
         elif command == "mount-disks":

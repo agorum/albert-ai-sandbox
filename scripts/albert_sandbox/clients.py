@@ -30,6 +30,10 @@ sandboxes may reach in addition to the global ones (admin UI *Einstellungen*
 or ALBERT_ALLOW_NETS). The first time a client gets own targets it is given an
 own sandbox network (``net_subnet``), see netctl.py.
 
+``inactivity_seconds``, ``max_age_seconds`` and ``max_lifetime_seconds``
+override the global lifetime of sandboxes for this client (NULL = global
+value, see lifecycle.py).
+
 ``legacy_access`` keeps the access of ALBERT versions from before the
 security update working: MCP with the former fixed key, files without a key,
 the desktop link without a one-time link and requests without user binding
@@ -45,14 +49,15 @@ import sqlite3
 import time
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-from . import netctl
+from . import lifecycle, netctl
 from .config import settings
 from .errors import BadRequest, NotFound, QuotaExceeded
 
 QUOTA_FIELDS = ("quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes", "quota_running")
 DEFAULT_FIELDS = ("default_cpus", "default_memory_mb", "default_disk_gb")
 FLAG_FIELDS = ("allow_persistent", "allow_internet", "legacy_access")
-EDITABLE_FIELDS = ("label", "profile_id", "allow_nets") + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS
+EDITABLE_FIELDS = ("label", "profile_id", "allow_nets") + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS \
+    + lifecycle.COLUMNS
 
 
 def hash_key(raw: str) -> str:
@@ -153,6 +158,8 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
         elif key == "allow_nets":
             nets = netctl.parse_nets(value)
             clean[key] = json.dumps(nets) if nets else None
+        elif key in lifecycle.COLUMNS:
+            clean[key] = lifecycle.clean_seconds(key, value)
         else:
             clean[key] = _clean_number(key, value)
     for key in DEFAULT_FIELDS:
@@ -167,6 +174,7 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
 def create(conn: sqlite3.Connection, label: str = "", **fields: Any) -> Tuple[sqlite3.Row, str]:
     clean = validate_fields({"label": label, **fields})
     _check_profile(conn, clean)
+    lifecycle.client_change(None, clean, lifecycle.global_values(conn))
     raw = generate_key()
     now = int(time.time())
     columns = ["key_hash", "created_at", "updated_at"] + list(clean.keys())
@@ -178,9 +186,15 @@ def create(conn: sqlite3.Connection, label: str = "", **fields: Any) -> Tuple[sq
 
 
 def update(conn: sqlite3.Connection, client_id: int, fields: Dict[str, Any]) -> sqlite3.Row:
-    get(conn, client_id)
+    before = get(conn, client_id)
     clean = validate_fields(fields)
     _check_profile(conn, clean)
+    if any(column in clean for column in lifecycle.COLUMNS):
+        merged = {column: clean.get(column, before[column]) for column in lifecycle.COLUMNS}
+        merged["lifecycle_changed_at"] = before["lifecycle_changed_at"]
+        if lifecycle.client_change(before, merged, lifecycle.global_values(conn)):
+            # shorter removal deadline: existing sandboxes get the full new period from now
+            clean["lifecycle_changed_at"] = int(time.time())
     if clean:
         assignments = ", ".join(f"{k}=?" for k in clean)
         conn.execute(f"UPDATE api_keys SET {assignments}, updated_at=? WHERE id=?",

@@ -364,7 +364,8 @@ def test_admin_api_settings_and_legacy_switch(env, admin, make_client):
     assert updated.get_json()["client"]["legacyAccess"] is True
     view = admin.get("/admin/api/settings").get_json()["settings"]
     assert view["active"] is False and view["adminPort"] == 8443 and view["adminAllow"] == []
-    saved = admin.put("/admin/api/settings/admin-access", json={"allow": "10.0.0.0/16\n127.0.0.1"}, headers=h)
+    saved = admin.put("/admin/api/settings/admin-access", headers=h,
+                      json={"allow": "10.0.0.0/16\n127.0.0.1", "confirmPassword": "sehr-geheim-123"})
     assert saved.status_code == 200 and saved.get_json()["settings"]["adminAllow"] == ["10.0.0.0/16", "127.0.0.1/32"]
     name = sandboxes.create(client["id"])["name"]
     link = admin.post(f"/admin/api/sandboxes/{name}/desktop", headers=h)

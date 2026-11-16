@@ -132,6 +132,8 @@ class Settings:
     # less than the reserve is available. Factor 0 = off.
     memory_overcommit: float = 2.0
     memory_reserve_mb: int = 1024
+    # Non-persistent sandboxes are removed at the latest this long after creation (0 = off); see lifecycle.py.
+    max_lifetime_seconds: int = 86400
     # nginx site written by the manager (main server, HTTPS, admin port).
     nginx_site_file: Path = Path("/etc/nginx/sites-available/albert-sandbox")
     nginx_site_link: Path = Path("/etc/nginx/sites-enabled/albert-sandbox")
@@ -228,7 +230,8 @@ def load_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
         pids_limit=get_int("ALBERT_PIDS_LIMIT", 4096),
         shm_max_mb=get_int("ALBERT_SHM_MAX_MB", 2048),
         inactivity_seconds=get_int("ALBERT_INACTIVITY_SECONDS", 600),
-        max_age_seconds=get_int("ALBERT_MAX_AGE_SECONDS", 86400),
+        max_age_seconds=get_int("ALBERT_MAX_AGE_SECONDS", 14400),
+        max_lifetime_seconds=max(0, get_int("ALBERT_MAX_LIFETIME_SECONDS", 86400)),
         orphan_grace_seconds=get_int("ALBERT_ORPHAN_GRACE_SECONDS", 900),
         nginx_access_log=Path(get("ALBERT_NGINX_ACCESS_LOG", "/var/log/nginx/access.log")),
         mcphub_timeout=get_int("ALBERT_MCPHUB_TIMEOUT", 120),

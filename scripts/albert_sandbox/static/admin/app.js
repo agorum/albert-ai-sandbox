@@ -380,6 +380,8 @@
     tls_certbot_missing: "certbot fehlt",
     tls_busy: "Anfrage läuft bereits",
     invalid_net: "Ungültiges internes Ziel",
+    invalid_lifecycle: "Ungültige Laufzeit",
+    password_required: "Passwort zur Bestätigung",
     host_full: "Sandbox-Server ausgelastet",
     rate_limited: "Zu viele Anfragen",
     firewall_failed: "Firewall hat die Änderung abgelehnt",
@@ -528,8 +530,31 @@
     });
   }
 
-  function confirmDialog({ title, message, confirmLabel = "OK", danger = false, requireText = null, onConfirm = null }) {
+  /** Password of the signed-in admin, to confirm a critical action (sent as confirmPassword). */
+  function confirmPasswordField() {
+    const input = h("input", { type: "password", required: true, autocomplete: "current-password" });
+    const node = field("Dein Passwort zur Bestätigung", input,
+      "Kritische Änderungen bestätigst du mit deinem Passwort.");
+    return { node, input, value: () => input.value };
+  }
+
+  /** Asks for the admin's password and runs action(password) in the dialog (errors stay visible there). */
+  function confirmWithPassword({ title, message, confirmLabel = "Bestätigen", danger = false, action }) {
+    const pw = confirmPasswordField();
+    return modal({
+      title,
+      body: [[message].flat().filter(Boolean).map((m) => (m instanceof Node ? m : h("p", null, m))), pw.node],
+      submitLabel: confirmLabel,
+      submitClass: danger ? "danger" : "primary",
+      onSubmit: () => action(pw.value()),
+    });
+  }
+
+  function confirmDialog({ title, message, confirmLabel = "OK", danger = false, requireText = null, onConfirm = null,
+    password = false }) {
     const body = [message].flat().filter(Boolean).map((m) => (m instanceof Node ? m : h("p", null, m)));
+    const pw = password ? confirmPasswordField() : null;
+    if (pw) body.push(pw.node);
     let input = null;
     if (requireText !== null) {
       input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", "aria-label": "Bestätigung" });
@@ -551,7 +576,7 @@
       onSubmit: async () => {
         if (!matches()) return false;
         if (onConfirm) {
-          const value = await onConfirm();
+          const value = await onConfirm(pw ? pw.value() : undefined);
           return value === undefined ? true : value;
         }
         return true;
@@ -692,10 +717,68 @@
     return Math.round(n * 100) / 100;
   }
 
-  function hoursText(seconds) {
-    if (!isNum(seconds)) return null;
-    const hours = seconds / 3600;
-    return hours >= 1 ? `${fmtNum(hours, 1)} Stunde${hours === 1 ? "" : "n"}` : `${fmtNum(seconds / 60, 0)} Minuten`;
+
+  /** "10 Minuten", "4 Stunden", "aus". */
+  function durationText(seconds) {
+    if (!isNum(seconds)) return "–";
+    if (!seconds) return "aus";
+    if (seconds < 3600) {
+      const m = seconds / 60;
+      return `${fmtNum(m, m % 1 ? 1 : 0)} Minute${m === 1 ? "" : "n"}`;
+    }
+    const hrs = seconds / 3600;
+    return `${fmtNum(hrs, hrs % 1 ? 1 : 0)} Stunde${hrs === 1 ? "" : "n"}`;
+  }
+
+  // Lifetime of sandboxes: API name, label, unit, factor (seconds per unit), applies to persistent ones.
+  const LIFECYCLE_FIELDS = [
+    { key: "inactivitySeconds", label: "Anhalten nach Inaktivität", unit: "Min.", factor: 60, persistent: true,
+      hint: "ohne Zugriff und ohne offene Verbindung (Desktop, MCP, Dateien); Daten bleiben" },
+    { key: "maxAgeSeconds", label: "Löschen, wenn ungenutzt, nach", unit: "Std.", factor: 3600, persistent: false,
+      hint: "ab diesem Alter, sobald die Sandbox nicht mehr genutzt wird" },
+    { key: "maxLifetimeSeconds", label: "Höchstlaufzeit", unit: "Std.", factor: 3600, persistent: false,
+      hint: "spätestens dann gelöscht, auch bei offenem Desktop" },
+  ];
+
+  /** Table: which rule applies to which kind of sandbox, with the values that apply. */
+  function lifecycleRulesTable(values) {
+    const yes = h("span", { class: "badge ok" }, "ja");
+    return h("div", { class: "table-wrap" }, h("table", { class: "data compact" },
+      h("thead", null, h("tr", null, h("th", null, "Regel"), h("th", null, "Wert"),
+        h("th", null, "nicht-persistent"), h("th", null, "persistent"))),
+      h("tbody", null, LIFECYCLE_FIELDS.map((f) => h("tr", null,
+        h("td", null, f.label, h("div", { class: "cell-sub" }, f.hint)),
+        h("td", null, durationText(values[f.key])),
+        h("td", null, yes.cloneNode(true)),
+        h("td", null, f.persistent ? yes.cloneNode(true) : h("span", { class: "faint" }, "gilt nicht")))))));
+  }
+
+  /**
+   * Lifetime inputs. With a client: own values, empty = global (placeholder);
+   * without: global values. Returns {nodes, values(), changed(), valid()}.
+   */
+  function lifecycleInputs(own, globalValues, { perClient = true } = {}) {
+    const inputs = LIFECYCLE_FIELDS.map((f) => {
+      const ownValue = own ? own[f.key] : null;
+      const glob = globalValues ? globalValues[f.key] : null;
+      const shown = perClient ? ownValue : glob;
+      const n = numInput({
+        name: f.key, min: 0, step: "any", unit: f.unit,
+        value: isNum(shown) ? +(shown / f.factor).toFixed(2) : "",
+        placeholder: perClient && isNum(glob) ? `global: ${isNum(glob) && glob ? +(glob / f.factor).toFixed(2) : "aus"}` : "",
+      });
+      return { f, n };
+    });
+    const read = (x) => {
+      const v = readNumber(x.n.input);
+      return v === null ? null : Math.round(v * x.f.factor);
+    };
+    return {
+      nodes: h("div", { class: "field-grid" }, inputs.map((x) => field(x.f.label, x.n.node))),
+      values: () => Object.fromEntries(inputs.map((x) => [x.f.key, read(x)])),
+      changed: () => inputs.some((x) => changed(x.n.input)),
+      valid: () => inputs.every((x) => (x.n.input.value || "").trim() === "" || readNumber(x.n.input) !== null),
+    };
   }
 
   /**
@@ -705,14 +788,13 @@
   function persistentPolicyField(client, overview) {
     const initial = !!(client && client.allowPersistent);
     const input = h("input", { type: "checkbox", class: "switch", name: "allowPersistent", checked: initial });
-    const maxAge = hoursText(((overview && overview.lifecycle) || {}).maxAgeSeconds);
     const node = h("label", { class: "switch-field" },
       input,
       h("span", null,
         h("span", { class: "field-label" }, "Persistente Sandboxen erlauben"),
         h("span", { class: "field-hint" },
-          "Ohne Freigabe lehnt die API persistente Sandboxen ab (persistent_not_allowed)"
-          + (maxAge ? `; alle anderen werden nach ${maxAge} automatisch gelöscht.` : "."))));
+          "Ohne Freigabe lehnt die API persistente Sandboxen ab (persistent_not_allowed). Persistente Sandboxen "
+          + "werden nie automatisch gelöscht; nicht-persistente nach der Laufzeit (siehe „Laufzeit“).")));
     return {
       node,
       input,
@@ -764,14 +846,19 @@
   }
 
   /** Switches and targets of a client in two boxes: "Berechtigungen" and "Netz". */
-  function clientPolicyGroups(policy, legacy, internet, nets) {
+  function clientPolicyGroups(policy, legacy, internet, nets, life) {
     return h("div", { class: "policy-groups" },
       h("fieldset", null,
         h("legend", null, "Berechtigungen"),
         h("div", { class: "switch-stack" }, policy.node, legacy.node)),
       h("fieldset", null,
         h("legend", null, "Netz"),
-        h("div", { class: "switch-stack" }, internet.node, nets.node)));
+        h("div", { class: "switch-stack" }, internet.node, nets.node)),
+      life ? h("fieldset", null,
+        h("legend", null, "Laufzeit"),
+        h("p", { class: "legend-hint" }, "Leer = globaler Wert (Einstellungen), 0 = aus. Löschen und Höchstlaufzeit "
+          + "gelten nur für nicht-persistente Sandboxen."),
+        life.nodes) : null);
   }
 
   /** "Alte Anbindung erlauben" switch. Returns {node, input, value(), changed()}. */
@@ -1433,6 +1520,7 @@
     const internet = internetPolicyField(null);
     const legacy = legacyAccessField(null);
     const nets = allowNetsField(null);
+    const life = lifecycleInputs(null, ov && ov.lifecycle);
     const profile = profileSelectField(null, profiles);
     const created = await modal({
       title: "Client anlegen",
@@ -1440,7 +1528,7 @@
       submitLabel: "Client anlegen",
       body: [
         h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), profile.node),
-        clientPolicyGroups(policy, legacy, internet, nets),
+        clientPolicyGroups(policy, legacy, internet, nets, life),
         limits.nodes,
       ],
       onSubmit: async () => {
@@ -1455,7 +1543,7 @@
           method: "POST",
           body: {
             label: text, ...limits.values(), allowPersistent: policy.value(), allowInternet: internet.value(),
-            profileId: profile.value(), legacyAccess: legacy.value(), allowNets: nets.value(),
+            profileId: profile.value(), legacyAccess: legacy.value(), allowNets: nets.value(), ...life.values(),
           },
         });
       },
@@ -1555,6 +1643,14 @@
             "Interne Ziele: ",
             h("strong", null, (client.allowNets || []).length
               ? "global + " + client.allowNets.join(", ") : "nur die globalen"),
+            h("span", { class: "sep" }, "|"),
+            "Laufzeit: ",
+            h("strong", null, client.lifecycle ? [
+              "Anhalten nach ", durationText(client.lifecycle.effective.inactivitySeconds),
+              " · Löschen ungenutzt nach ", durationText(client.lifecycle.effective.maxAgeSeconds),
+              " · höchstens ", durationText(client.lifecycle.effective.maxLifetimeSeconds)] : "–"),
+            client.lifecycle && Object.values(client.lifecycle.sources || {}).includes("client")
+              ? h("span", { class: "faint" }, " (eigene Werte)") : null,
             client.netSubnet ? h("span", { class: "faint" }, ` (eigenes Netz ${client.netSubnet})`) : null))));
     }
 
@@ -1613,13 +1709,14 @@
       const internet = internetPolicyField(client);
       const legacy = legacyAccessField(client);
       const nets = allowNetsField(client);
+      const life = lifecycleInputs((client.lifecycle || {}).own, ov && ov.lifecycle);
       const profile = profileSelectField(client, profiles);
       const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Änderungen speichern");
       const resetBtn = h("button", { type: "button", class: "btn" }, "Zurücksetzen");
       const status = h("span", { class: "state" });
       const form = h("form", { class: "panel panel-body" },
         h("div", { class: "form-row" }, field("Bezeichnung", label), profile.node),
-        clientPolicyGroups(policy, legacy, internet, nets),
+        clientPolicyGroups(policy, legacy, internet, nets, life),
         limits.nodes,
         h("div", { class: "form-actions" }, saveBtn, resetBtn, status));
       resetBtn.addEventListener("click", () => renderForm());
@@ -1633,6 +1730,7 @@
         if (policy.changed()) payload.allowPersistent = policy.value();
         if (profile.changed()) payload.profileId = profile.value();
         if (legacy.changed()) payload.legacyAccess = legacy.value();
+        if (life.changed()) Object.assign(payload, life.values());
         if (nets.changed()) {
           if (!(await confirmOwnNetwork(nets.value()))) return;
           payload.allowNets = nets.value();
@@ -1896,17 +1994,23 @@
       "aria-label": `Sandbox ${s.name} persistent`,
       title: locked
         ? "Persistente Sandboxen sind für diesen Client nicht freigegeben (Client-Einstellungen)."
-        : "Persistente Sandboxen werden nicht nach Ablauf der maximalen Lebensdauer automatisch gelöscht "
-          + "(Stopp bei Inaktivität gilt weiterhin).",
+        : "Persistente Sandboxen werden nie automatisch gelöscht (Anhalten bei Inaktivität gilt weiterhin).",
     });
     persistent.addEventListener("change", () => togglePersistent(s, persistent));
+    const life = s.lifecycle || {};
+    const removal = s.persistent
+      ? h("div", { class: "cell-sub" }, "keine automatische Löschung")
+      : (life.deleteWhenUnusedAfter || life.deleteAtLatest) ? h("div", { class: "cell-sub" },
+        life.deleteWhenUnusedAfter ? ["gelöscht ab ", fmtDate(life.deleteWhenUnusedAfter), " ohne Nutzung"] : null,
+        life.deleteWhenUnusedAfter && life.deleteAtLatest ? h("br") : null,
+        life.deleteAtLatest ? ["spätestens ", fmtDate(life.deleteAtLatest)] : null) : null;
 
     return h("tr", null,
       nameCell,
       clientCell,
       h("td", null, statusBadge(s.status, pending), pending ? null : outdatedBadge(s)),
       h("td", null, activityCell(s)),
-      h("td", null, persistent),
+      h("td", null, persistent, removal),
       h("td", null, limitsCell(s)),
       h("td", null, diskCell(s)),
       h("td", { class: "actions" }, sandboxActions(s, pending)));
@@ -2360,13 +2464,16 @@
         title: "3–64 Zeichen: Buchstaben, Ziffern und . _ @ -",
       });
       const pair = passwordPair();
+      const confirmPw = confirmPasswordField();
       const res = await modal({
         title: "Admin hinzufügen",
         submitLabel: "Admin anlegen",
-        body: [field("Benutzername", user, "3–64 Zeichen: Buchstaben, Ziffern und . _ @ -"), pair.nodes],
+        body: [field("Benutzername", user, "3–64 Zeichen: Buchstaben, Ziffern und . _ @ -"), pair.nodes, confirmPw.node],
         onSubmit: async () => {
           if (!pair.valid()) return false;
-          return api("admins", { method: "POST", body: { username: user.value.trim(), password: pair.pw.value } });
+          return api("admins", { method: "POST", body: {
+            username: user.value.trim(), password: pair.pw.value, confirmPassword: confirmPw.value(),
+          } });
         },
       });
       if (res && res.admin) {
@@ -2380,6 +2487,7 @@
         ? h("input", { type: "password", required: true, autocomplete: "current-password" })
         : null;
       const pair = passwordPair();
+      const confirmPw = a.self ? null : confirmPasswordField();
       const res = await modal({
         title: a.self ? "Eigenes Passwort ändern" : `Passwort für ${a.username} setzen`,
         submitLabel: "Passwort speichern",
@@ -2387,11 +2495,13 @@
           a.self ? null : h("p", { class: "muted" }, "Das neue Passwort gilt ab sofort; bestehende Sitzungen bleiben angemeldet."),
           current ? field("Aktuelles Passwort", current) : null,
           pair.nodes,
+          confirmPw ? confirmPw.node : null,
         ],
         onSubmit: async () => {
           if (!pair.valid()) return false;
           const body = { password: pair.pw.value };
           if (current) body.currentPassword = current.value;
+          if (confirmPw) body.confirmPassword = confirmPw.value();
           await api(`admins/${enc(a.id)}/password`, { method: "POST", body });
           return true;
         },
@@ -2405,7 +2515,8 @@
         message: h("p", null, "Den Admin ", h("strong", null, a.username), " wirklich löschen? Er kann sich danach nicht mehr anmelden."),
         confirmLabel: "Löschen",
         danger: true,
-        onConfirm: () => api("admins/" + enc(a.id), { method: "DELETE" }),
+        password: true,
+        onConfirm: (pw) => api("admins/" + enc(a.id), { method: "DELETE", body: { confirmPassword: pw } }),
       });
       if (res) {
         toast(`Admin ${a.username} gelöscht.`, { type: "success" });
@@ -2624,6 +2735,8 @@
       deleteBtn.addEventListener("click", () => deleteProfile(profile, {
         after: (deleted) => { if (deleted) location.hash = "#/profiles"; },
       }));
+      const cloneBtn = h("button", { type: "button", class: "btn" }, "Klonen");
+      cloneBtn.addEventListener("click", () => cloneProfile(profile));
       setTitle(profile.name);
       head.replaceChildren(h("div", { class: "page-head" },
         h("div", null,
@@ -2633,7 +2746,27 @@
             profile.description ? h("span", null, profile.description) : null,
             h("span", null, "angelegt ", timeEl(profile.createdAt)),
             profile.updatedAt ? h("span", null, "geändert ", timeEl(profile.updatedAt)) : null)),
-        h("div", { class: "actions" }, buildBtn, deleteBtn)));
+        h("div", { class: "actions" }, buildBtn, cloneBtn, deleteBtn)));
+    }
+
+    /** Copy with the same settings (not built, assigned to no client), opened for editing. */
+    async function cloneProfile(p) {
+      const name = h("input", { type: "text", required: true, maxlength: "80", autocomplete: "off" });
+      name.value = `${p.name} (Kopie)`.slice(0, 80);
+      const res = await modal({
+        title: "Profil klonen",
+        submitLabel: "Kopie anlegen",
+        body: [
+          h("p", null, "Übernommen werden Beschreibung, Pakete und Setup-Befehle von ", h("strong", null, p.name),
+            ". Die Kopie ist noch nicht gebaut und keinem Client zugeordnet."),
+          field("Name der Kopie", name),
+        ],
+        onSubmit: () => api(`profiles/${enc(p.id)}/clone`, { method: "POST", body: { name: name.value.trim() } }),
+      });
+      if (!res || !res.profile) return;
+      state.profilesAt = 0;
+      toast(`Profil „${res.profile.name}“ angelegt – anpassen und bauen.`, { type: "success" });
+      location.hash = "#/profiles/" + enc(res.profile.id);
     }
 
     function renderStatus() {
@@ -2981,7 +3114,13 @@
         saveBtn.disabled = true;
         saveBtn.classList.add("busy");
         try {
-          const res = await api("settings/admin-access", { method: "PUT", body: { allow: allow.value } });
+          const res = await confirmWithPassword({
+            title: "Zugriff auf die Verwaltung ändern",
+            message: "Von welchen Adressen die Verwaltung erreichbar ist, bestätigst du mit deinem Passwort.",
+            confirmLabel: "Speichern",
+            action: (pw) => api("settings/admin-access", { method: "PUT", body: { allow: allow.value, confirmPassword: pw } }),
+          });
+          if (!res) return;
           toast((res.settings.adminAllow || []).length ? "Zugriff eingeschränkt." : "Verwaltung ist von überall erreichbar.",
             { type: "success" });
           if (ctx.alive()) refresh({ silent: true });
@@ -2994,7 +3133,56 @@
       });
       out.push(h("div", { class: "grid cols-2" }, tlsPanel, accessForm));
       out.push(allowNetsPanel(st));
+      out.push(lifecyclePanel(st));
       return out;
+    }
+
+    function lifecyclePanel(st) {
+      const info = st.lifecycle || {};
+      const inputs = lifecycleInputs(null, info, { perClient: false });
+      const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Speichern");
+      const resetBtn = info.source === "settings"
+        ? h("button", { type: "button", class: "btn" }, "Werte aus albert.env verwenden") : null;
+      const form = h("form", { class: "panel mt-16" }, h("div", { class: "panel-body" },
+        h("div", { class: "panel-title" }, "Laufzeit von Sandboxen"),
+        h("p", { class: "metric-note" },
+          "Gilt für alle Clients ohne eigene Werte (Client-Einstellungen → Laufzeit). 0 = aus. Wird eine Frist "
+          + "verkürzt, bekommen bestehende Sandboxen ab jetzt noch einmal die volle neue Frist."
+          + (info.source === "config" ? " Derzeit gelten die Werte aus albert.env; Speichern übernimmt sie hierher." : "")),
+        inputs.nodes,
+        h("div", { class: "mt-12" }, lifecycleRulesTable(info)),
+        (info.clientsWithOwn || []).length ? h("dl", { class: "kv" },
+          h("dt", null, "Clients mit eigenen Werten"),
+          h("dd", null, info.clientsWithOwn.map((c, i) => [i ? ", " : null,
+            h("a", { href: "#/clients/" + enc(c.id) }, c.label || `Client ${c.id}`)]))) : null,
+        h("div", { class: "form-actions" }, saveBtn, resetBtn)));
+
+      async function save(body, okText) {
+        saveBtn.disabled = true;
+        saveBtn.classList.add("busy");
+        try {
+          await api("settings/lifecycle", { method: "PUT", body });
+          toast(okText, { type: "success" });
+          if (ctx.alive()) refresh({ silent: true });
+        } catch (err) {
+          showError(err, "Speichern fehlgeschlagen");
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.classList.remove("busy");
+        }
+      }
+      form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        if (!inputs.valid()) {
+          toast("Bitte Zahlen eingeben (0 = aus).", { type: "error" });
+          return;
+        }
+        const values = inputs.values();
+        Object.keys(values).forEach((k) => { if (values[k] === null) values[k] = 0; });
+        save(values, "Laufzeit gespeichert.");
+      });
+      if (resetBtn) resetBtn.addEventListener("click", () => save({ reset: true }, "Es gelten wieder die Werte aus albert.env."));
+      return form;
     }
 
     function allowNetsPanel(st) {
@@ -3173,7 +3361,8 @@
         ],
         confirmLabel: "HTTPS ausschalten",
         danger: true,
-        onConfirm: () => api("settings/tls", { method: "DELETE" }),
+        password: true,
+        onConfirm: (pw) => api("settings/tls", { method: "DELETE", body: { confirmPassword: pw } }),
       });
       if (!res || !res.settings) return;
       await showMoved(res.settings.adminUrl, "HTTPS ist aus", "Die Verwaltung ist jetzt über HTTP erreichbar:");

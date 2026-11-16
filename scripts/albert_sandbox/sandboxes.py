@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from . import access, clients, db, dockerctl, netctl, nginxctl, ports, profiles, storage
+from . import access, clients, db, dockerctl, lifecycle, netctl, nginxctl, ports, profiles, storage
 from .config import settings
 from .errors import BadRequest, Conflict, Forbidden, HostFull, NotFound, QuotaExceeded, SandboxError, Unavailable
 from .locking import host_lock
@@ -241,6 +241,7 @@ def owner_context(conn: sqlite3.Connection, client_ids: Optional[List[int]] = No
     base_id: Optional[str] = None
     profile_rows: Dict[int, Optional[sqlite3.Row]] = {}
     result: Dict[int, Dict[str, Any]] = {}
+    glob = lifecycle.global_values(conn) if owners else {}
     for owner in owners:
         profile_row = None
         if owner["profile_id"]:
@@ -260,6 +261,7 @@ def owner_context(conn: sqlite3.Connection, client_ids: Optional[List[int]] = No
             "profile": profiles.summary(profile_row),
             "persistent_allowed": clients.persistent_allowed(owner),
             "label": owner["label"] or "",
+            "lifecycle": lifecycle.effective(owner, glob),
         }
     return result
 
@@ -328,6 +330,12 @@ def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
         data["persistentAllowed"] = context["persistent_allowed"]
         if with_client_label:
             data["clientLabel"] = context["label"]
+        # Lifetime: stopped when idle (all), removed by age (non-persistent only).
+        eff = context["lifecycle"]
+        due = lifecycle.deadlines(row, eff)
+        data["lifecycle"] = {"stopAfterIdleSeconds": eff["inactivitySeconds"],
+                             "deleteWhenUnusedAfter": iso(due["idle"]), "deleteAtLatest": iso(due["latest"])}
+        data["expiresAt"] = iso(due["latest"] or due["idle"])
     if row["error"]:
         data["lastError"] = row["error"]
     return data
@@ -735,11 +743,18 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
 def _require_persistent_allowed(client: sqlite3.Row) -> None:
     if clients.persistent_allowed(client):
         return
-    hours = settings().max_age_seconds / 3600
+    with db.session() as conn:
+        eff = lifecycle.effective(client, lifecycle.global_values(conn))
+    rules = []
+    if eff["maxAgeSeconds"]:
+        rules.append(f"removed automatically once it is not used any more {eff['maxAgeSeconds'] / 3600:g} hours "
+                     "after creation")
+    if eff["maxLifetimeSeconds"]:
+        rules.append(f"at the latest {eff['maxLifetimeSeconds'] / 3600:g} hours after creation")
     raise Forbidden(
-        "Persistent sandboxes are not allowed for this client. Use a non-persistent sandbox instead "
-        f"(it is removed automatically {hours:g} hours after creation) or ask an administrator to allow "
-        "persistent sandboxes for this client.",
+        "Persistent sandboxes are not allowed for this client. Use a non-persistent sandbox instead"
+        + (f" (it is {', '.join(rules)})" if rules else "")
+        + " or ask an administrator to allow persistent sandboxes for this client.",
         code="persistent_not_allowed")
 
 
@@ -1030,6 +1045,7 @@ def host_overview() -> Dict[str, Any]:
     active = [r for r in rows if r["name"] in running]
     with db.session() as conn:
         memory_guard_view = memory_guard(conn, running) if s.memory_overcommit > 0 else None
+        lifecycle_view = lifecycle.global_values(conn)
     try:
         firewall = netctl.firewall_status()
     except SandboxError as exc:
@@ -1085,7 +1101,8 @@ def host_overview() -> Dict[str, Any]:
         "limits": {"maxCpus": host_cpus(), "minMemoryMb": s.min_memory_mb, "maxMemoryMb": host_memory_mb(),
                    "maxDiskGb": s.max_disk_gb},
         # Non-persistent sandboxes are removed after maxAgeSeconds; all stop when idle.
-        "lifecycle": {"maxAgeSeconds": s.max_age_seconds, "inactivitySeconds": s.inactivity_seconds},
+        # Global lifetime of sandboxes (admin UI or albert.env); clients may override it.
+        "lifecycle": lifecycle_view,
         "publicUrl": access.public_url(),
         "adminPort": s.admin_port,
     }

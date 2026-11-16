@@ -200,9 +200,13 @@ if [ ! -f "$ENV_FILE" ]; then
 #ALBERT_DEFAULT_MEMORY_MB=2048
 #ALBERT_DEFAULT_DISK_GB=10
 #
-# Housekeeping: stop after inactivity, remove non-persistent sandboxes after max age (0 = off)
+# Lifetime of sandboxes (0 = off; better set in the admin UI, Einstellungen,
+# and per client): stop after inactivity (all sandboxes), remove unused
+# non-persistent sandboxes after max age, remove non-persistent ones at the
+# latest after max lifetime (even while in use)
 #ALBERT_INACTIVITY_SECONDS=600
-#ALBERT_MAX_AGE_SECONDS=86400
+#ALBERT_MAX_AGE_SECONDS=14400
+#ALBERT_MAX_LIFETIME_SECONDS=86400
 #
 # Host port pool for sandbox services (bound to 127.0.0.1 only)
 #ALBERT_PORT_RANGE=20000-29999
