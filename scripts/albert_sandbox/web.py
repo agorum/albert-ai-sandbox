@@ -2,7 +2,8 @@
 
 Client API (unchanged paths and payloads, plus additions):
   GET    /health
-  GET    /quota                         (new) quota, usage, defaults, persistentAllowed,
+  GET    /quota                         (new) quota, usage, defaults, persistentAllowed, profileProposalsAllowed,
+                                        workDir,
                                         internetAccess, profile
   POST   /containers                    body: name, persistent, resources{cpus,memoryMb,diskGb}
   GET    /containers
@@ -42,7 +43,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from . import __version__, access, admins, capture, clients, db, dockerctl, lifecycle, netctl, nginxctl, \
     profiles, reconcile, sandboxes, storage, tlsctl
 from .config import settings
-from .errors import BadRequest, SandboxError
+from .errors import BadRequest, Forbidden, SandboxError
 
 STATIC_DIR = Path(__file__).resolve().parent / "static" / "admin"
 
@@ -171,6 +172,10 @@ def client_quota() -> Any:
                     "lifecycle": lifecycle.api_view(eff),
                     "defaults": _defaults_dict(client),
                     "persistentAllowed": clients.persistent_allowed(client),
+                    # May the AI propose profiles from its sandboxes (POST /containers/<name>/profile)?
+                    "profileProposalsAllowed": clients.proposals_allowed(client),
+                    # Directory the AI works in; only files there can be handed to the user.
+                    "workDir": sandboxes.WORK_DIR,
                     # Without internet access sandboxes cannot download anything (no DNS either);
                     # the profile lists the software installed on top of the standard image.
                     "internetAccess": clients.internet_allowed(client),
@@ -284,6 +289,11 @@ def save_as_profile(name: str) -> Any:
     the client; until then it is listed in GET /profiles "proposals".
     ``"preview": true`` only shows what would be saved."""
     body = _body()
+    with db.session() as conn:
+        client = clients.get(conn, g.client["id"])
+    if not clients.proposals_allowed(client):
+        raise Forbidden("This client may not propose profiles from its sandboxes (an administrator can allow it "
+                        "in the sandbox admin UI: client, Berechtigungen).", code="profile_proposals_not_allowed")
     _own_sandbox(name)
     preview = _bool(body.get("preview"))
     result, _ = capture.from_sandbox(name, profile_name=body.get("name"), description=body.get("description"),
@@ -541,6 +551,7 @@ def _client_dict(conn: Any, client: Any, running: set) -> Dict[str, Any]:
         "quota": clients.quotas(client),
         "usage": clients.usage(conn, client["id"], running),
         "allowPersistent": clients.persistent_allowed(client),
+        "allowProfileProposals": clients.proposals_allowed(client),
         "allowInternet": clients.internet_allowed(client),
         "legacyAccess": clients.legacy_access(client),
         # Own internal targets (in addition to the global ones) and the client's own network.
@@ -565,6 +576,7 @@ _CLIENT_FIELD_MAP = {
     "quotaSandboxes": "quota_sandboxes",
     "quotaRunning": "quota_running",
     "allowPersistent": "allow_persistent",
+    "allowProfileProposals": "allow_profile_proposals",
     "allowInternet": "allow_internet",
     "legacyAccess": "legacy_access",
     "allowNets": "allow_nets",

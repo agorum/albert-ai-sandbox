@@ -3,15 +3,25 @@
     "bash-mcp": {
       "command": "bash-mcp",
       "args": [],
-      "env": {
-      },
+      "env": {},
       "options": {
         "timeout": 300000
+      },
+      "tools": {
+        "run": {
+          "description": "Execute a shell command and return output. Work in /tmp/albert-files: run commands there (cwd \"/tmp/albert-files\") and save every file you create in /tmp/albert-files - only files in that directory can be handed to the user (download, display)."
+        },
+        "run_background": {
+          "description": "Run a command in background. Use cwd \"/tmp/albert-files\" and write files to /tmp/albert-files - only files there can be handed to the user."
+        }
       }
     },
     "playwright": {
       "command": "playwright-mcp",
-      "args": ["--no-sandbox", "--isolated"],
+      "args": [
+        "--no-sandbox",
+        "--isolated"
+      ],
       "options": {
         "timeout": 300000
       },

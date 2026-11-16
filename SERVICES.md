@@ -23,6 +23,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`. The extra 
 | 503 | `profile_not_ready` | the chosen (or default) software profile has not been built yet (an admin has to build it) |
 | 403 | `profile_not_allowed` | the profile given in `POST /containers` is not allowed for the client; details: `allowed` (names of the allowed profiles) |
 | 404 | `profile_not_found` | no profile with this name |
+| 403 | `profile_proposals_not_allowed` | `POST /containers/{name}/profile` (also with `preview`) for a client that may not propose profiles (`/quota` → `profileProposalsAllowed`); an administrator can allow it |
 | 409 | `sandbox_not_running` | `POST /containers/{name}/profile` on a stopped sandbox – start it first |
 | 409 | `profile_name_taken` | a profile with this name already exists – choose another name |
 | 409 | `proposal_limit` | 5 proposals of the client already wait for an administrator; details: `limit`, `open` (names) |
@@ -61,6 +62,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`. The extra 
     "filesUpload": "https://<host>/<name>/files/upload",
     "filesDownloadPattern": "https://<host>/<name>/files/download?path=/tmp/albert-files/<uuid.ext>"
   },
+  "workDir": "/tmp/albert-files",
   "resources": {"cpus": 1.0, "memoryMb": 2048, "diskGb": 10, "storage": "image"},
   "usage": {"diskUsedBytes": 52428800, "rootfsUsedBytes": 1048576, "updatedAt": "2026-11-11T16:10:00+01:00"},
   "lastActivityAt": "2026-11-11T16:09:12+01:00",
@@ -72,7 +74,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`. The extra 
   "persistentAllowed": false
 }
 ```
-`status` is `running`, `stopped`, `creating`, `removing`, `rebuilding` or `error` (a rebuild failed; the sandbox and its data are kept until an admin acts). `outdated` lists why the container should be rebuilt (`image`, `hardening`, `network`, `auth` = container from before the internal tokens of MCP Hub and file service); empty when up to date. `user` is the ALBERT user the sandbox is bound to (`null` = no binding). `urls.desktop` without a one-time link only works for legacy clients; use `POST /containers/{name}/desktop`. `persistentAllowed` tells whether the owning client may switch the sandbox to persistent. `internet` is false for clients without internet access (no outgoing connections, no name resolution). `profile` is the client's software profile (`null` = standard image); `outdated` contains `image` while the sandbox still runs an older image than the client's current one and `network` while its network does not match the internet setting. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
+`status` is `running`, `stopped`, `creating`, `removing`, `rebuilding` or `error` (a rebuild failed; the sandbox and its data are kept until an admin acts). `outdated` lists why the container should be rebuilt (`image`, `hardening`, `network`, `auth` = container from before the internal tokens of MCP Hub and file service); empty when up to date. `user` is the ALBERT user the sandbox is bound to (`null` = no binding). `urls.desktop` without a one-time link only works for legacy clients; use `POST /containers/{name}/desktop`. `persistentAllowed` tells whether the owning client may switch the sandbox to persistent. `workDir`: directory to work in and store results (only files there can be downloaded). `internet` is false for clients without internet access (no outgoing connections, no name resolution). `profile` is the client's software profile (`null` = standard image); `outdated` contains `image` while the sandbox still runs an older image than the client's current one and `network` while its network does not match the internet setting. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
 
 ### `GET /health`
 `{"status": "ok", "docker": "up", "api": 3, "features": ["quota", "profiles", "profile-choice", "profile-proposals", "user-binding", "service-auth", "desktop-link", "no-secrets"], "legacyAccess": false, "https": true}` (API key needed, `X-Albert-User` not). `api`/`features` tell this server from older ones (no `api` field: former interface, MCP with the fixed key, no user binding). Every client API response also carries the header `X-Albert-Sandbox-Api: 3`. `legacyAccess`: the client still has the former access; `https`: HTTPS is active (API only over HTTPS).
@@ -86,12 +88,14 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`. The extra 
   "defaults": {"cpus": null, "memoryMb": null, "diskGb": null,
                "effective": {"cpus": 1.0, "memoryMb": 2048, "diskGb": 10}},
   "persistentAllowed": false,
+  "profileProposalsAllowed": false,
+  "workDir": "/tmp/albert-files",
   "internetAccess": true,
   "profile": null,
   "lifecycle": {"stopAfterIdleSeconds": 600, "deleteNonPersistentAfterSeconds": 14400, "maxLifetimeSeconds": 86400}
 }
 ```
-`null` quota = unlimited; quota and usage totals cover the whole client (all users), `usage.runningNames` only lists the asking user's sandboxes (`X-Albert-User`); `quota.running` limits the sandboxes running at the same time; `defaults.effective` is the per-sandbox limit that applies; `persistentAllowed` tells whether persistent sandboxes may be created; `internetAccess` false means the sandboxes cannot reach the internet (install nothing at runtime, use the software of `profile`); `lifecycle`: a sandbox without access and open connection is stopped after `stopAfterIdleSeconds` (all sandboxes, data kept); a non-persistent one is deleted once unused after `deleteNonPersistentAfterSeconds` and at the latest after `maxLifetimeSeconds`, even while in use (`0` = off). Persistent sandboxes are never deleted because of their age.
+`null` quota = unlimited; quota and usage totals cover the whole client (all users), `usage.runningNames` only lists the asking user's sandboxes (`X-Albert-User`); `quota.running` limits the sandboxes running at the same time; `defaults.effective` is the per-sandbox limit that applies; `persistentAllowed` tells whether persistent sandboxes may be created; `profileProposalsAllowed` whether the AI may propose profiles (`POST /containers/{name}/profile`); `workDir` is the directory the AI works in – the file service's directory, the only one whose files can be handed to the user (the MCP tools `run`/`run_background` say so in their descriptions); `internetAccess` false means the sandboxes cannot reach the internet (install nothing at runtime, use the software of `profile`); `lifecycle`: a sandbox without access and open connection is stopped after `stopAfterIdleSeconds` (all sandboxes, data kept); a non-persistent one is deleted once unused after `deleteNonPersistentAfterSeconds` and at the latest after `maxLifetimeSeconds`, even while in use (`0` = off). Persistent sandboxes are never deleted because of their age.
 
 Every sandbox object carries `lifecycle` (`stopAfterIdleSeconds`, `deleteWhenUnusedAfter`, `deleteAtLatest` as timestamps, `null` for persistent sandboxes) and `expiresAt` (`deleteAtLatest`, or `deleteWhenUnusedAfter` without max lifetime; `null` = no automatic deletion).
 

@@ -229,7 +229,7 @@ def test_profiles_without_preparation_keep_their_hash(env):
 # --------------------------------------------------------------------------
 
 def test_client_preview_and_proposal(app, make_client, inspect):
-    client, key = make_client()
+    client, key = make_client(allow_profile_proposals=True)
     name = _sandbox(client["id"])
     http, headers = _api(app, key)
     health = http.get("/health", headers=headers).get_json()
@@ -272,7 +272,7 @@ def test_client_preview_and_proposal(app, make_client, inspect):
 
 
 def test_proposal_limit_and_access(app, make_client, inspect, env):
-    client, key = make_client()
+    client, key = make_client(allow_profile_proposals=True)
     name = _sandbox(client["id"])
     http, headers = _api(app, key)
     for i in range(profiles.MAX_OPEN_PROPOSALS):
@@ -293,7 +293,7 @@ def test_proposal_limit_and_access(app, make_client, inspect, env):
 
 def test_nothing_new_is_refused(app, make_client, inspect):
     inspect["sandbox"] = BASE
-    client, key = make_client()
+    client, key = make_client(allow_profile_proposals=True)
     name = _sandbox(client["id"])
     http, headers = _api(app, key)
     r = http.post(f"/containers/{name}/profile", json={"name": "leer"}, headers=headers)
@@ -314,7 +314,7 @@ def _propose(app, key, name, profile_name="Werkzeuge"):
 
 
 def test_accept_allows_and_builds(app, admin, make_client, inspect, env):
-    client, key = make_client()
+    client, key = make_client(allow_profile_proposals=True)
     name = _sandbox(client["id"])
     row = _propose(app, key, name)
     with db.session() as conn:
@@ -342,7 +342,7 @@ def test_accept_allows_and_builds(app, admin, make_client, inspect, env):
 
 
 def test_reject_deletes_the_proposal(app, admin, make_client, inspect):
-    client, key = make_client()
+    client, key = make_client(allow_profile_proposals=True)
     row = _propose(app, key, _sandbox(client["id"]))
     assert admin.delete(f"/admin/api/profiles/{row['id']}", headers=admin.csrf).status_code == 200
     with db.session() as conn:
@@ -364,7 +364,7 @@ def test_admin_capture_creates_a_normal_profile(app, admin, make_client, inspect
 
 
 def test_client_deletion_keeps_proposal_acceptable(app, admin, make_client, inspect):
-    client, key = make_client()
+    client, key = make_client(allow_profile_proposals=True)
     name = _sandbox(client["id"])
     row = _propose(app, key, name)
     sandboxes.remove(name, actor="test")
@@ -389,4 +389,53 @@ def test_upgrade_adds_the_capture_columns(env):
         upgraded = profiles.get(c, row["id"])
         assert upgraded["prepare_script"] == "" and upgraded["proposal"] == 0
         assert upgraded["origin_sandbox"] is None
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 10
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+
+
+# --------------------------------------------------------------------------
+# permission per client, working directory
+# --------------------------------------------------------------------------
+
+def test_proposals_need_the_switch(app, make_client, inspect):
+    client, key = make_client()  # new clients: not allowed
+    name = _sandbox(client["id"])
+    http, headers = _api(app, key)
+    quota = http.get("/quota", headers=headers).get_json()
+    assert quota["profileProposalsAllowed"] is False and quota["workDir"] == "/tmp/albert-files"
+    for body in ({"preview": True}, {"name": "Werkzeuge"}):
+        r = http.post(f"/containers/{name}/profile", json=body, headers=headers)
+        assert (r.status_code, r.get_json()["error"]) == (403, "profile_proposals_not_allowed")
+    assert inspect["classified"] == []  # nothing was inspected
+    with db.session() as conn:
+        clients.update(conn, client["id"], {"allow_profile_proposals": True})
+    assert http.get("/quota", headers=headers).get_json()["profileProposalsAllowed"] is True
+    assert http.post(f"/containers/{name}/profile", json={"preview": True}, headers=headers).status_code == 200
+
+
+def test_admin_switch_and_upgrade_default(admin, make_client, env):
+    import sqlite3
+    client, _ = make_client()
+    r = admin.patch(f"/admin/api/clients/{client['id']}", json={"allowProfileProposals": True}, headers=admin.csrf)
+    assert r.status_code == 200 and r.get_json()["client"]["allowProfileProposals"] is True
+    conn = sqlite3.connect(str(env["settings"].db_path))
+    conn.execute("ALTER TABLE api_keys DROP COLUMN allow_profile_proposals")
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+    conn.close()
+    db.init_db()
+    with db.session() as c:
+        assert clients.proposals_allowed(clients.get(c, client["id"])) is False  # off after the update
+
+
+def test_sandbox_object_names_the_work_dir(env, make_client):
+    client, _ = make_client()
+    name = _sandbox(client["id"])
+    assert sandboxes.describe(name)["workDir"] == "/tmp/albert-files"
+
+
+def test_mcp_tools_tell_the_work_dir():
+    from pathlib import Path
+    path = Path(__file__).resolve().parent.parent / "docker" / "mcp_settings.json"
+    tools = json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["bash-mcp"]["tools"]
+    for name in ("run", "run_background"):
+        assert "/tmp/albert-files" in tools[name]["description"]

@@ -58,7 +58,8 @@ from .errors import BadRequest, NotFound, QuotaExceeded
 
 QUOTA_FIELDS = ("quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes", "quota_running")
 DEFAULT_FIELDS = ("default_cpus", "default_memory_mb", "default_disk_gb")
-FLAG_FIELDS = ("allow_persistent", "allow_internet", "legacy_access", "allow_standard_image")
+FLAG_FIELDS = ("allow_persistent", "allow_internet", "legacy_access", "allow_standard_image",
+               "allow_profile_proposals")
 EDITABLE_FIELDS = ("label", "profile_id", "allow_nets") + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS \
     + lifecycle.COLUMNS
 
@@ -343,6 +344,11 @@ def quotas(client: sqlite3.Row) -> Dict[str, Any]:
 
 def persistent_allowed(client: sqlite3.Row) -> bool:
     return bool(client["allow_persistent"])
+
+
+def proposals_allowed(client: sqlite3.Row) -> bool:
+    """May ALBERT | AI propose profiles from the client's sandboxes (POST /containers/<n>/profile)?"""
+    return bool(client["allow_profile_proposals"])
 
 
 def internet_allowed(client: sqlite3.Row) -> bool:

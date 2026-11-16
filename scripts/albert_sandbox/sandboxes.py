@@ -31,6 +31,9 @@ STATE_ERROR = "error"  # rebuild failed; kept (with data) until an admin acts
 STATE_REBUILDING = "rebuilding"  # recreate in progress; never touched by reconcile
 
 CONTAINER_PORTS = {"novnc": 6081, "mcphub": 3000, "filesvc": 4000}
+# Working directory of the AI in a sandbox: the file service's directory, the
+# only one whose files can be handed to the user (upload/download).
+WORK_DIR = "/tmp/albert-files"
 LEGACY_VNC_PASSWORD = "albert"
 # Containers get the internal tokens of MCP Hub and file service (nginx sends
 # them, see nginxctl/access). Older containers lack the label -> "auth".
@@ -213,7 +216,7 @@ def urls(name: str) -> Dict[str, str]:
         "mcphub": f"{base}/{name}/mcphub/mcp",
         "files": f"{base}/{name}/files/",
         "filesUpload": f"{base}/{name}/files/upload",
-        "filesDownloadPattern": f"{base}/{name}/files/download?path=/tmp/albert-files/<uuid.ext>",
+        "filesDownloadPattern": f"{base}/{name}/files/download?path={WORK_DIR}/<uuid.ext>",
     }
 
 
@@ -304,6 +307,8 @@ def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
             "filesvc": _port_str(row["filesvc_port"]),
         },
         "urls": urls(name),
+        # where the AI works and stores results (the file service's directory)
+        "workDir": WORK_DIR,
         "resources": {
             "cpus": row["cpus"],
             "memoryMb": row["memory_mb"],
@@ -460,7 +465,7 @@ def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row, image: Optional[str]
         args += ["-v", f"{name}_data:/home/ubuntu"]
     else:
         args += ["-v", f"{storage.home_path(name)}:/home/ubuntu",
-                 "-v", f"{storage.files_path(name)}:/tmp/albert-files"]
+                 "-v", f"{storage.files_path(name)}:{WORK_DIR}"]
     args.append(image or row["image"])
     return args
 
@@ -737,7 +742,7 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
         try:
             if was_running:
                 dockerctl.stop(name)
-            uploads = dockerctl.copy_out_tar(name, "/tmp/albert-files") \
+            uploads = dockerctl.copy_out_tar(name, WORK_DIR) \
                 if (info and row["storage"] == "volume") else None
             if row["storage"] == "image":
                 storage.mount(name)

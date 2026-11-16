@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from .config import settings
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -230,6 +230,11 @@ PROFILE_V10_COLUMNS = {
 }
 
 
+# v11: may ALBERT | AI propose profiles from its sandboxes (off for all clients
+# until an administrator allows it).
+API_KEY_V11_COLUMN = ("allow_profile_proposals", "INTEGER NOT NULL DEFAULT 0")
+
+
 def connect() -> sqlite3.Connection:
     path = settings().db_path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -313,6 +318,8 @@ def init_db() -> None:
                 conn.execute("UPDATE api_keys SET allow_standard_image = CASE WHEN profile_id IS NULL THEN 1 ELSE 0 END")
                 conn.execute("INSERT OR IGNORE INTO client_profiles(client_id, profile_id) "
                              "SELECT id, profile_id FROM api_keys WHERE profile_id IS NOT NULL")
+        if API_KEY_V11_COLUMN[0] not in _columns(conn, "api_keys"):
+            conn.execute(f"ALTER TABLE api_keys ADD COLUMN {API_KEY_V11_COLUMN[0]} {API_KEY_V11_COLUMN[1]}")
         existing = _columns(conn, "profiles")
         for column, ctype in PROFILE_V10_COLUMNS.items():
             if column not in existing:

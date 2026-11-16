@@ -249,6 +249,8 @@ def _client_options(p: argparse.ArgumentParser) -> None:
                    help="may the client create persistent sandboxes (new clients: no)")
     p.add_argument("--internet", choices=("yes", "no"),
                    help="internet access of the client's sandboxes (default: yes)")
+    p.add_argument("--profile-proposals", choices=("yes", "no"),
+                   help="may ALBERT | AI propose profiles from its sandboxes (default: no)")
     p.add_argument("--profile", help="default software profile (id or name; 'none' = shipped image); "
                                      "allowed automatically")
     p.add_argument("--profiles", help="profiles the client may choose from, comma separated "
@@ -423,6 +425,8 @@ def _client_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         fields["allow_persistent"] = args.allow_persistent == "yes"
     if getattr(args, "internet", None):
         fields["allow_internet"] = args.internet == "yes"
+    if getattr(args, "profile_proposals", None):
+        fields["allow_profile_proposals"] = args.profile_proposals == "yes"
     if getattr(args, "legacy_access", None):
         fields["legacy_access"] = args.legacy_access == "yes"
     columns = {api: column for api, column, _ in lifecycle.FIELDS}
@@ -456,6 +460,7 @@ def _client_summary(conn: Any, row: Any, running: set) -> Dict[str, Any]:
                      "diskGb": row["default_disk_gb"]},
         "quota": clients.quotas(row), "usage": clients.usage(conn, row["id"], running),
         "allowPersistent": clients.persistent_allowed(row),
+        "allowProfileProposals": clients.proposals_allowed(row),
         "allowInternet": clients.internet_allowed(row),
         "legacyAccess": clients.legacy_access(row),
         "allowNets": clients.allow_nets(row),

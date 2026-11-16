@@ -834,6 +834,25 @@
     };
   }
 
+  /** "Profilvorschläge der KI erlauben" switch. Returns {node, input, value(), changed()}. */
+  function proposalsPolicyField(client) {
+    const initial = !!(client && client.allowProfileProposals);
+    const input = h("input", { type: "checkbox", class: "switch", name: "allowProfileProposals", checked: initial });
+    const node = h("label", { class: "switch-field" },
+      input,
+      h("span", null,
+        h("span", { class: "field-label" }, "Profilvorschläge der KI erlauben"),
+        h("span", { class: "field-hint" },
+          "Die KI darf die Software einer Sandbox als Profil vorschlagen (save_as_profile). Gebaut wird erst, "
+          + "wenn ein Admin den Vorschlag annimmt. Aus: die API lehnt ab (profile_proposals_not_allowed).")));
+    return {
+      node,
+      input,
+      value: () => input.checked,
+      changed: () => input.checked !== initial,
+    };
+  }
+
   /** "Internetzugriff" switch. Returns {node, input, value(), changed()}. */
   function internetPolicyField(client) {
     const initial = !client || client.allowInternet !== false;
@@ -877,11 +896,11 @@
   }
 
   /** Switches and targets of a client in two boxes: "Berechtigungen" and "Netz". */
-  function clientPolicyGroups(policy, legacy, internet, nets, life) {
+  function clientPolicyGroups(policy, legacy, internet, nets, life, proposals) {
     return h("div", { class: "policy-groups" },
       h("fieldset", null,
         h("legend", null, "Berechtigungen"),
-        h("div", { class: "switch-stack" }, policy.node, legacy.node)),
+        h("div", { class: "switch-stack" }, policy.node, proposals ? proposals.node : null, legacy.node)),
       h("fieldset", null,
         h("legend", null, "Netz"),
         h("div", { class: "switch-stack" }, internet.node, nets.node)),
@@ -1616,6 +1635,7 @@
     const label = h("input", { type: "text", name: "label", required: true, maxlength: "200", autocomplete: "off" });
     const limits = clientLimitFields(null, ov);
     const policy = persistentPolicyField(null, ov);
+    const proposals = proposalsPolicyField(null);
     const internet = internetPolicyField(null);
     const legacy = legacyAccessField(null);
     const nets = allowNetsField(null);
@@ -1648,6 +1668,7 @@
           method: "POST",
           body: {
             label: text, ...limits.values(), allowPersistent: policy.value(), allowInternet: internet.value(),
+            allowProfileProposals: proposals.value(),
             ...choice.values(), legacyAccess: legacy.value(), allowNets: nets.value(), ...life.values(),
           },
         });
@@ -1829,6 +1850,7 @@
       label.dataset.initial = client.label || "";
       const limits = clientLimitFields(client, ov);
       const policy = persistentPolicyField(client, ov);
+      const proposals = proposalsPolicyField(client);
       const internet = internetPolicyField(client);
       const legacy = legacyAccessField(client);
       const nets = allowNetsField(client);
@@ -1840,7 +1862,7 @@
       const form = h("form", { class: "panel panel-body" },
         h("div", { class: "form-row" }, field("Bezeichnung", label), choice.defaultNode),
         choice.allowedNode,
-        clientPolicyGroups(policy, legacy, internet, nets, life),
+        clientPolicyGroups(policy, legacy, internet, nets, life, proposals),
         limits.nodes,
         h("div", { class: "form-actions" }, saveBtn, resetBtn, status));
       resetBtn.addEventListener("click", () => renderForm());
@@ -1861,6 +1883,7 @@
           Object.assign(payload, choice.values());
         }
         if (legacy.changed()) payload.legacyAccess = legacy.value();
+        if (proposals.changed()) payload.allowProfileProposals = proposals.value();
         if (life.changed()) Object.assign(payload, life.values());
         if (nets.changed()) {
           if (!(await confirmOwnNetwork(nets.value()))) return;
