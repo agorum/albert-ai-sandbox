@@ -169,9 +169,13 @@ def deadlines(row: Any, eff: Mapping[str, Any]) -> Dict[str, Optional[int]]:
 
 
 def in_use(row: Any, eff: Mapping[str, Any], running: bool, now: float) -> bool:
-    """Running and used within the inactivity time (an open connection counts as use)."""
-    if not running:
-        return False
+    """Used within the inactivity time: access, an open connection (the watcher
+    records both), a start, or a stop through the API or the admin UI.
+
+    Deliberately independent of ``running``: a restart is a stop followed by a
+    start, and a watcher run in between must not take the sandbox for unused.
+    A sandbox the watcher stopped as idle has no recent activity and counts as
+    unused at once."""
     window = int(eff.get("inactivitySeconds") or 0) or IN_USE_FALLBACK
     last = max(int(_get(row, "last_activity_at") or 0), int(_get(row, "last_started_at") or 0),
                int(_get(row, "created_at") or 0))

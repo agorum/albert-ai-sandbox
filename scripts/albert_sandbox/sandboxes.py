@@ -623,6 +623,10 @@ def stop(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dict
             raise Conflict(f"Sandbox '{name}' is {row['state']}")
         info = dockerctl.inspect_one(name)
         if info and (info.get("State") or {}).get("Running"):
+            if actor != "watcher":
+                # A stop by a user or admin counts as use (a restart must not look unused
+                # to the watcher); the idle stop of the watcher does not.
+                conn.execute("UPDATE sandboxes SET last_activity_at=? WHERE name=?", (int(time.time()), name))
             dockerctl.stop(name)
             db.audit(conn, actor, "sandbox.stop", name)
         return present(conn, name)

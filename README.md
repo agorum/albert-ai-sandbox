@@ -275,7 +275,7 @@ The watcher (`albert-inactivity-watcher.timer`, every minute):
 | Step | Default | Non-persistent | Persistent | Effect |
 |---|---|---|---|---|
 | Inactivity stop | 10 minutes | yes | yes | Stops a sandbox without access and without open connection (desktop, MCP, files); data is kept |
-| Removal when unused | 4 hours | yes | no | Deletes the sandbox **including data** once it is older than this and not in use (no activity within the inactivity time; an open desktop counts as use) |
+| Removal when unused | 4 hours | yes | no | Deletes the sandbox **including data** once it is older than this and not in use (no activity within the inactivity time; access, an open desktop, a start or a stop by a user count as use, so a restart is safe) |
 | Max lifetime | 24 hours | yes | no | Deletes the sandbox at the latest this long after creation, even while in use (a forgotten desktop); the desktop shows a warning 15 minutes before |
 | Reconcile | always | | | Removes containers, disk images, volumes and nginx routes without a sandbox; finishes interrupted removals; rewrites missing routes; mounts disks |
 

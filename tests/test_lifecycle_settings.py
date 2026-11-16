@@ -82,8 +82,27 @@ def test_in_use_sandbox_is_removed_once_unused(env, make_client):
     _age(name, now - 5 * H, activity=now - 60)
     watcher.remove_expired(now)
     assert name in _names()
-    sandboxes.stop(name)  # stopped (e.g. by the idle stop): not in use any more
-    watcher.remove_expired(now)
+    sandboxes.stop(name, actor="watcher")  # idle stop: no use any more
+    watcher.remove_expired(now + 600)
+    assert name not in _names()
+
+
+def test_restart_past_the_max_age_is_safe(env, make_client):
+    """A restart is stop + start; a watcher run in between must not remove the sandbox."""
+    client, _ = make_client()
+    now = time.time()
+    name = sandboxes.create(client["id"])["name"]
+    _age(name, now - 5 * H, activity=now - 3600)   # past 4 h, last used an hour ago, still running
+    sandboxes.stop(name)                            # first half of a restart (by the client)
+    watcher.remove_expired(time.time())             # watcher runs in between
+    assert name in _names()
+    sandboxes.start(name)
+    assert name in env["docker"].running_names()
+    # stopped by a user and then left alone: removed once the inactivity time has passed
+    sandboxes.stop(name)
+    watcher.remove_expired(time.time() + 30)
+    assert name in _names()
+    watcher.remove_expired(time.time() + 601)
     assert name not in _names()
 
 
