@@ -1065,9 +1065,18 @@
     }
   }
 
+  /** True while the admin edits a form of the view: an automatic refresh would re-render it and lose the input. */
+  function editingForm() {
+    const active = document.activeElement;
+    if (active && active.closest && active.closest("#view form") && active.matches("input, textarea, select")) {
+      return true;
+    }
+    return !!document.querySelector("#view form[data-dirty]");
+  }
+
   async function autoRefresh() {
     if (!state.user || document.hidden || state.refreshing) return;
-    if (document.querySelector("dialog[open]")) return;
+    if (document.querySelector("dialog[open]") || editingForm()) return;
     const view = state.view;
     if (!view || !view.refresh) return;
     state.refreshing = true;
@@ -3298,6 +3307,11 @@
       if (state.user) render();
     });
     setInterval(autoRefresh, REFRESH_MS);
+    // Unsaved input keeps the view from being refreshed (saving re-renders it without the mark).
+    document.addEventListener("input", (ev) => {
+      const form = ev.target && ev.target.closest ? ev.target.closest("#view form") : null;
+      if (form) form.dataset.dirty = "1";
+    });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && Date.now() - state.lastRefresh > REFRESH_MS) autoRefresh();
     });
