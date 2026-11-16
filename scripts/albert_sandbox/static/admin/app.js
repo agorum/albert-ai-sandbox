@@ -2763,7 +2763,7 @@
     const createBtn = h("button", { type: "button", class: "btn primary" }, "Profil anlegen");
     createBtn.addEventListener("click", () => openCreateProfile());
     root.append(pageHead("Profile",
-      "Zusatzsoftware auf Basis des mitgelieferten Sandbox-Images – wird einem Client zugeordnet", createBtn));
+      "Zusatzsoftware auf Basis des mitgelieferten Sandbox-Images – Clients wählen aus den für sie erlaubten Profilen", createBtn));
     const body = h("div", null, loadingEl());
     root.append(body);
 
