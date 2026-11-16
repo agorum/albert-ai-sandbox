@@ -290,6 +290,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(sandboxes, "wait_for_mcphub", lambda port: True)
     monkeypatch.setattr(sandboxes, "host_cpus", lambda: 16)
     monkeypatch.setattr(sandboxes, "host_memory_mb", lambda: 65536)
+    monkeypatch.setattr(sandboxes, "host_available_mb", lambda: 60000)
     # Build jobs and background work run inline in tests.
     monkeypatch.setattr(profiles, "spawn_build", lambda pid, seq: profiles.run_build(pid, seq))
     from albert_sandbox import web

@@ -94,7 +94,8 @@ Sandbox server and ALBERT | AI can be updated in any order:
 ### Things to keep in mind
 - Certificates: Let's Encrypt renews itself (certbot timer); an own certificate must be replaced before it expires (the admin UI warns 14 days ahead).
 - Back up `/opt/albert-ai-sandbox-manager/data/manager.db` (clients, sandbox owners, profiles, admin users) – it is the single source of truth.
-- Sizing (measured on a host with 2 cores and 8 GB RAM): an idle sandbox needs about 440 MB RAM, a browser page about 900 MB more; creating one takes about 14 s (6 at once: about 20 s each). The RAM limit of a sandbox is a ceiling, not a reservation – plan the host RAM for the sandboxes that run at the same time and limit them with the client quotas. The manager API allows 10 requests per second per client address (bursts of 40, then `429`); all users of one ALBERT | AI come from the same address.
+- Sizing (measured on a host with 2 cores and 8 GB RAM): an idle sandbox needs about 440 MB RAM, a browser page about 900 MB more; creating one takes about 14 s (6 at once: about 20 s each). The RAM limit of a sandbox is a ceiling, not a reservation. The **memory guard** keeps the host from promising too much: the RAM limits of all running sandboxes may add up to `ALBERT_MEMORY_OVERCOMMIT` (default 2) × (host RAM − `ALBERT_MEMORY_RESERVE_MB`, default 1 GB) – on 8 GB that is about 13.8 GB, i.e. 6 sandboxes of 2 GB. Beyond that, and whenever less than the reserve is free, creating or starting a sandbox is refused with `503 host_full` (the message names the user's own running sandboxes, so the agent can stop one). The overview of the admin UI shows the promised RAM. Raise the factor for hosts whose sandboxes mostly idle; if memory runs out anyway, the kernel ends processes in sandboxes first (manager and nginx are protected).
+- Rate limits of the client API (`/manager/`): `ALBERT_API_RATE_PER_KEY` (default 20 requests per second per API key – all users of one ALBERT | AI share it) and `ALBERT_API_RATE_PER_IP` (default 40 per address, against floods with wrong keys); bursts of 5 seconds' worth are allowed, then `429 rate_limited` with `Retry-After: 1`. MCP Hub, file service and desktop are not counted. Measured: the manager answers about 70 list/status requests per second on 2 cores. After changing a limit run `albert-ai-sandbox-manager site apply`.
 - Clients created later start without the former access; an ALBERT without the security update gets `400 user_required` / `401` until it is switched on.
 
 ## Configuration
@@ -104,6 +105,9 @@ Sandbox server and ALBERT | AI can be updated in any order:
 |---|---|---|
 | `ALBERT_PUBLIC_URL` | `http://<primary IP>` | Base URL used in API responses while HTTPS is off (with HTTPS: `https://<host name of the certificate>`) |
 | `ALBERT_ADMIN_PORT` | `8443` | Port of the admin UI (own origin; HTTPS once a certificate is active) |
+| `ALBERT_API_RATE_PER_KEY` / `ALBERT_API_RATE_PER_IP` | `20` / `40` | Requests per second to the client API per API key / per address (bursts of 5 seconds' worth; `0` = no limit; apply with `site apply`) |
+| `ALBERT_MEMORY_OVERCOMMIT` | `2` | Memory guard: RAM limits of running sandboxes may add up to this factor × (host RAM − reserve); `0` = off |
+| `ALBERT_MEMORY_RESERVE_MB` | `1024` | Memory guard: RAM kept for the host; no create/start while less than this is free |
 | `ALBERT_DESKTOP_LINK_SECONDS` | `120` | Validity of a one-time desktop link |
 | `ALBERT_DESKTOP_SESSION_HOURS` | `8` | Validity of the desktop session (cookie) a link opens |
 | `ALBERT_NGINX_SITE_FILE` / `ALBERT_NGINX_SITE_LINK` | `/etc/nginx/sites-available/albert-sandbox` / `/etc/nginx/sites-enabled/albert-sandbox` | nginx site written by the manager (main server, HTTPS, admin port) |

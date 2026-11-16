@@ -124,6 +124,14 @@ class Settings:
     desktop_session_hours: int = 8
     # Admin UI on its own nginx server (port); see access.py.
     admin_port: int = 8443
+    # Client API rate limits in requests per second (0 = off); bursts of 5 seconds' worth.
+    api_rate_per_key: int = 20
+    api_rate_per_ip: int = 40
+    # Host memory guard: the RAM limits of running sandboxes may add up to this
+    # factor times (host RAM - reserve); a create/start is also refused while
+    # less than the reserve is available. Factor 0 = off.
+    memory_overcommit: float = 2.0
+    memory_reserve_mb: int = 1024
     # nginx site written by the manager (main server, HTTPS, admin port).
     nginx_site_file: Path = Path("/etc/nginx/sites-available/albert-sandbox")
     nginx_site_link: Path = Path("/etc/nginx/sites-enabled/albert-sandbox")
@@ -248,6 +256,10 @@ def load_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
         desktop_ticket_seconds=max(10, get_int("ALBERT_DESKTOP_LINK_SECONDS", 120)),
         desktop_session_hours=max(1, get_int("ALBERT_DESKTOP_SESSION_HOURS", 8)),
         admin_port=get_int("ALBERT_ADMIN_PORT", 8443),
+        api_rate_per_key=max(0, get_int("ALBERT_API_RATE_PER_KEY", 20)),
+        api_rate_per_ip=max(0, get_int("ALBERT_API_RATE_PER_IP", 40)),
+        memory_overcommit=max(0.0, get_float("ALBERT_MEMORY_OVERCOMMIT", 2.0)),
+        memory_reserve_mb=max(0, get_int("ALBERT_MEMORY_RESERVE_MB", 1024)),
         nginx_site_file=Path(get("ALBERT_NGINX_SITE_FILE", "/etc/nginx/sites-available/albert-sandbox")),
         nginx_site_link=Path(get("ALBERT_NGINX_SITE_LINK", "/etc/nginx/sites-enabled/albert-sandbox")),
         novnc_dir=Path(get("ALBERT_NOVNC_DIR", str(install_dir / "novnc"))),

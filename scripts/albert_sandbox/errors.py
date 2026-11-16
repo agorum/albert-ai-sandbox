@@ -53,3 +53,9 @@ class QuotaExceeded(SandboxError):
 class Unavailable(SandboxError):
     status = 503
     code = "unavailable"
+
+
+class HostFull(SandboxError):
+    """The host has no memory left for another running sandbox (memory guard)."""
+    status = 503
+    code = "host_full"

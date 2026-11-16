@@ -78,6 +78,8 @@ if [ -f "$DEFAULT_SITE" ]; then
 fi
 rm -rf "$NGINX_ALBERT_DIR"
 rm -f /etc/nginx/sites-available/albert-*.conf /etc/nginx/conf.d/albert-ratelimit.conf
+rm -f /etc/systemd/system/nginx.service.d/albert-oom.conf
+rmdir /etc/systemd/system/nginx.service.d 2>/dev/null || true
 # Site written by the manager; bring back the Debian default site.
 rm -f /etc/nginx/sites-enabled/albert-sandbox /etc/nginx/sites-available/albert-sandbox
 if [ ! -e "$DEFAULT_SITE" ] && [ -f /etc/nginx/sites-available/default ]; then

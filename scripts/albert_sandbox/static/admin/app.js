@@ -380,6 +380,8 @@
     tls_certbot_missing: "certbot fehlt",
     tls_busy: "Anfrage läuft bereits",
     invalid_net: "Ungültiges internes Ziel",
+    host_full: "Sandbox-Server ausgelastet",
+    rate_limited: "Zu viele Anfragen",
     firewall_failed: "Firewall hat die Änderung abgelehnt",
   };
 
@@ -1201,6 +1203,8 @@
     // allocation of running sandboxes vs host
     const cpuRatio = ratioOf(al.cpusRunning, host.cpus);
     const memRatio = ratioOf(al.memoryMbRunning, host.memoryMb || null);
+    const guard = ov.memoryGuard && ov.memoryGuard.limitMb ? ov.memoryGuard : null;
+    const guardRatio = guard ? ratioOf(guard.committedMb, guard.limitMb) : null;
     const overNote = (ratio, what) => {
       if (ratio === null || ratio <= 1 + 1e-9) return null;
       return h("span", { class: "over-note" },
@@ -1213,13 +1217,21 @@
         al.cpusRunning, host.cpus,
         overNote(cpuRatio, "Kerne"),
         "CPU-Überbuchung ist unkritisch, Sandboxen teilen sich dann die Rechenzeit."),
-      metric("RAM-Limits",
-        `${fmtMb(al.memoryMbRunning)} von ${fmtMb(host.memoryMb)} (${fmtPct(memRatio)})`,
-        al.memoryMbRunning, host.memoryMb || null,
-        overNote(memRatio, "RAM"),
-        memRatio !== null && memRatio > 1
-          ? "Bei RAM-Überbuchung droht der OOM-Killer, wenn mehrere Sandboxen ihr Limit ausschöpfen."
-          : "Summe der RAM-Limits; tatsächlicher Verbrauch ist meist geringer.")));
+      guard
+        ? metric("RAM-Limits",
+          `${fmtMb(guard.committedMb)} von ${fmtMb(guard.limitMb)} zugesagt (${fmtPct(guardRatio)})`,
+          guard.committedMb, guard.limitMb,
+          overNote(memRatio, "RAM"),
+          `Grenze: ${fmtNum(guard.factor, 1)} × (RAM ${fmtMb(host.memoryMb)} − Reserve ${fmtMb(guard.reserveMb)}); `
+          + "darüber lehnt der Server Anlegen und Starten ab (host_full)."
+          + (isNum(guard.availableMb) && guard.availableMb ? ` Jetzt frei: ${fmtMb(guard.availableMb)}.` : ""))
+        : metric("RAM-Limits",
+          `${fmtMb(al.memoryMbRunning)} von ${fmtMb(host.memoryMb)} (${fmtPct(memRatio)})`,
+          al.memoryMbRunning, host.memoryMb || null,
+          overNote(memRatio, "RAM"),
+          memRatio !== null && memRatio > 1
+            ? "Bei RAM-Überbuchung droht der OOM-Killer, wenn mehrere Sandboxen ihr Limit ausschöpfen."
+            : "Summe der RAM-Limits; tatsächlicher Verbrauch ist meist geringer.")));
 
     const storageDir = h("div", { class: "panel" }, h("div", { class: "panel-body" },
       h("div", { class: "panel-title" }, "Dateisysteme"),

@@ -286,13 +286,44 @@ def test() -> None:
 # site: main server (HTTP, HTTPS) and admin server
 # --------------------------------------------------------------------------
 
+API_BURST_FACTOR = 5  # requests a client may send at once: 5 seconds' worth of its rate
+
+
+def _api_rate_zones(s: Any) -> List[str]:
+    """Rate limits of the client API (http context): per API key - all users of one
+    ALBERT | AI share one address - and per address against floods with wrong keys.
+    Requests without Authorization header are only counted per address."""
+    lines = ["# Client API rate limits (ALBERT_API_RATE_PER_KEY / ALBERT_API_RATE_PER_IP, requests per second)."]
+    if s.api_rate_per_key > 0:
+        lines.append(f"limit_req_zone $http_authorization zone=albert_api_key:10m rate={int(s.api_rate_per_key)}r/s;")
+    if s.api_rate_per_ip > 0:
+        lines.append(f"limit_req_zone $binary_remote_addr zone=albert_api_ip:10m rate={int(s.api_rate_per_ip)}r/s;")
+    return lines + [""]
+
+
+def _api_rate_limits(s: Any) -> str:
+    lines = []
+    if s.api_rate_per_key > 0:
+        lines.append(f"        limit_req zone=albert_api_key burst={int(s.api_rate_per_key) * API_BURST_FACTOR} nodelay;")
+    if s.api_rate_per_ip > 0:
+        lines.append(f"        limit_req zone=albert_api_ip burst={int(s.api_rate_per_ip) * API_BURST_FACTOR} nodelay;")
+    if lines:
+        lines.append("        error_page 429 = @albert_rate_limited;")
+    return "\n".join(lines)
+
+
 def _manager_location(s: Any) -> str:
     return f"""    # Client REST API (API key). Admin UI and internal endpoints are not reachable here.
     location ^~ /manager/internal/ {{
         return 404;
     }}
+    location @albert_rate_limited {{
+        default_type application/json;
+        add_header Retry-After 1 always;
+        return 429 '{{"error": "rate_limited", "message": "Too many requests to the sandbox server, retry in 1 second"}}';
+    }}
     location /manager/ {{
-        limit_req zone=albert_manager burst=40 nodelay;
+{_api_rate_limits(s)}
         proxy_pass http://127.0.0.1:{int(s.port)}/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -368,6 +399,7 @@ def render_site(tls: Optional[Dict[str, Any]] = None, admin_allow: Optional[List
     out = [
         "# Managed by albert-ai-sandbox-manager (written on install and on HTTPS/admin changes). Do not edit.",
         "",
+        *_api_rate_zones(s),
         "server {",
         "    listen 80 default_server;",
         "    listen [::]:80 default_server;",

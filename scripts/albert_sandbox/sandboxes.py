@@ -17,11 +17,11 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from . import access, clients, db, dockerctl, netctl, nginxctl, ports, profiles, storage
 from .config import settings
-from .errors import BadRequest, Conflict, Forbidden, NotFound, QuotaExceeded, SandboxError, Unavailable
+from .errors import BadRequest, Conflict, Forbidden, HostFull, NotFound, QuotaExceeded, SandboxError, Unavailable
 from .locking import host_lock
 
 STATE_CREATING = "creating"
@@ -79,15 +79,68 @@ def host_cpus() -> int:
     return os.cpu_count() or 1
 
 
-def host_memory_mb() -> int:
+def _meminfo_mb(field: str) -> int:
     try:
         with open("/proc/meminfo", encoding="utf-8") as fh:
             for line in fh:
-                if line.startswith("MemTotal:"):
+                if line.startswith(field + ":"):
                     return int(line.split()[1]) // 1024
     except OSError:
         pass
     return 0
+
+
+def host_memory_mb() -> int:
+    return _meminfo_mb("MemTotal")
+
+
+def host_available_mb() -> int:
+    """Memory the host could still hand out right now (MemAvailable); 0 = unknown."""
+    return _meminfo_mb("MemAvailable")
+
+
+def memory_guard(conn: sqlite3.Connection, running: Iterable[str], exclude: Optional[str] = None) -> Dict[str, Any]:
+    """RAM limits promised to running sandboxes (all clients) against what the host may promise:
+    ALBERT_MEMORY_OVERCOMMIT x (host RAM - ALBERT_MEMORY_RESERVE_MB). Sandboxes without a RAM
+    limit (migrated from the former version) count with the default limit."""
+    s = settings()
+    running_set = set(running)
+    committed = 0
+    for row in conn.execute("SELECT name, state, memory_mb FROM sandboxes"):
+        if exclude and row["name"] == exclude:
+            continue
+        if row["name"] in running_set or row["state"] == STATE_CREATING:
+            committed += int(row["memory_mb"] or s.default_memory_mb)
+    total = host_memory_mb()
+    limit = int(max(0, total - s.memory_reserve_mb) * s.memory_overcommit) \
+        if s.memory_overcommit > 0 and total else None
+    return {"committedMb": committed, "limitMb": limit, "hostMb": total, "availableMb": host_available_mb(),
+            "factor": s.memory_overcommit, "reserveMb": s.memory_reserve_mb}
+
+
+def check_host_memory(conn: sqlite3.Connection, running: Iterable[str], add_memory_mb: int, *,
+                      client_id: Optional[int] = None, owner: Optional[str] = None,
+                      exclude: Optional[str] = None) -> None:
+    """Refuse another running sandbox (or more RAM for one) the host cannot hold."""
+    s = settings()
+    if s.memory_overcommit <= 0 or add_memory_mb <= 0:
+        return
+    running = set(running)
+    guard = memory_guard(conn, running, exclude=exclude)
+    own = clients.usage(conn, client_id, running, owner=owner)["runningNames"] if client_id is not None else []
+    hint = (("Stop one of your running sandboxes you do not need (" + ", ".join(own)
+             + ", POST /containers/<name>/stop) or try again later.") if own
+            else "Try again later or ask an administrator.")
+    details = {"resource": "hostMemory", "limit": guard["limitMb"], "used": guard["committedMb"],
+               "requested": add_memory_mb, "availableMb": guard["availableMb"], "runningSandboxes": own}
+    if guard["limitMb"] is not None and guard["committedMb"] + add_memory_mb > guard["limitMb"]:
+        raise HostFull(
+            f"The sandbox server is fully booked: running sandboxes already have {guard['committedMb']} MB of RAM, "
+            f"another {add_memory_mb} MB would exceed what this host can hold ({guard['limitMb']} MB). " + hint,
+            details=details)
+    if guard["availableMb"] and guard["availableMb"] < s.memory_reserve_mb:
+        raise HostFull(f"The sandbox server is short of memory right now ({guard['availableMb']} MB free). " + hint,
+                       details=details)
 
 
 def normalize_requested_name(text: str) -> str:
@@ -354,6 +407,9 @@ def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row, image: Optional[str]
         "--restart", "unless-stopped",
         *netctl.run_args(_placement(client)),
         *HARDENING_ARGS,
+        # If the host runs out of memory, processes in sandboxes are ended first
+        # (manager and nginx have -800); not part of the "outdated" check.
+        "--oom-score-adj", "500",
         "--pids-limit", str(s.pids_limit),
     ]
     if row["cpus"]:
@@ -446,6 +502,8 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
             clients.check_quota(conn, client, running, owner=owner, add_cpus=res["cpus"],
                                 add_memory_mb=res["memory_mb"],
                                 add_disk_gb=res["disk_gb"], add_sandboxes=1, add_running=1)
+            check_host_memory(conn, running, int(res["memory_mb"] or s.default_memory_mb),
+                              client_id=client["id"], owner=owner)
             name = generate_name(conn, requested_name)
             novnc, mcphub, filesvc = ports.allocate(conn, 3)
             now = int(time.time())
@@ -522,8 +580,11 @@ def start(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dic
             offline = _placement(client)
             netctl.ensure_ready(offline)
             with host_lock():
-                clients.check_quota(conn, client, _running(), owner=row["owner"], add_cpus=row["cpus"] or 0,
+                running = _running()
+                clients.check_quota(conn, client, running, owner=row["owner"], add_cpus=row["cpus"] or 0,
                                     add_memory_mb=row["memory_mb"] or 0, add_running=1, exclude=name)
+                check_host_memory(conn, running, int(row["memory_mb"] or settings().default_memory_mb),
+                                  client_id=client["id"], owner=row["owner"], exclude=name)
                 # The DNS setting is fixed when a container is created: after the
                 # client's internet access changed, rebuild it (data is kept).
                 rebuild = not netctl.dns_matches(info, offline)
@@ -715,6 +776,7 @@ def update_resources(name: str, cpus: Optional[float] = None, memory_mb: Optiona
             add_disk = (disk_gb - (row["disk_gb"] or 0)) if disk_gb is not None else 0
             clients.check_quota(conn, client, running, add_cpus=max(add_cpus, 0),
                                 add_memory_mb=max(add_mem, 0), add_disk_gb=max(add_disk, 0))
+            check_host_memory(conn, running, max(add_mem, 0))
             if cpus is not None or memory_mb is not None:
                 dockerctl.update_limits(name, cpus, memory_mb)
             if disk_gb is not None and disk_gb != row["disk_gb"]:
@@ -966,6 +1028,8 @@ def host_overview() -> Dict[str, Any]:
     except dockerctl.DockerError:
         running, docker_ok = set(), False
     active = [r for r in rows if r["name"] in running]
+    with db.session() as conn:
+        memory_guard_view = memory_guard(conn, running) if s.memory_overcommit > 0 else None
     try:
         firewall = netctl.firewall_status()
     except SandboxError as exc:
@@ -1009,6 +1073,8 @@ def host_overview() -> Dict[str, Any]:
         "https": {"active": bool(tls_state.get("active")), "host": tls_state.get("fqdn")},
         "profiles": profile_count,
         "sandboxes": {"total": len(rows), "running": len(active)},
+        # RAM limits of running sandboxes against what the host may promise (create/start beyond: host_full).
+        "memoryGuard": memory_guard_view,
         "allocated": {
             "cpusRunning": round(sum(r["cpus"] or 0 for r in active), 2),
             "memoryMbRunning": sum(r["memory_mb"] or 0 for r in active),

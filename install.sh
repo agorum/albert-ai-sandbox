@@ -368,6 +368,9 @@ Environment=MANAGER_DB_PATH=${INSTALL_DIR}/data/manager.db
 ExecStart=${VENV_DIR}/bin/python ${INSTALL_DIR}/scripts/container_manager_service.py
 Restart=on-failure
 RestartSec=5
+# If the host runs out of memory, the kernel should end processes in sandboxes
+# (oom_score_adj +500), not the manager.
+OOMScoreAdjust=-800
 
 [Install]
 WantedBy=multi-user.target
@@ -436,6 +439,18 @@ EOF
 # Settings now live in ${ENV_FILE}; the old drop-in would override it.
 rm -f "$OLD_DROPIN"
 rmdir /etc/systemd/system/albert-container-manager.service.d 2>/dev/null || true
+
+# nginx is protected from the kernel's OOM killer like the manager; the drop-in
+# applies from the next nginx start, the running processes are adjusted now.
+mkdir -p /etc/systemd/system/nginx.service.d
+cat > /etc/systemd/system/nginx.service.d/albert-oom.conf <<'EOF'
+# Managed by albert-ai-sandbox install.sh: sandboxes go first when memory runs out.
+[Service]
+OOMScoreAdjust=-800
+EOF
+for pid in $(pgrep -x nginx || true); do
+	echo -800 > "/proc/${pid}/oom_score_adj" 2>/dev/null || true
+done
 
 systemctl daemon-reload
 systemctl enable albert-sandbox-firewall.service >/dev/null 2>&1

@@ -23,6 +23,8 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 | 503 | `profile_not_ready` | the software profile assigned to the client has not been built yet (an admin has to build it) |
 | 409 | `running_limit_exceeded` | the client already runs as many sandboxes as allowed (create or start); details: `limit`, `used`, `runningSandboxes` (only the asking user's own) – stop one of them first |
 | 409 | `quota_exceeded` | client quota (CPU/RAM of running sandboxes, disk, count) would be exceeded; details: `resource`, `limit`, `used`, `requested` |
+| 503 | `host_full` | the host cannot hold another running sandbox (memory guard: RAM limits of all running sandboxes, or free memory below the reserve); create, start or more RAM; details: `limit`, `used`, `requested`, `availableMb`, `runningSandboxes` (only the asking user's own) – stop one of them or retry later |
+| 429 | `rate_limited` | too many requests to `/manager/` (per API key or per address, answered by nginx with `Retry-After: 1`) – wait and retry once |
 | 409 | `sandbox_limit_exceeded` | requested resources above the client's per-sandbox limit |
 | 409 | `conflict` | sandbox is being created/removed |
 | 500 | `create_failed`, `mcphub_timeout`, `image_missing`, `remove_incomplete` | operation failed (creations are rolled back; incomplete removals are finished by the watcher) |
