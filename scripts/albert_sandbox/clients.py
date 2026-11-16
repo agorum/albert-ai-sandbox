@@ -60,7 +60,12 @@ def hash_key(raw: str) -> str:
 
 
 def generate_key() -> str:
-    return secrets.token_urlsafe(32)
+    """Random API key. Never starts with '-': command lines would take it for an option
+    (``--api-key -abc`` fails; about every 64th key would)."""
+    while True:
+        key = secrets.token_urlsafe(32)
+        if not key.startswith("-"):
+            return key
 
 
 def get(conn: sqlite3.Connection, client_id: int) -> sqlite3.Row:

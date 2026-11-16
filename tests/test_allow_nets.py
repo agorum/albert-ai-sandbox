@@ -291,3 +291,9 @@ def test_client_network_outside_a_changed_pool_stays_cut_off_from_the_host(env):
     rules = [netctl.ClientRule("172.28.1.0/24", False, ()), netctl.ClientRule("172.29.0.0/24", False, ())]
     assert netctl._input_sources("172.30.0.0/16", "172.31.0.0/16", rules) == [
         "172.30.0.0/16", "172.31.0.0/16", "172.28.0.0/16", "172.29.0.0/24"]
+
+
+def test_api_keys_never_start_with_a_dash(monkeypatch):
+    values = iter(["-starts-with-dash", "_fine-key"])
+    monkeypatch.setattr(clients.secrets, "token_urlsafe", lambda n: next(values))
+    assert clients.generate_key() == "_fine-key"
