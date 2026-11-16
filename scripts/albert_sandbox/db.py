@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from .config import settings
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -180,6 +180,18 @@ CREATE TABLE IF NOT EXISTS desktop_sessions (
 CREATE INDEX IF NOT EXISTS idx_desktop_sessions_sandbox ON desktop_sessions(sandbox);
 """
 
+# v7: internal targets per client (in addition to the global ones). A client
+# with own targets gets an own sandbox network; its subnet is kept once
+# assigned, so it is never handed to another client while the network exists.
+API_KEY_V7_COLUMNS = {
+    "allow_nets": "TEXT",   # JSON list of IPv4 networks, NULL = none
+    "net_subnet": "TEXT",   # subnet of the client's own network, NULL = shared networks
+}
+
+V7_SCHEMA = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_net_subnet ON api_keys(net_subnet) WHERE net_subnet IS NOT NULL;
+"""
+
 
 def connect() -> sqlite3.Connection:
     path = settings().db_path
@@ -246,6 +258,10 @@ def init_db() -> None:
                     conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
                     if backfill:
                         conn.execute(backfill)
+        for column, ctype in API_KEY_V7_COLUMNS.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ctype}")
+        conn.executescript(V7_SCHEMA)
         existing = _columns(conn, "sandboxes")
         for column, ctype in SANDBOX_V6_COLUMNS.items():
             if column not in existing:

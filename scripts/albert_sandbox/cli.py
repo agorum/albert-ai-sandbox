@@ -108,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", nargs="?", choices=["show", "set", "clear"], default="show")
     p.add_argument("addresses", nargs="*", help="IP addresses or networks (CIDR)")
 
+    p = add("allow-nets", "internal targets all sandboxes may reach (per client: client set --allow-nets)")
+    p.add_argument("action", nargs="?", choices=["show", "set", "reset"], default="show",
+                   help="reset = back to ALBERT_ALLOW_NETS from the configuration file")
+    p.add_argument("nets", nargs="*", help="IPv4 addresses or networks (CIDR)")
+
     p = add("firewall", "network isolation of the sandboxes (apply is idempotent)")
     p.add_argument("action", nargs="?", choices=["apply", "status", "remove"], default="apply")
     p.add_argument("--boot", action="store_true",
@@ -194,6 +199,8 @@ def _client_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--internet", choices=("yes", "no"),
                    help="internet access of the client's sandboxes (default: yes)")
     p.add_argument("--profile", help="sandbox profile (id or name; 'none' = standard image)")
+    p.add_argument("--allow-nets", help="internal targets of the client in addition to the global ones, "
+                                        "comma separated ('none' = none); the client gets an own network")
     p.add_argument("--legacy-access", choices=("yes", "no"),
                    help="keep ALBERT versions without the security update working: MCP with the fixed key, "
                         "files without key, plain desktop URL, no X-Albert-User (new clients: no)")
@@ -361,6 +368,9 @@ def _client_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         fields["allow_internet"] = args.internet == "yes"
     if getattr(args, "legacy_access", None):
         fields["legacy_access"] = args.legacy_access == "yes"
+    nets = getattr(args, "allow_nets", None)
+    if nets is not None:
+        fields["allow_nets"] = "" if nets.strip().lower() in ("none", "-", "") else nets
     ref = getattr(args, "profile", None)
     if ref is not None:
         if ref.strip().lower() in ("none", "standard", "-", ""):
@@ -381,6 +391,8 @@ def _client_summary(conn: Any, row: Any, running: set) -> Dict[str, Any]:
         "allowPersistent": clients.persistent_allowed(row),
         "allowInternet": clients.internet_allowed(row),
         "legacyAccess": clients.legacy_access(row),
+        "allowNets": clients.allow_nets(row),
+        "network": netctl.placement(row).network,
         "profile": profiles.summary(profiles.get(conn, row["profile_id"])) if row["profile_id"] else None,
     }
 
@@ -429,9 +441,12 @@ def cmd_client(args: argparse.Namespace, out: Out) -> None:
             before = clients.get(conn, args.id)
             row = clients.update(conn, args.id, fields)
             db.audit(conn, "cli", "client.update", row["label"], {"clientId": args.id, **fields})
-        if bool(before["allow_internet"]) != bool(row["allow_internet"]):
+        change = sandboxes.network_change(before, row)
+        if change["firewall"]:
+            netctl.ensure_firewall()
+        if change["move"]:
             if not out.json and not out.quiet:
-                print(f"{YELLOW}Internet access changed - moving/rebuilding the client's sandboxes ...{NC}",
+                print(f"{YELLOW}Network of the client changed - moving/rebuilding its sandboxes ...{NC}",
                       flush=True)
             sandboxes.apply_network_policy(args.id, actor="cli")
         with db.session() as conn:
@@ -759,6 +774,36 @@ def cmd_admin_access(args: argparse.Namespace, out: Out) -> None:
              "Admin UI open for: " + (", ".join(nets) + " (+ loopback/SSH tunnel)" if nets else "all addresses"))
 
 
+def cmd_allow_nets(args: argparse.Namespace, out: Out) -> None:
+    if args.action in ("set", "reset"):
+        with db.session() as conn:
+            previous = db.kv_get(conn, netctl.ALLOW_NETS_KEY)
+            if args.action == "reset":
+                netctl.reset_global_allow_nets(conn)
+            else:
+                netctl.set_global_allow_nets(conn, args.nets)
+            try:
+                netctl.apply_firewall()
+            except SandboxError as exc:
+                if previous is None:
+                    netctl.reset_global_allow_nets(conn)
+                else:
+                    db.kv_set(conn, netctl.ALLOW_NETS_KEY, previous)
+                raise CliError(f"firewall refused the change, nothing was changed: {exc.message}",
+                               "firewall_failed")
+            db.audit(conn, "cli", "settings.allow_nets", None, netctl.global_allow_nets(conn))
+    with db.session() as conn:
+        info = netctl.global_allow_nets(conn)
+        info["clients"] = [{"id": r["id"], "label": r["label"] or "", "nets": clients.allow_nets(r),
+                            "network": netctl.placement(r).network}
+                           for r in clients.list_all(conn) if clients.allow_nets(r)]
+    lines = ["All sandboxes: " + (", ".join(info["nets"]) or "none")
+             + (" (ALBERT_ALLOW_NETS)" if info["source"] == "config" else " (admin settings)")]
+    lines += [f"Client {c['id']} {c['label']}: {', '.join(c['nets'])} (network {c['network']})"
+              for c in info["clients"]]
+    out.emit(info, "\n".join(lines))
+
+
 def cmd_selfcheck(args: argparse.Namespace, out: Out) -> None:
     s = settings()
     with db.session() as conn:
@@ -839,6 +884,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd_tls(args, out)
         elif command == "admin-access":
             cmd_admin_access(args, out)
+        elif command == "allow-nets":
+            cmd_allow_nets(args, out)
         elif command == "migrate":
             cmd_migrate(args, out)
         elif command == "mount-disks":

@@ -221,7 +221,9 @@ def test_firewall_rules_follow_configuration(env):
     assert [" ".join(r) for r in inp][-1] == "-j DROP"
     # offline network: allowed internal networks only, everything else is dropped
     offline_allow = flat.index("-s 172.31.0.0/16 -d 10.0.5.0/24 -j RETURN")
-    assert flat[-1] == "-s 172.31.0.0/16 -j DROP" and offline_allow < len(flat) - 1
+    offline_drop = flat.index("-s 172.31.0.0/16 -j DROP")
+    assert offline_allow < offline_drop
+    assert flat[-1] == "-s 172.29.0.0/16 -j DROP"  # client networks without rules get nothing
     assert not any(r.startswith("-s 172.31.0.0/16 -d 10.0.0.0/8") for r in flat)
     config.configure(allow_nets=())
     assert netctl.desired_rules("172.30.0.0/16", "172.31.0.0/16")[2] != fp1

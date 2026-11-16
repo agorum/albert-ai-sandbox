@@ -37,8 +37,8 @@ from flask import Blueprint, Flask, Response, g, jsonify, redirect, request, sen
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, access, admins, clients, db, dockerctl, nginxctl, profiles, reconcile, sandboxes, \
-    storage, tlsctl
+from . import __version__, access, admins, clients, db, dockerctl, netctl, nginxctl, profiles, reconcile, \
+    sandboxes, storage, tlsctl
 from .config import settings
 from .errors import BadRequest, SandboxError
 
@@ -470,6 +470,10 @@ def _client_dict(conn: Any, client: Any, running: set) -> Dict[str, Any]:
         "allowPersistent": clients.persistent_allowed(client),
         "allowInternet": clients.internet_allowed(client),
         "legacyAccess": clients.legacy_access(client),
+        # Own internal targets (in addition to the global ones) and the client's own network.
+        "allowNets": clients.allow_nets(client),
+        "network": netctl.placement(client).network,
+        "netSubnet": client["net_subnet"],
         "profileId": client["profile_id"],
         "profile": {"id": profile["id"], "name": profile["name"]} if profile else None,
     }
@@ -485,6 +489,7 @@ _CLIENT_FIELD_MAP = {
     "allowPersistent": "allow_persistent",
     "allowInternet": "allow_internet",
     "legacyAccess": "legacy_access",
+    "allowNets": "allow_nets",
     "profileId": "profile_id",
     "defaultCpus": "default_cpus",
     "defaultMemoryMb": "default_memory_mb",
@@ -559,8 +564,11 @@ def admin_update_client(client_id: int) -> Any:
         data = _client_dict(conn, client, running)
         has_sandboxes = conn.execute("SELECT 1 FROM sandboxes WHERE api_key_id=? LIMIT 1",
                                      (client_id,)).fetchone() is not None
-    # Internet access changed: move/rebuild the client's sandboxes right away.
-    if bool(before["allow_internet"]) != bool(client["allow_internet"]) and has_sandboxes:
+    change = sandboxes.network_change(before, client)
+    if change["firewall"]:
+        netctl.ensure_firewall()
+    # Internet access or network changed: move/rebuild the client's sandboxes right away.
+    if change["move"] and has_sandboxes:
         run_in_background(sandboxes.apply_network_policy, client_id, actor=g.actor)
         data["networkPolicy"] = "applying"
     return jsonify({"client": data})
@@ -743,6 +751,13 @@ def admin_sandbox_desktop(name: str) -> Any:
 def _settings_view() -> Dict[str, Any]:
     data = tlsctl.status()
     data["yourAddress"] = request.remote_addr
+    with db.session() as conn:
+        data["allowNets"] = netctl.global_allow_nets(conn)
+        data["allowNets"]["configNets"] = list(settings().allow_nets)
+        data["allowNets"]["clients"] = [
+            {"id": r["id"], "label": r["label"] or "", "nets": clients.allow_nets(r)}
+            for r in clients.list_all(conn) if clients.allow_nets(r)]
+    data["blockedNets"] = list(settings().block_nets)
     return data
 
 
@@ -770,6 +785,30 @@ def admin_set_access() -> Any:
             db.kv_set(conn, access.ADMIN_ALLOW_KEY, previous)
             raise SandboxError(f"nginx refused the change, nothing was changed: {exc}", code="nginx_failed")
         db.audit(conn, g.actor, "settings.admin_access", None, {"allow": nets})
+    return jsonify({"settings": _settings_view()})
+
+
+@admin_bp.put("/api/settings/allow-nets")
+@admin_required
+def admin_set_allow_nets() -> Any:
+    """Internal targets of all sandboxes; {"reset": true} goes back to ALBERT_ALLOW_NETS."""
+    body = _body()
+    with db.session() as conn:
+        previous = db.kv_get(conn, netctl.ALLOW_NETS_KEY)
+        if body.get("reset"):
+            netctl.reset_global_allow_nets(conn)
+        else:
+            netctl.set_global_allow_nets(conn, body.get("allowNets"))
+        try:
+            netctl.apply_firewall()
+        except SandboxError as exc:
+            if previous is None:
+                netctl.reset_global_allow_nets(conn)
+            else:
+                db.kv_set(conn, netctl.ALLOW_NETS_KEY, previous)
+            raise SandboxError(f"firewall refused the change, nothing was changed: {exc.message}",
+                               code="firewall_failed")
+        db.audit(conn, g.actor, "settings.allow_nets", None, netctl.global_allow_nets(conn))
     return jsonify({"settings": _settings_view()})
 
 

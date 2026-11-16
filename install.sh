@@ -208,10 +208,16 @@ if [ ! -f "$ENV_FILE" ]; then
 #ALBERT_PORT_RANGE=20000-29999
 #
 # Network isolation: sandboxes reach the internet, but not each other, not
-# internal networks and not services on this host. Subnet of the sandbox network
-# (must not overlap your LAN), blocked destinations and explicit exceptions:
+# internal networks and not services on this host. Subnets of the sandbox
+# networks (must not overlap your LAN; the pool holds one /24 per client with
+# own internal targets) and blocked destinations:
 #ALBERT_NETWORK_SUBNET=172.30.0.0/16
+#ALBERT_OFFLINE_SUBNET=172.31.0.0/16
+#ALBERT_CLIENT_SUBNET_POOL=172.29.0.0/16
 #ALBERT_BLOCK_NETS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,198.18.0.0/15
+# Internal targets all sandboxes may reach. Better set in the admin UI
+# (Einstellungen; once saved there, this value no longer applies), targets of
+# a single client in its settings:
 #ALBERT_ALLOW_NETS=
 EOF
 	chmod 640 "$ENV_FILE"

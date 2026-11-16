@@ -379,6 +379,8 @@
     tls_terms: "Nutzungsbedingungen",
     tls_certbot_missing: "certbot fehlt",
     tls_busy: "Anfrage läuft bereits",
+    invalid_net: "Ungültiges internes Ziel",
+    firewall_failed: "Firewall hat die Änderung abgelehnt",
   };
 
   function errorTitle(err) {
@@ -727,12 +729,35 @@
         h("span", { class: "field-label" }, "Internetzugriff"),
         h("span", { class: "field-hint" },
           "Aus: keine Verbindungen nach außen und keine Namensauflösung, nur freigegebene interne Ziele "
-          + "(ALBERT_ALLOW_NETS). Gilt sofort auch für bestehende Sandboxen.")));
+          + "(Einstellungen und Client). Gilt sofort auch für bestehende Sandboxen.")));
     return {
       node,
       input,
       value: () => input.checked,
       changed: () => input.checked !== initial,
+    };
+  }
+
+  /** Lines of a textarea with addresses/networks (one per line or comma separated). */
+  function netLines(text) {
+    return String(text || "").split(/[\s,;]+/).map((v) => v.trim()).filter(Boolean);
+  }
+
+  /** "Interne Ziele" of a client (in addition to the global ones). Returns {node, value(), changed()}. */
+  function allowNetsField(client) {
+    const initial = ((client && client.allowNets) || []).join("\n");
+    const area = h("textarea", {
+      class: "mono", rows: "3", name: "allowNets", spellcheck: "false", autocomplete: "off",
+      placeholder: "z. B.\n10.0.5.20\n10.0.5.0/24",
+    });
+    area.value = initial;
+    const node = field("Interne Ziele dieses Clients", area,
+      "Zusätzlich zu den Zielen für alle Sandboxen (Einstellungen): eine IPv4-Adresse oder ein Netz pro Zeile, "
+      + "z. B. das agorum core System des Kunden. Der Client bekommt dafür ein eigenes Netz.");
+    return {
+      node,
+      value: () => netLines(area.value),
+      changed: () => netLines(area.value).join("\n") !== netLines(initial).join("\n"),
     };
   }
 
@@ -1324,6 +1349,9 @@
       h("div", { class: "cell-sub" }, client.allowInternet === false
         ? h("span", { class: "badge warn" }, "ohne Internet")
         : "mit Internet"),
+      (client.allowNets || []).length ? h("div", { class: "cell-sub" }, h("span", {
+        class: "badge", title: "Eigene interne Ziele: " + client.allowNets.join(", "),
+      }, `${client.allowNets.length} interne${client.allowNets.length === 1 ? "s Ziel" : " Ziele"}`)) : null,
       client.legacyAccess ? h("div", { class: "cell-sub" }, h("span", {
         class: "badge warn", title: "MCP und Dateien ohne API-Key, Desktop ohne Einmal-Link (Client-Einstellungen)",
       }, "alte Anbindung")) : null);
@@ -1372,6 +1400,7 @@
     const policy = persistentPolicyField(null, ov);
     const internet = internetPolicyField(null);
     const legacy = legacyAccessField(null);
+    const nets = allowNetsField(null);
     const profile = profileSelectField(null, profiles);
     const created = await modal({
       title: "Client anlegen",
@@ -1380,7 +1409,7 @@
       body: [
         h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), profile.node,
           policy.node, internet.node),
-        h("div", { class: "form-row" }, legacy.node),
+        h("div", { class: "form-row" }, legacy.node, nets.node),
         limits.nodes,
       ],
       onSubmit: async () => {
@@ -1395,7 +1424,7 @@
           method: "POST",
           body: {
             label: text, ...limits.values(), allowPersistent: policy.value(), allowInternet: internet.value(),
-            profileId: profile.value(), legacyAccess: legacy.value(),
+            profileId: profile.value(), legacyAccess: legacy.value(), allowNets: nets.value(),
           },
         });
       },
@@ -1490,7 +1519,12 @@
             h("strong", null, client.allowInternet === false ? "gesperrt" : "erlaubt"),
             h("span", { class: "sep" }, "|"),
             "Anbindung: ",
-            h("strong", null, client.legacyAccess ? "alt (ohne API-Key für MCP und Dateien)" : "mit API-Key und Benutzer")))));
+            h("strong", null, client.legacyAccess ? "alt (ohne API-Key für MCP und Dateien)" : "mit API-Key und Benutzer"),
+            h("span", { class: "sep" }, "|"),
+            "Interne Ziele: ",
+            h("strong", null, (client.allowNets || []).length
+              ? "global + " + client.allowNets.join(", ") : "nur die globalen"),
+            client.netSubnet ? h("span", { class: "faint" }, ` (eigenes Netz ${client.netSubnet})`) : null))));
     }
 
     /** Asks before the internet access of a client with sandboxes is switched. */
@@ -1515,6 +1549,26 @@
       });
     }
 
+    /** The first own target moves the client's sandboxes into an own network - ask first. */
+    async function confirmOwnNetwork(list) {
+      const sandboxesOf = client.sandboxes || [];
+      if (client.netSubnet || !list.length || !sandboxesOf.length) return true;
+      const running = sandboxesOf.filter((s) => s.status === "running").length;
+      return confirmDialog({
+        title: "Eigenes Netz für den Client",
+        message: [
+          h("p", null, "Für eigene interne Ziele bekommt ",
+            h("strong", null, client.label || `#${client.id}`),
+            " ein eigenes Netz. ",
+            sandboxesOf.length === 1 ? "Die Sandbox wird" : `Die ${sandboxesOf.length} Sandboxen werden`,
+            " sofort umgehängt, ohne Neuaufbau."),
+          running ? notice("warn", null, `${running} laufende Sandbox${running === 1 ? " ist" : "en sind"} `
+            + "dabei für einige Sekunden ohne Verbindung; offene Verbindungen der Sandbox nach außen brechen ab.") : null,
+        ],
+        confirmLabel: "Speichern und umhängen",
+      });
+    }
+
     async function renderForm() {
       formRendered = true;
       const [ov, profiles] = await Promise.all([getOverview().catch(() => null), getProfiles().catch(() => [])]);
@@ -1527,13 +1581,14 @@
       const policy = persistentPolicyField(client, ov);
       const internet = internetPolicyField(client);
       const legacy = legacyAccessField(client);
+      const nets = allowNetsField(client);
       const profile = profileSelectField(client, profiles);
       const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Änderungen speichern");
       const resetBtn = h("button", { type: "button", class: "btn" }, "Zurücksetzen");
       const status = h("span", { class: "state" });
       const form = h("form", { class: "panel panel-body" },
         h("div", { class: "form-row" }, field("Bezeichnung", label), profile.node, policy.node, internet.node),
-        h("div", { class: "form-row" }, legacy.node),
+        h("div", { class: "form-row" }, legacy.node, nets.node),
         limits.nodes,
         h("div", { class: "form-actions" }, saveBtn, resetBtn, status));
       resetBtn.addEventListener("click", () => renderForm());
@@ -1547,6 +1602,10 @@
         if (policy.changed()) payload.allowPersistent = policy.value();
         if (profile.changed()) payload.profileId = profile.value();
         if (legacy.changed()) payload.legacyAccess = legacy.value();
+        if (nets.changed()) {
+          if (!(await confirmOwnNetwork(nets.value()))) return;
+          payload.allowNets = nets.value();
+        }
         if (internet.changed()) {
           if (!(await confirmInternetSwitch(internet.value()))) return;
           payload.allowInternet = internet.value();
@@ -1582,7 +1641,9 @@
           renderQuota();
           renderForm();
           // persistence switches, profile and network state in the sandbox table
-          if (["allowPersistent", "profileId", "allowInternet"].some((k) => k in payload)) refresh({ silent: true });
+          if (["allowPersistent", "profileId", "allowInternet", "allowNets"].some((k) => k in payload)) {
+            refresh({ silent: true });
+          }
         } catch (err) {
           showError(err, "Speichern fehlgeschlagen");
         } finally {
@@ -2805,7 +2866,8 @@
   const TLS_MODE = { letsencrypt: "Let's Encrypt", custom: "eigenes Zertifikat" };
 
   function viewSettings(root, _params, ctx) {
-    root.append(pageHead("Einstellungen", "HTTPS-Zertifikat des Hosts und Zugriff auf diese Verwaltung"));
+    root.append(pageHead("Einstellungen",
+      "HTTPS-Zertifikat des Hosts, interne Ziele der Sandboxen und Zugriff auf diese Verwaltung"));
     const body = h("div", null, loadingEl());
     root.append(body);
     let data = null;
@@ -2900,7 +2962,62 @@
         }
       });
       out.push(h("div", { class: "grid cols-2" }, tlsPanel, accessForm));
+      out.push(allowNetsPanel(st));
       return out;
+    }
+
+    function allowNetsPanel(st) {
+      const info = st.allowNets || { nets: [], source: "config", clients: [] };
+      const area = h("textarea", {
+        class: "mono", rows: "5", name: "allowNets", spellcheck: "false", autocomplete: "off",
+        placeholder: "z. B.\n10.0.5.20\n10.0.5.0/24",
+      });
+      area.value = (info.nets || []).join("\n");
+      const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Speichern");
+      const resetBtn = info.source === "settings"
+        ? h("button", { type: "button", class: "btn" }, "Wert aus albert.env verwenden") : null;
+      const form = h("form", { class: "panel mt-16" }, h("div", { class: "panel-body" },
+        h("div", { class: "panel-title" }, "Interne Ziele für alle Sandboxen"),
+        h("p", { class: "metric-note" },
+          "Sandboxen erreichen keine internen Netze (",
+          h("span", { class: "mono" }, (st.blockedNets || []).join(", ") || "–"),
+          "). Hier eingetragene Adressen und Netze sind für alle Sandboxen freigegeben, auch für Clients ohne "
+          + "Internetzugriff. Ziele nur für einen Client stehen in dessen Einstellungen."),
+        field("Freigegebene Ziele", area,
+          "Eine IPv4-Adresse oder ein Netz (CIDR) pro Zeile. Gilt sofort, auch für laufende Sandboxen."
+          + (info.source === "config"
+            ? " Derzeit gilt der Wert aus albert.env (ALBERT_ALLOW_NETS); Speichern übernimmt ihn hierher."
+            : "")),
+        (info.clients || []).length ? h("dl", { class: "kv" },
+          h("dt", null, "Clients mit eigenen Zielen"),
+          h("dd", null, info.clients.map((c, i) => [i ? ", " : null,
+            h("a", { href: "#/clients/" + enc(c.id) }, c.label || `Client ${c.id}`),
+            h("span", { class: "faint mono" }, " (" + c.nets.join(", ") + ")")]))) : null,
+        h("div", { class: "form-actions" }, saveBtn, resetBtn)));
+
+      async function save(body, okText) {
+        saveBtn.disabled = true;
+        saveBtn.classList.add("busy");
+        try {
+          await api("settings/allow-nets", { method: "PUT", body });
+          toast(okText, { type: "success" });
+          if (ctx.alive()) refresh({ silent: true });
+        } catch (err) {
+          showError(err, "Speichern fehlgeschlagen");
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.classList.remove("busy");
+        }
+      }
+      form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        const list = netLines(area.value);
+        save({ allowNets: list }, list.length ? "Interne Ziele gespeichert." : "Keine internen Ziele mehr freigegeben.");
+      });
+      if (resetBtn) {
+        resetBtn.addEventListener("click", () => save({ reset: true }, "Es gilt wieder der Wert aus albert.env."));
+      }
+      return form;
     }
 
     /** After HTTPS was switched on or off the admin UI moves (http <-> https); offer the new address. */

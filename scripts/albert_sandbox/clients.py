@@ -25,6 +25,11 @@ switching a sandbox to persistent is refused with ``persistent_not_allowed``.
 NULL = standard image). Without ``allow_internet`` the client's sandboxes run
 in the offline network (no internet, no DNS; see netctl.py).
 
+``allow_nets`` lists internal targets (IPv4 addresses/networks) the client's
+sandboxes may reach in addition to the global ones (admin UI *Einstellungen*
+or ALBERT_ALLOW_NETS). The first time a client gets own targets it is given an
+own sandbox network (``net_subnet``), see netctl.py.
+
 ``legacy_access`` keeps the access of ALBERT versions from before the
 security update working: MCP with the former fixed key, files without a key,
 the desktop link without a one-time link and requests without user binding
@@ -34,18 +39,20 @@ administrator switches it off; new clients start without it (see access.py).
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import sqlite3
 import time
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from . import netctl
 from .config import settings
 from .errors import BadRequest, NotFound, QuotaExceeded
 
 QUOTA_FIELDS = ("quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes", "quota_running")
 DEFAULT_FIELDS = ("default_cpus", "default_memory_mb", "default_disk_gb")
 FLAG_FIELDS = ("allow_persistent", "allow_internet", "legacy_access")
-EDITABLE_FIELDS = ("label", "profile_id") + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS
+EDITABLE_FIELDS = ("label", "profile_id", "allow_nets") + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS
 
 
 def hash_key(raw: str) -> str:
@@ -138,6 +145,9 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
             clean[key] = _clean_flag(key, value)
         elif key == "profile_id":
             clean[key] = _clean_profile_id(value)
+        elif key == "allow_nets":
+            nets = netctl.parse_nets(value)
+            clean[key] = json.dumps(nets) if nets else None
         else:
             clean[key] = _clean_number(key, value)
     for key in DEFAULT_FIELDS:
@@ -158,6 +168,7 @@ def create(conn: sqlite3.Connection, label: str = "", **fields: Any) -> Tuple[sq
     values = [hash_key(raw), now, now] + list(clean.values())
     placeholders = ",".join("?" for _ in columns)
     cur = conn.execute(f"INSERT INTO api_keys({','.join(columns)}) VALUES({placeholders})", values)
+    _ensure_own_network(conn, cur.lastrowid, clean)
     return get(conn, cur.lastrowid), raw
 
 
@@ -169,7 +180,14 @@ def update(conn: sqlite3.Connection, client_id: int, fields: Dict[str, Any]) -> 
         assignments = ", ".join(f"{k}=?" for k in clean)
         conn.execute(f"UPDATE api_keys SET {assignments}, updated_at=? WHERE id=?",
                      [*clean.values(), int(time.time()), client_id])
+        _ensure_own_network(conn, client_id, clean)
     return get(conn, client_id)
+
+
+def _ensure_own_network(conn: sqlite3.Connection, client_id: int, clean: Dict[str, Any]) -> None:
+    """Own targets need an own network (the firewall works on subnets); kept afterwards."""
+    if clean.get("allow_nets"):
+        netctl.assign_subnet(conn, client_id)
 
 
 def rotate_key(conn: sqlite3.Connection, client_id: int) -> str:
@@ -217,6 +235,11 @@ def internet_allowed(client: sqlite3.Row) -> bool:
 
 def legacy_access(client: sqlite3.Row) -> bool:
     return bool(client["legacy_access"])
+
+
+def allow_nets(client: sqlite3.Row) -> list:
+    """Own internal targets of the client (in addition to the global ones)."""
+    return netctl.client_nets(client)
 
 
 def usage(conn: sqlite3.Connection, client_id: int, running: Iterable[str],

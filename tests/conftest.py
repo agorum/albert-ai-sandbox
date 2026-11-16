@@ -152,8 +152,18 @@ class FakeDocker:
         return self.networks.get(name)
 
     def network_create(self, name, subnet, bridge, labels):
-        self.networks[name] = {"Name": name, "Options": {"com.docker.network.bridge.enable_icc": "false"},
-                               "IPAM": {"Config": [{"Subnet": subnet}]}}
+        self.networks[name] = {"Name": name, "Options": {"com.docker.network.bridge.enable_icc": "false",
+                                                         "com.docker.network.bridge.name": bridge},
+                               "IPAM": {"Config": [{"Subnet": subnet}]}, "Labels": dict(labels)}
+
+    def network_list(self):
+        return [{"name": n, "subnets": [c["Subnet"] for c in (i.get("IPAM") or {}).get("Config") or []],
+                 "labels": i.get("Labels") or {},
+                 "containers": sum(1 for c in self.containers.values() if n in c["NetworkSettings"]["Networks"])}
+                for n, i in self.networks.items()]
+
+    def network_remove(self, name):
+        return self.networks.pop(name, None) is not None
 
     def network_connect(self, network, container):
         self.containers[container]["NetworkSettings"]["Networks"][network] = {}
@@ -258,7 +268,7 @@ def env(tmp_path, monkeypatch):
     for attr in ("available", "image_id", "inspect", "inspect_one", "managed_container_names", "running_names",
                  "run_container", "create_container", "start", "stop", "remove", "update_limits", "volume_names",
                  "volume_remove", "volume_mountpoint", "stats", "network_inspect", "network_create",
-                 "network_connect", "network_disconnect", "copy_out_tar", "copy_in_tar", "build_streaming",
+                 "network_list", "network_remove", "network_connect", "network_disconnect", "copy_out_tar", "copy_in_tar", "build_streaming",
                  "image_inspect", "images_with_label", "image_remove"):
         monkeypatch.setattr(dockerctl, attr, getattr(fake, attr))
     firewall = {"ok": False, "applied": 0, "fail": None}

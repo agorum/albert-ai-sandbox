@@ -203,6 +203,7 @@ def owner_context(conn: sqlite3.Connection, client_ids: Optional[List[int]] = No
         result[owner["id"]] = {
             "image_id": image_id,
             "offline": not clients.internet_allowed(owner),
+            "placement": netctl.placement(owner),
             "profile": profiles.summary(profile_row),
             "persistent_allowed": clients.persistent_allowed(owner),
             "label": owner["label"] or "",
@@ -263,7 +264,8 @@ def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
         "user": row["owner"],
         # Non-empty: the container predates the current image/hardening/network
         # setup; "recreate" rebuilds it with the same data, ports and credentials.
-        "outdated": outdated_reasons(info, context.get("image_id"), bool(context.get("offline"))),
+        "outdated": outdated_reasons(info, context.get("image_id"),
+                                     context.get("placement") or bool(context.get("offline"))),
     }
     if context:
         # Internet access and software profile of the owning client.
@@ -294,6 +296,11 @@ def present(conn: sqlite3.Connection, name: str) -> Dict[str, Any]:
 
 def _offline(client: sqlite3.Row) -> bool:
     return not clients.internet_allowed(client)
+
+
+def _placement(client: sqlite3.Row) -> "netctl.Placement":
+    """Network of the client's sandboxes (shared online/offline network or its own one)."""
+    return netctl.placement(client)
 
 
 def _running() -> set:
@@ -345,7 +352,7 @@ def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row, image: Optional[str]
         "--label", f"{dockerctl.LABEL_APIKEY_HASH}={client['key_hash']}",
         "--label", f"{AUTH_LABEL}={AUTH_VERSION}",
         "--restart", "unless-stopped",
-        *netctl.run_args(_offline(client)),
+        *netctl.run_args(_placement(client)),
         *HARDENING_ARGS,
         "--pids-limit", str(s.pids_limit),
     ]
@@ -383,11 +390,12 @@ def _docker_run_args(row: sqlite3.Row, client: sqlite3.Row, image: Optional[str]
 
 
 def outdated_reasons(info: Optional[Dict[str, Any]], current_image_id: Optional[str],
-                     offline: bool = False) -> List[str]:
+                     offline: "netctl.Target" = False) -> List[str]:
     """Why a container should be rebuilt ('recreate') to get the current setup.
 
     ``current_image_id`` is the image the owner's sandboxes should run (standard
-    or profile image), ``offline`` whether they must be cut off from the internet.
+    or profile image), ``offline`` their network (a Placement, or a bool for the
+    shared networks: whether they must be cut off from the internet).
     """
     if not info:
         return []
@@ -432,7 +440,7 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
         if not dockerctl.image_id(image):
             raise SandboxError(f"Docker image '{image}' not found. Run 'build' first.", code="image_missing")
         # Never start a sandbox without its network isolation in place.
-        netctl.ensure_ready(_offline(client))
+        netctl.ensure_ready(_placement(client))
         with host_lock():
             running = _running()
             clients.check_quota(conn, client, running, owner=owner, add_cpus=res["cpus"],
@@ -511,7 +519,7 @@ def start(name: str, client_id: Optional[int] = None, actor: str = "api") -> Dic
             raise NotFound(f"Container '{name}' is missing (will be cleaned up)", code="not_found")
         if not (info.get("State") or {}).get("Running"):
             client = clients.get(conn, row["api_key_id"])
-            offline = _offline(client)
+            offline = _placement(client)
             netctl.ensure_ready(offline)
             with host_lock():
                 clients.check_quota(conn, client, _running(), owner=row["owner"], add_cpus=row["cpus"] or 0,
@@ -581,7 +589,7 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
         image, _profile = profiles.target_image(conn, client)
         if not dockerctl.image_id(image):
             raise SandboxError(f"Docker image '{image}' not found. Run 'build' first.", code="image_missing")
-        netctl.ensure_ready(_offline(client))
+        netctl.ensure_ready(_placement(client))
         info = dockerctl.inspect_one(name)
         was_running = bool(info and (info.get("State") or {}).get("Running"))
         start_after = was_running if run is None else run
@@ -765,8 +773,16 @@ def _destroy(conn: sqlite3.Connection, row: sqlite3.Row, actor: str, reason: str
         db.audit(conn, actor, "sandbox.remove", name, {"reason": reason})
 
 
+def network_change(before: sqlite3.Row, after: sqlite3.Row) -> Dict[str, bool]:
+    """What a change of a client needs: new firewall rules, moving its sandboxes."""
+    internet = bool(before["allow_internet"]) != bool(after["allow_internet"])
+    subnet = before["net_subnet"] != after["net_subnet"]
+    return {"firewall": internet or subnet or clients.allow_nets(before) != clients.allow_nets(after),
+            "move": internet or subnet}
+
+
 def apply_network_policy(client_id: int, actor: str = "admin") -> Dict[str, str]:
-    """Bring all sandboxes of a client in line with its internet access.
+    """Bring all sandboxes of a client in line with its internet access and network.
 
     First every container is moved into the right network (takes effect at
     once, also for running sandboxes), then containers whose DNS setting does
@@ -778,7 +794,7 @@ def apply_network_policy(client_id: int, actor: str = "admin") -> Dict[str, str]
         names = [r["name"] for r in conn.execute(
             "SELECT name FROM sandboxes WHERE api_key_id=? AND state IN (?, ?) ORDER BY created_at",
             (client_id, STATE_READY, STATE_ERROR))]
-    offline = _offline(client)
+    offline = _placement(client)
     netctl.ensure_ready(offline)
     infos = dockerctl.inspect(names) if names else {}
     results: Dict[str, str] = {}
@@ -802,7 +818,8 @@ def apply_network_policy(client_id: int, actor: str = "admin") -> Dict[str, str]
             results[name] = exc.message
     with db.session() as conn:
         db.audit(conn, actor, "client.network_policy", client["label"] or str(client_id),
-                 {"clientId": client_id, "internet": not offline, "sandboxes": results})
+                 {"clientId": client_id, "internet": not offline.offline, "network": offline.network,
+                  "sandboxes": results})
     return results
 
 
@@ -935,6 +952,8 @@ def host_overview() -> Dict[str, Any]:
         legacy_clients = conn.execute("SELECT COUNT(*) FROM api_keys WHERE legacy_access=1").fetchone()[0]
         profile_count = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
         tls_state = db.kv_get(conn, "tls", {}) or {}
+        allow = netctl.global_allow_nets(conn)
+        client_networks = conn.execute("SELECT COUNT(*) FROM api_keys WHERE net_subnet IS NOT NULL").fetchone()[0]
     try:
         running = dockerctl.running_names()
         docker_ok = True
@@ -954,7 +973,12 @@ def host_overview() -> Dict[str, Any]:
             "com.docker.network.bridge.enable_icc") == "false",
         "firewall": firewall,
         "blockedNets": list(s.block_nets),
-        "allowedNets": list(s.allow_nets),
+        # Internal targets of all sandboxes (admin UI or ALBERT_ALLOW_NETS) ...
+        "allowedNets": allow["nets"],
+        "allowedNetsSource": allow["source"],
+        # ... and clients with own targets in an own network each.
+        "clientNetworks": client_networks,
+        "clientSubnetPool": s.client_subnet_pool,
         # Sandboxes of clients without internet access (created on first use).
         "offline": {
             "network": s.offline_network_name if offline_info else None,

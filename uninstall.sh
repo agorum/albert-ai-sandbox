@@ -50,6 +50,10 @@ systemctl disable albert-sandbox-firewall.service >/dev/null 2>&1 || true
 if command -v docker >/dev/null 2>&1; then
 	docker network rm albert-sandbox >/dev/null 2>&1 || true
 	docker network rm albert-sandbox-offline >/dev/null 2>&1 || true
+	# own networks of clients with own internal targets
+	for n in $(docker network ls -q --filter label=albert.manager=1); do
+		docker network rm "$n" >/dev/null 2>&1 || true
+	done
 	say "Removing sandbox profile images..."
 	for img in $(docker image ls -q --filter label=albert.profile | sort -u); do
 		docker image rm -f "$img" >/dev/null 2>&1 || true

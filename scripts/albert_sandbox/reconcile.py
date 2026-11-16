@@ -52,17 +52,18 @@ def reconcile(dry_run: bool = False, actor: str = "reconcile") -> Dict[str, Any]
                 netctl.apply_firewall()
     except SandboxError as exc:
         errors.append(exc.message)
-    # Network per sandbox follows the owner's internet access; containers
-    # unknown to the database get the most restrictive (offline) network.
+    # Network per sandbox follows the owner's internet access and own network;
+    # containers unknown to the database get the most restrictive (offline) network.
     with db.session() as conn:
-        policy = {r["name"]: (not r["allow_internet"], r["state"]) for r in conn.execute(
-            "SELECT s.name, s.state, k.allow_internet FROM sandboxes s JOIN api_keys k ON k.id = s.api_key_id")}
+        policy = {r["name"]: (netctl.placement(r), r["state"]) for r in conn.execute(
+            "SELECT s.name, s.state, k.id, k.allow_internet, k.net_subnet "
+            "FROM sandboxes s JOIN api_keys k ON k.id = s.api_key_id")}
     for name in sorted(docker_names):
         info = infos.get(name)
-        offline = policy.get(name, (True, None))[0]
+        offline = policy.get(name, (netctl.shared(True), None))[0]
         if info and not netctl.is_isolated(info, offline):
             act("isolate-network", name,
-                f"container not (only) in the {'offline' if offline else 'isolated'} network: "
+                f"container not (only) in the network {offline.network}: "
                 + ",".join(netctl.container_networks(info)))
             if not dry_run:
                 try:
@@ -198,6 +199,19 @@ def reconcile(dry_run: bool = False, actor: str = "reconcile") -> Dict[str, Any]
                     storage.mount(row["name"])
                 except storage.StorageError as exc:
                     errors.append(str(exc))
+
+    # 8b: own networks of clients that were deleted (once no container uses them)
+    try:
+        with db.session() as conn:
+            stale_networks = netctl.stale_client_networks(conn)
+        for item in stale_networks:
+            if item["containers"]:
+                continue
+            act("remove-network", item["name"], "network of a deleted client")
+            if not dry_run and not dockerctl.network_remove(item["name"]):
+                errors.append(f"could not remove network {item['name']}")
+    except dockerctl.DockerError as exc:
+        errors.append(str(exc))
 
     # 9: sandbox profiles - interrupted builds, images nobody uses any more,
     # build directories of deleted profiles

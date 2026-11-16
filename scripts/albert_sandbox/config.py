@@ -109,6 +109,10 @@ class Settings:
     # on, so name lookups fail at once (Docker's embedded DNS would otherwise
     # resolve external names for them from the host's network namespace).
     offline_dns: str = "127.0.0.254"
+    # Clients with own internal targets get an own network each, a subnet of
+    # this pool (see netctl.py).
+    client_subnet_pool: str = "172.29.0.0/16"
+    client_subnet_prefix: int = 24
     profile_image_prefix: str = "albert-ai-sandbox-profile"
     profile_build_timeout: int = 3600
     firewall: bool = True
@@ -233,6 +237,8 @@ def load_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
         offline_network_subnet=get("ALBERT_OFFLINE_SUBNET", "172.31.0.0/16"),
         offline_network_bridge=get("ALBERT_OFFLINE_BRIDGE", "br-albert-off")[:15],
         offline_dns=get("ALBERT_OFFLINE_DNS", "127.0.0.254"),
+        client_subnet_pool=get("ALBERT_CLIENT_SUBNET_POOL", "172.29.0.0/16"),
+        client_subnet_prefix=get_int("ALBERT_CLIENT_SUBNET_PREFIX", 24),
         profile_image_prefix=get("ALBERT_PROFILE_IMAGE_PREFIX", "albert-ai-sandbox-profile"),
         profile_build_timeout=get_int("ALBERT_PROFILE_BUILD_TIMEOUT", 3600),
         firewall=get("ALBERT_FIREWALL", "1") not in ("0", "false", "no"),

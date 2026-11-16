@@ -195,6 +195,24 @@ def network_remove(name: str) -> bool:
     return _run(["network", "rm", name], timeout=60, check=False).returncode == 0
 
 
+def network_list() -> List[Dict[str, Any]]:
+    """All docker networks with name, IPv4 subnets, labels and attached containers."""
+    ids = [line.strip() for line in _text(_run(["network", "ls", "-q"], timeout=30)).splitlines() if line.strip()]
+    if not ids:
+        return []
+    try:
+        payload = json.loads(_text(_run(["network", "inspect", *ids], timeout=60, check=False)) or "[]")
+    except ValueError:
+        payload = []
+    result = []
+    for item in payload or []:
+        subnets = [c["Subnet"] for c in ((item.get("IPAM") or {}).get("Config") or [])
+                   if c.get("Subnet") and ":" not in c["Subnet"]]
+        result.append({"name": item.get("Name"), "subnets": subnets, "labels": item.get("Labels") or {},
+                       "containers": len(item.get("Containers") or {})})
+    return result
+
+
 def copy_out_tar(container: str, path: str) -> Optional[bytes]:
     """Tar stream of a directory inside a (running or stopped) container."""
     proc = _run(["cp", f"{container}:{path}", "-"], timeout=600, check=False)
