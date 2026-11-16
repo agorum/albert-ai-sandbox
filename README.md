@@ -12,7 +12,7 @@ ALBERT | AI Sandbox provides isolated, browser-ready compute environments for AI
 - **Access only with the API key**: MCP Hub, file service and desktop of a sandbox are checked by nginx through the manager on every request; sandboxes are bound to the ALBERT user that created them; the desktop opens with one-time links.
 - Auto-stop sandboxes after 10 minutes of inactivity, auto-delete non-persistent sandboxes after a maximum age (default 24 hours).
 - **Self-cleaning**: a reconcile step removes everything that has no sandbox any more (containers, disk images, volumes, nginx routes) and repairs missing routes and mounts.
-- **Network isolation**: sandboxes reach the internet, but neither each other nor internal networks nor services of the host. **Internet access can be switched off per client.**
+- **Network isolation**: sandboxes reach the internet, but neither each other nor internal networks nor services of the host. **Internet access can be switched off per client**; internal targets (e.g. an agorum core system) can be opened for all sandboxes or per client.
 - **Sandbox profiles**: own images per client with extra software (apt, pip, npm packages, optional setup commands), built in the admin UI on top of the shipped image.
 - **Hardened containers** without extra privileges; a one-click **rebuild** brings existing sandboxes to the current image and hardening while keeping their data.
 - Keep data and lifecycle operations isolated per API key, ensuring one tenant cannot touch another tenant's sandboxes.
@@ -49,8 +49,8 @@ SQLite is the single source of truth. Docker containers, disk images and nginx r
   | 80 | HTTP: Let's Encrypt challenges, redirect to HTTPS (with HTTPS active it refuses API, MCP and file requests) |
   | 443 | HTTPS: client API, MCP Hub, file service and desktops of the sandboxes |
   | 8443 | Admin UI (`ALBERT_ADMIN_PORT`) – open it only for your admin networks |
-- **Subnets**: the sandbox networks `172.30.0.0/16` and `172.31.0.0/16` must not overlap your networks (`ALBERT_NETWORK_SUBNET`, `ALBERT_OFFLINE_SUBNET`).
-- **Internal targets**: sandboxes cannot reach private networks. If they must reach internal systems (e.g. an agorum core server), list them in `ALBERT_ALLOW_NETS` before sandboxes are created.
+- **Subnets**: the sandbox networks `172.30.0.0/16`, `172.31.0.0/16` and the pool for client networks `172.29.0.0/16` must not overlap your networks (`ALBERT_NETWORK_SUBNET`, `ALBERT_OFFLINE_SUBNET`, `ALBERT_CLIENT_SUBNET_POOL`).
+- **Internal targets**: sandboxes cannot reach private networks. If they must reach internal systems (e.g. an agorum core server), open them in the admin UI – for all sandboxes under *Einstellungen*, for one client in its settings (see "Internal targets" below).
 - **Proxy or load balancer in front**: let nginx on this host terminate TLS (the certificate is managed in the admin UI) and pass on the real client address (nginx `real_ip`); otherwise the admin address list and the login throttle only see the proxy.
 
 ### New installation
@@ -66,16 +66,17 @@ SQLite is the single source of truth. Docker containers, disk images and nginx r
 4. *Einstellungen*:
    - **HTTPS**: request a Let's Encrypt certificate (the DNS name must point to the host, port 80 must be reachable from the internet) or upload an own certificate (PEM certificate, intermediates, private key without passphrase). Each change is tested with `nginx -t`; if nginx refuses it, the previous configuration stays active (CLI: `albert-ai-sandbox-manager tls status|letsencrypt|custom|disable`). Afterwards the admin UI moves to `https://<host>:8443/manager/admin/`.
    - **Allowed addresses** of the admin UI (your own address must be in the list; `127.0.0.1` for an SSH tunnel always works).
-5. *Clients*: create one client per agorum core system. **The API key is shown only once.** Set limits, quotas, internet access and software profile as needed. Leave *Alte Anbindung erlauben* off – switch it on only for an ALBERT | AI without the security update (see below).
+   - **Internal targets for all sandboxes**, if any.
+5. *Clients*: create one client per agorum core system. **The API key is shown only once.** Set limits, quotas, internet access, internal targets of this client and software profile as needed. Leave *Alte Anbindung erlauben* off – switch it on only for an ALBERT | AI without the security update (see below).
 6. In ALBERT | AI, tool configuration `sandbox_manage`: server URL `https://<host>` and the client's API key.
 7. Check: `albert-ai-sandbox-manager selfcheck`; optionally `MANAGER_URL=https://<host>/manager python3 scripts/smoke_test_manager.py --key <API key>` (creates and removes a test sandbox).
 
 ### Updating an existing host
-1. **Coming from a version without network isolation**: clarify first whether sandboxes need internal targets (`ALBERT_ALLOW_NETS`, see above) – the isolation blocks them otherwise. It is the one point where an update can break something.
+1. **Coming from a version without network isolation**: clarify first whether sandboxes need internal targets (see above) – the isolation blocks them otherwise; set them right after the update (admin UI or `ALBERT_ALLOW_NETS`). It is the one point where an update can break something.
 2. Pull the new version and run `sudo bash install.sh` again. Running sandboxes keep running; only the manager service restarts briefly. The sandbox image is rebuilt when `docker/` changed (takes a few minutes; `--skip-build` / `--force-build` override this). The database schema is migrated automatically; installations of the former Bash version (JSON registry) are migrated as well: existing sandboxes, their data volumes and ports are taken over, API keys stay valid. A certificate set up by an older `setup-tls.sh` is taken over. Replaced configuration is backed up to `/opt/albert-ai-sandbox-manager/backups/<timestamp>/`.
 3. **Existing clients keep the former access** (*Alte Anbindung erlauben* is switched on for them), so ALBERT | AI versions without the security update keep working.
 4. The admin UI moves to port 8443: open the port (restricted to admin networks); `/manager/admin/` on the main port redirects there.
-5. **Rebuild the existing sandboxes** (preferably outside working hours): `albert-ai-sandbox-manager recreate --outdated`, or "Neu aufbauen" per sandbox in the admin UI. Until then they are marked *veraltet* but keep working. The rebuild keeps home directory, uploads, ports and limits, renews VNC password and internal tokens (open desktops have to be opened again) and briefly interrupts running sandboxes. Sandboxes migrated from the Bash version keep their Docker volume (no disk limit).
+5. **Rebuild the existing sandboxes** (preferably outside working hours): `albert-ai-sandbox-manager recreate --outdated`, or "Neu aufbauen" per sandbox in the admin UI. Until then they are marked *veraltet* but keep working. The rebuild keeps home directory, uploads, ports and limits, renews VNC password and internal tokens (open desktops have to be opened again) and briefly interrupts running sandboxes. Sandboxes migrated from the Bash version keep their Docker volume (no disk limit). Everything installed outside the home directory (e.g. with `apt` or a system-wide `pip`) is gone after a rebuild – use a software profile for software every sandbox of a client needs. **Since the move to Ubuntu 24.04** (Python 3.12): Python packages a user installed into the home directory (`pip install --user`, `~/.local/lib/python3.10`) are not found any more and have to be installed again.
 6. Set up HTTPS in the admin UI (if not done yet). **Then switch the server URL in every connected ALBERT | AI to `https://`** – over HTTP the host refuses API, MCP and file requests (`https_required`).
 7. Once an ALBERT | AI has the security update, switch off *Alte Anbindung erlauben* for its client – **but only after its users have used their sandboxes once** (see "Sandboxes from before the update" below).
 
@@ -93,6 +94,7 @@ Sandbox server and ALBERT | AI can be updated in any order:
 ### Things to keep in mind
 - Certificates: Let's Encrypt renews itself (certbot timer); an own certificate must be replaced before it expires (the admin UI warns 14 days ahead).
 - Back up `/opt/albert-ai-sandbox-manager/data/manager.db` (clients, sandbox owners, profiles, admin users) – it is the single source of truth.
+- Sizing (measured on a host with 2 cores and 8 GB RAM): an idle sandbox needs about 440 MB RAM, a browser page about 900 MB more; creating one takes about 14 s (6 at once: about 20 s each). The RAM limit of a sandbox is a ceiling, not a reservation – plan the host RAM for the sandboxes that run at the same time and limit them with the client quotas. The manager API allows 10 requests per second per client address (bursts of 40, then `429`); all users of one ALBERT | AI come from the same address.
 - Clients created later start without the former access; an ALBERT without the security update gets `400 user_required` / `401` until it is switched on.
 
 ## Configuration
@@ -118,10 +120,12 @@ Sandbox server and ALBERT | AI can be updated in any order:
 | `ALBERT_STORAGE_DIR` | `/var/lib/albert-sandbox` | Disk images and mount points |
 | `ALBERT_NETWORK_SUBNET` | `172.30.0.0/16` | Subnet of the isolated sandbox network (must not overlap your LAN) |
 | `ALBERT_OFFLINE_SUBNET` | `172.31.0.0/16` | Subnet of the network for clients without internet access (created on first use; must not overlap your LAN) |
+| `ALBERT_CLIENT_SUBNET_POOL` | `172.29.0.0/16` | Subnets of the own networks of clients with own internal targets (must not overlap your LAN) |
+| `ALBERT_CLIENT_SUBNET_PREFIX` | `24` | Size of one client network (`/24` = 253 sandboxes, 256 clients in the default pool) |
 | `ALBERT_OFFLINE_DNS` | `127.0.0.254` | DNS server given to sandboxes without internet access – an address nothing answers on, so name lookups fail at once |
 | `ALBERT_PROFILE_BUILD_TIMEOUT` | `3600` | Maximum duration of a profile image build in seconds |
 | `ALBERT_BLOCK_NETS` | private ranges, CGNAT, link-local, `198.18.0.0/15` | Destinations sandboxes must not reach |
-| `ALBERT_ALLOW_NETS` | – | Exceptions from `ALBERT_BLOCK_NETS` (e.g. an internal test system) |
+| `ALBERT_ALLOW_NETS` | – | Internal targets of all sandboxes (exceptions from `ALBERT_BLOCK_NETS`) – only until they are saved in the admin UI (*Einstellungen*), which then applies instead |
 | `ALBERT_BLOCK_HOST_ACCESS` | `1` | Block connections from sandboxes to services on the host (ssh, nginx, …) |
 
 ## Clients, Limits and Quotas
@@ -135,7 +139,8 @@ A client is an API key plus settings:
   - Maximum number of sandboxes **running at the same time** ("davon laufend"). Creating or starting one more is refused with HTTP 409 `running_limit_exceeded`; the message names the running sandboxes so the agent can stop one first. `0` = the client may not run sandboxes. Lowering the limit stops nothing; it applies to the next start.
 - **Persistent sandboxes** ("Persistente Sandboxen erlauben"): only clients with this permission may create persistent sandboxes or switch one to persistent; otherwise the request is refused with HTTP 403 `persistent_not_allowed`. New clients start without it. Clients that existed before the update keep it, so nothing changes for them until an admin switches it off. Withdrawing the permission leaves existing persistent sandboxes as they are (they can still be switched off, not on again).
 - **Software profile** ("Software-Profil", see below): which image new sandboxes of the client are created from. Default: the shipped image.
-- **Internet access** ("Internetzugriff", default on): without it the client's sandboxes cannot open any connection to the outside and cannot resolve names; only the internal exceptions in `ALBERT_ALLOW_NETS` stay reachable. ALBERT | AI still reaches the sandbox (desktop, MCP Hub, file service), because those connections come in through nginx. Switching the setting applies at once to all existing sandboxes of the client: they are moved into the other network and rebuilt (data, ports and credentials are kept; running ones are briefly unreachable). The client API reports the setting (`internetAccess` in `/quota`, `internet` in the sandbox object) so the agent knows it cannot download anything.
+- **Internet access** ("Internetzugriff", default on): without it the client's sandboxes cannot open any connection to the outside and cannot resolve names; only the internal targets (global and the client's own) stay reachable. ALBERT | AI still reaches the sandbox (desktop, MCP Hub, file service), because those connections come in through nginx. Switching the setting applies at once to all existing sandboxes of the client: they are moved into the other network and rebuilt (data, ports and credentials are kept; running ones are briefly unreachable). The client API reports the setting (`internetAccess` in `/quota`, `internet` in the sandbox object) so the agent knows it cannot download anything.
+- **Internal targets of the client** ("Interne Ziele dieses Clients"): IPv4 addresses or networks its sandboxes may reach in addition to the targets for all sandboxes, see below.
 
 Manage clients in the admin UI or on the host:
 ```bash
@@ -144,6 +149,7 @@ albert-ai-sandbox-manager client create --label "Customer A" --default-cpus 2 --
 albert-ai-sandbox-manager client list
 albert-ai-sandbox-manager client set 3 --quota-cpus none      # none = unlimited / global default
 albert-ai-sandbox-manager client set 3 --profile "Office" --internet no
+albert-ai-sandbox-manager client set 3 --allow-nets 10.0.5.20,10.0.6.0/24   # none = no own targets
 albert-ai-sandbox-manager client rotate 3                       # new API key, sandboxes stay
 albert-ai-sandbox-manager client delete 3                       # deletes all its sandboxes too
 ```
@@ -176,12 +182,22 @@ albert-ai-sandbox-manager profile list | show <id|name> | log <id|name> | set | 
 Sandboxes run code an AI agent controls, so they are isolated from everything but the internet:
 
 - **Own network without inter-container traffic**: all sandboxes live in the Docker network `albert-sandbox` (`enable_icc=false`). A sandbox cannot connect to another sandbox — not to its MCP Hub, file service or desktop.
-- **No internal networks**: iptables rules (chain `ALBERT-SANDBOX` in `DOCKER-USER`) drop connections from sandboxes to `ALBERT_BLOCK_NETS` — RFC 1918 networks, CGNAT, link-local including cloud metadata (169.254.169.254). Needed internal targets can be allowed with `ALBERT_ALLOW_NETS`.
+- **No internal networks**: iptables rules (chain `ALBERT-SANDBOX` in `DOCKER-USER`) drop connections from sandboxes to `ALBERT_BLOCK_NETS` — RFC 1918 networks, CGNAT, link-local including cloud metadata (169.254.169.254). Needed internal targets can be allowed (see below).
 - **No host services**: chain `ALBERT-SANDBOX-IN` (in `INPUT`) drops connections from sandboxes to the host itself (ssh, nginx, …). nginx still reaches the sandboxes, so desktop, MCP Hub and file service work as before.
-- **Clients without internet access**: their sandboxes live in the second network `albert-sandbox-offline` (`ALBERT_OFFLINE_SUBNET`, created on first use). The firewall drops every connection from it except to `ALBERT_ALLOW_NETS`. The containers also get a DNS server nothing answers on (`ALBERT_OFFLINE_DNS`): Docker's embedded DNS resolves names from the host's network namespace and would otherwise bypass the firewall.
-- The rules are applied at boot before Docker starts (`albert-sandbox-firewall.service`), before every create/start, and checked by the watcher every minute; missing or outdated rules are restored automatically. A sandbox is never created or started without them. Status: `albert-ai-sandbox-manager firewall status`, also shown in the admin UI (Übersicht → Netz-Isolation).
+- **Clients without internet access**: their sandboxes live in the second network `albert-sandbox-offline` (`ALBERT_OFFLINE_SUBNET`, created on first use). The firewall drops every connection from it except to the internal targets. The containers also get a DNS server nothing answers on (`ALBERT_OFFLINE_DNS`): Docker's embedded DNS resolves names from the host's network namespace and would otherwise bypass the firewall.
+- The rules are applied at boot before Docker starts (`albert-sandbox-firewall.service`), before every create/start, when an internal target changes, and checked by the watcher every minute; missing or outdated rules are restored automatically. A sandbox is never created or started without them. Status: `albert-ai-sandbox-manager firewall status`, also shown in the admin UI (Übersicht → Netz-Isolation).
 - **Container hardening**: no `CAP_SYS_ADMIN`, Docker's default seccomp profile, no `NET_RAW`/`MKNOD`, a real init process (`--init`, fast clean stops), process limit. Chrome runs with `--no-sandbox`, so it needs no extra privileges.
 - **Existing sandboxes**: containers in the old shared network are moved into the isolated network automatically (live, without restart). Hardening, the internal tokens and a new image need a rebuild: `albert-ai-sandbox-manager recreate --outdated`, or "Neu aufbauen" in the admin UI. The rebuild keeps home directory, uploads, ports, URLs and limits and renews VNC password and internal tokens (values that ever showed up in chats or logs become worthless); if it fails, the previous image is restored.
+
+### Internal targets
+By default no sandbox reaches an internal network. Exceptions:
+
+- **For all sandboxes**: admin UI → *Einstellungen* → "Interne Ziele für alle Sandboxen", or `albert-ai-sandbox-manager allow-nets set 10.0.5.20 10.0.6.0/24`. Until something is saved there, `ALBERT_ALLOW_NETS` from `albert.env` applies; `allow-nets reset` (or "Wert aus albert.env verwenden") goes back to it.
+- **Per client**, in addition: client settings → "Interne Ziele dieses Clients", or `client set <id> --allow-nets …`. Typical: the agorum core system of exactly this customer.
+
+Entries are IPv4 addresses or networks (CIDR); `0.0.0.0/0` and the sandbox networks themselves are refused. They apply at once, also to running sandboxes and also to clients without internet access (for them they are the only reachable destinations).
+
+The firewall separates sandboxes by subnet (container addresses change on every start), so a client gets **an own network** the first time it gets own targets: `albert-sandbox-c<id>` with a subnet from `ALBERT_CLIENT_SUBNET_POOL` (`172.29.0.0/16`, one `/24` each), isolated like the shared networks. Its existing sandboxes are moved into it at once without a rebuild (running ones lose their connections for a moment). The client keeps the network when its own targets are removed again; it is removed when the client is deleted. A subnet of the pool the rules do not know gets no connection at all, and if the database cannot be read the rules allow no internal target (the watcher repairs that within a minute).
 
 ## Access to Sandboxes
 Sandboxes run code an AI controls; whoever reaches a sandbox's shell reaches its data. Therefore:
@@ -194,17 +210,17 @@ Sandboxes run code an AI controls; whoever reaches a sandbox's shell reaches its
 - **Legacy access** ("Alte Anbindung erlauben", per client): keeps ALBERT | AI versions without this update working (MCP with the fixed key, files without key, plain desktop URL, no user binding). On for clients that existed before the update, off for new clients. The overview warns while a client still has it. Outdated sandboxes are marked "veraltet" in the admin UI and listed after every update by `install.sh`.
 
 ## Sandbox Image
-`docker/Dockerfile` pins everything installed on top of Ubuntu (Node.js major line, MCP Hub, Playwright MCP, bash-mcp, Flask) via build arguments at the top of the file. MCP servers are installed at build time — nothing is downloaded when a sandbox starts. OS packages, Google Chrome and Firefox (from Mozilla's APT repository) are taken from their vendors with security updates. To update a component, change its version argument, run `install.sh` (rebuilds when `docker/` changed), test, then rebuild existing sandboxes with `recreate --outdated`.
+The sandbox image is based on **Ubuntu 24.04** (desktop user `ubuntu`, UID 1000, passwordless `sudo`; `pip` installs system-wide as on 22.04 via `/etc/pip.conf`, the file service runs in its own virtual environment). `docker/Dockerfile` pins everything installed on top of Ubuntu (Node.js major line, MCP Hub, Playwright MCP, bash-mcp, Flask) via build arguments at the top of the file. MCP servers are installed at build time — nothing is downloaded when a sandbox starts. OS packages, Google Chrome and Firefox (from Mozilla's APT repository) are taken from their vendors with security updates. To update a component, change its version argument, run `install.sh` (rebuilds when `docker/` changed), test, then rebuild existing sandboxes with `recreate --outdated`.
 
 ## Admin Web UI
 Open `https://<host>:8443/manager/admin/` (`/manager/admin/` on the main port redirects there) and sign in. Pages:
 - **Übersicht**: host resources, allocated CPU/RAM of running sandboxes, disk usage.
-- **Clients**: create (the API key is shown once), edit per-sandbox limits, quotas, running limit, the persistence permission, software profile, internet access and legacy access, rotate the key, delete a client with all its sandboxes; per client all sandboxes with status, user, limits, disk usage, last activity and actions (start, stop, restart, change limits, live values, delete). The sandbox name opens the desktop with a one-time link.
+- **Clients**: create (the API key is shown once), edit per-sandbox limits, quotas, running limit, the persistence permission, software profile, internet access, internal targets and legacy access, rotate the key, delete a client with all its sandboxes; per client all sandboxes with status, user, limits, disk usage, last activity and actions (start, stop, restart, change limits, live values, delete). The sandbox name opens the desktop with a one-time link.
 - **Sandboxen**: all sandboxes across clients.
 - **Profile**: sandbox profiles with their packages, build status, build log and the clients using them.
 - **Admins**: add admin users, change passwords, delete admins.
 - **Wartung**: preview and run the cleanup (reconcile), audit log of all changes.
-- **Einstellungen**: HTTPS certificate (Let's Encrypt or own certificate, expiry, renewal) and the addresses allowed to open the admin UI (empty = all; loopback for an SSH tunnel always works; your own address must be in the list).
+- **Einstellungen**: HTTPS certificate (Let's Encrypt or own certificate, expiry, renewal), the addresses allowed to open the admin UI (empty = all; loopback for an SSH tunnel always works; your own address must be in the list) and the internal targets of all sandboxes.
 
 Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove <username>`.
 
@@ -219,6 +235,7 @@ Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove
 - `desktop <name>` – one-time link to the desktop
 - `tls status|letsencrypt|custom|disable` – HTTPS certificate; `admin-access show|set <addr…>|clear` – addresses allowed for the admin UI; `site apply|show` – nginx site
 - `client set <id> --legacy-access yes|no` – former access without API key / user binding
+- `allow-nets show|set <net…>|reset` – internal targets of all sandboxes; `client set <id> --allow-nets <net,…>|none` – of one client
 - `reconcile [--dry-run]` – clean up leftovers, `selfcheck`, `build` – rebuild the image
 
 Add `--json` for machine-readable output.

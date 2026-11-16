@@ -114,7 +114,7 @@ Used by the web UI under `/manager/admin/` on its **own port** (`ALBERT_ADMIN_PO
 | POST | `api/login`, `api/logout` | session |
 | GET | `api/overview` | host resources, totals, defaults, network isolation status |
 | GET/POST | `api/clients` | list (with usage) / create (returns `apiKey` once) |
-| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes`, `quotaRunning` (null = unset), `allowPersistent` (bool), `allowInternet` (bool; a change moves and rebuilds the client's sandboxes in the background, response field `networkPolicy: "applying"`), `profileId` (null = standard image), `legacyAccess` (bool, former access without API key / user binding) / delete with all sandboxes |
+| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes`, `quotaRunning` (null = unset), `allowPersistent` (bool), `allowInternet` (bool; a change moves and rebuilds the client's sandboxes in the background, response field `networkPolicy: "applying"`), `profileId` (null = standard image), `legacyAccess` (bool, former access without API key / user binding), `allowNets` (list of IPv4 addresses/networks the client's sandboxes may reach in addition to the global ones, `[]` = none, `400 invalid_net`; the first own target gives the client an own network: `netSubnet`, `network`, existing sandboxes are moved without rebuild, `networkPolicy: "applying"`) / delete with all sandboxes |
 | POST | `api/clients/{id}/rotate-key` | new API key, sandboxes stay |
 | GET/POST | `api/profiles` | list (status, image, clients) / create `{name, description, packages: {apt, pip, npm}, setupScript}` |
 | GET/PATCH/DELETE | `api/profiles/{id}` | detail incl. generated `dockerfile` / change (same fields) / delete (400 `profile_in_use` while assigned) |
@@ -124,7 +124,8 @@ Used by the web UI under `/manager/admin/` on its **own port** (`ALBERT_ADMIN_PO
 | PATCH/DELETE | `api/sandboxes/{name}` | `persistent`, `cpus`, `memoryMb`, `diskGb` (disk can only grow) / delete |
 | POST | `api/sandboxes/{name}/start|stop|restart|recreate` | lifecycle; `recreate` rebuilds the container with the current image/hardening/network, keeping data and ports; VNC password and internal tokens are renewed |
 | POST | `api/sandboxes/{name}/desktop` | one-time desktop link for the admin |
-| GET | `api/settings` | HTTPS state (certificate, job), admin URL/port, allowed admin addresses, own address |
+| GET | `api/settings` | HTTPS state (certificate, job), admin URL/port, allowed admin addresses, own address, internal targets (`allowNets`: `nets`, `source` = `settings` or `config` for `ALBERT_ALLOW_NETS`, `configNets`, `clients` with own targets), `blockedNets` |
+| PUT | `api/settings/allow-nets` | `{"allowNets": ["10.0.5.20", "10.0.6.0/24"]}` – internal targets of all sandboxes, applied to the firewall at once (`[]` = none); `{"reset": true}` = back to `ALBERT_ALLOW_NETS`; `400 invalid_net`, `firewall_failed` (nothing changed) |
 | PUT | `api/settings/admin-access` | `{"allow": ["203.0.113.7", "10.0.0.0/16"]}` (or a newline separated string; empty = all); refused (`lockout`) if the own address is missing |
 | POST | `api/settings/tls/custom` | `{"host", "certificate", "chain", "privateKey"}` (PEM): checked (key matches, name, expiry), then active |
 | POST | `api/settings/tls/letsencrypt` | `{"host", "email", "acceptTerms": true}` → 202, certificate is requested in the background (`job` in `api/settings`) |
