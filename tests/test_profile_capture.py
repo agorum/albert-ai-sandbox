@@ -69,7 +69,9 @@ KEY = bytes(range(256))
 
 DIFF = [("A", "/opt/myapp"), ("A", "/opt/myapp/run.sh"), ("C", "/etc"), ("C", "/etc/bash.bashrc"),
         ("A", "/usr/bin/jq"), ("A", "/usr/bin/tsc"), ("A", "/usr/local/bin/humanize"), ("A", "/tmp/x"),
-        ("D", "/usr/bin/nano"), ("A", "/etc/ld.so.cache")]
+        ("D", "/usr/bin/nano"), ("A", "/etc/ld.so.cache"),
+        ("A", "/usr/local/lib/python3.12/dist-packages/tabulate"),
+        ("A", "/usr/local/lib/python3.12/dist-packages/tabulate-0.10.0.dist-info")]
 CLASSES = {
     "/opt/myapp": ["d", "", False, ""],
     "/opt/myapp/run.sh": ["f", "", False, ""],
@@ -160,7 +162,8 @@ def test_capture_finds_new_packages_sources_and_hints(env, make_client, inspect)
         {"path": "/opt/myapp", "change": "added", "kind": "dir", "files": 1},
     ]
     # runtime noise is never sent for classification
-    assert all(not p.startswith(("/tmp", "/etc/ld.so.cache")) for p in inspect["classified"][0])
+    assert all(not p.startswith(("/tmp", "/etc/ld.so.cache", "/usr/local/lib/python3"))
+               for p in inspect["classified"][0])
 
 
 def test_prepare_script_quotes_everything(env, make_client, inspect):

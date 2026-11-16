@@ -126,8 +126,7 @@ SOURCE_PATH = re.compile(
 SKIP_PREFIXES = (
     "/tmp", "/var/tmp", "/var/log", "/var/cache", "/var/lib", "/var/backups", "/var/mail", "/var/spool",
     "/var/run", "/run", "/proc", "/sys", "/dev", "/home", "/root/.cache", "/root/.npm", "/root/.local/state",
-    "/usr/lib/node_modules", "/usr/local/lib/node_modules", "/usr/local/lib/python3", "/etc/apt", "/app",
-    "/usr/sbin/docker-init",
+    "/usr/lib/node_modules", "/usr/local/lib/node_modules", "/etc/apt", "/app", "/usr/sbin/docker-init",
     "/etc/alternatives", "/etc/systemd", "/etc/rc0.d", "/etc/rc1.d", "/etc/rc2.d", "/etc/rc3.d", "/etc/rc4.d",
     "/etc/rc5.d", "/etc/rc6.d", "/etc/rcS.d", "/etc/ssl/certs", "/usr/share/mime", "/usr/share/icons",
     "/usr/share/info/dir",
@@ -140,6 +139,7 @@ SKIP_FILES = {
 }
 SKIP_NAMES = {"mimeinfo.cache", "icon-theme.cache", "gschemas.compiled", "loaders.cache", "locale-archive",
               "giomodule.cache", "immodules.cache"}
+SKIP_STARTS = ("/usr/local/lib/python3",)  # pip's own tree (python3.12/dist-packages ...), captured via pip
 PIP_DIRS = ("/usr/local/lib/python", "/.local/lib/python")
 
 
@@ -335,6 +335,8 @@ def _skip_path(path: str) -> bool:
     if path in SKIP_FILES or "/__pycache__" in path or path.endswith(".pyc"):
         return True
     if path.rsplit("/", 1)[-1] in SKIP_NAMES:
+        return True
+    if path.startswith(SKIP_STARTS):
         return True
     return any(path == p or path.startswith(p + "/") for p in SKIP_PREFIXES)
 
