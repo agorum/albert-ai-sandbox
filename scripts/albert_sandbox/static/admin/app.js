@@ -763,6 +763,17 @@
     };
   }
 
+  /** Switches and targets of a client in two boxes: "Berechtigungen" and "Netz". */
+  function clientPolicyGroups(policy, legacy, internet, nets) {
+    return h("div", { class: "policy-groups" },
+      h("fieldset", null,
+        h("legend", null, "Berechtigungen"),
+        h("div", { class: "switch-stack" }, policy.node, legacy.node)),
+      h("fieldset", null,
+        h("legend", null, "Netz"),
+        h("div", { class: "switch-stack" }, internet.node, nets.node)));
+  }
+
   /** "Alte Anbindung erlauben" switch. Returns {node, input, value(), changed()}. */
   function legacyAccessField(client) {
     const initial = !!(client && client.legacyAccess);
@@ -1428,9 +1439,8 @@
       wide: true,
       submitLabel: "Client anlegen",
       body: [
-        h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), profile.node,
-          policy.node, internet.node),
-        h("div", { class: "form-row" }, legacy.node, nets.node),
+        h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), profile.node),
+        clientPolicyGroups(policy, legacy, internet, nets),
         limits.nodes,
       ],
       onSubmit: async () => {
@@ -1608,8 +1618,8 @@
       const resetBtn = h("button", { type: "button", class: "btn" }, "Zurücksetzen");
       const status = h("span", { class: "state" });
       const form = h("form", { class: "panel panel-body" },
-        h("div", { class: "form-row" }, field("Bezeichnung", label), profile.node, policy.node, internet.node),
-        h("div", { class: "form-row" }, legacy.node, nets.node),
+        h("div", { class: "form-row" }, field("Bezeichnung", label), profile.node),
+        clientPolicyGroups(policy, legacy, internet, nets),
         limits.nodes,
         h("div", { class: "form-actions" }, saveBtn, resetBtn, status));
       resetBtn.addEventListener("click", () => renderForm());
