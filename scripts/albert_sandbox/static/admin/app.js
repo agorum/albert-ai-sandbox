@@ -733,11 +733,14 @@
   // Lifetime of sandboxes: API name, label, unit, factor (seconds per unit), applies to persistent ones.
   const LIFECYCLE_FIELDS = [
     { key: "inactivitySeconds", label: "Anhalten nach Inaktivität", unit: "Min.", factor: 60, persistent: true,
-      hint: "ohne Zugriff und ohne offene Verbindung (Desktop, MCP, Dateien); Daten bleiben" },
+      hint: "ohne Zugriff und ohne offene Verbindung (Desktop, MCP, Dateien); Daten bleiben",
+      short: "alle Sandboxen · Daten bleiben" },
     { key: "maxAgeSeconds", label: "Löschen, wenn ungenutzt, nach", unit: "Std.", factor: 3600, persistent: false,
-      hint: "ab diesem Alter, sobald die Sandbox nicht mehr genutzt wird" },
+      hint: "ab diesem Alter, sobald die Sandbox nicht mehr genutzt wird",
+      short: "nur nicht-persistente · sobald ungenutzt" },
     { key: "maxLifetimeSeconds", label: "Höchstlaufzeit", unit: "Std.", factor: 3600, persistent: false,
-      hint: "spätestens dann gelöscht, auch bei offenem Desktop" },
+      hint: "spätestens dann gelöscht, auch bei offenem Desktop",
+      short: "nur nicht-persistente · auch bei Nutzung" },
   ];
 
   /** Table: which rule applies to which kind of sandbox, with the values that apply. */
@@ -774,7 +777,12 @@
       return v === null ? null : Math.round(v * x.f.factor);
     };
     return {
-      nodes: h("div", { class: "field-grid" }, inputs.map((x) => field(x.f.label, x.n.node))),
+      // one row per value: label and short note on the left, input on the right (no wrapping labels)
+      nodes: h("div", { class: "life-rows" }, inputs.map((x) => h("label", { class: "life-row" },
+        h("span", null,
+          h("span", { class: "field-label" }, x.f.label),
+          h("span", { class: "field-hint" }, x.f.short)),
+        x.n.node))),
       values: () => Object.fromEntries(inputs.map((x) => [x.f.key, read(x)])),
       changed: () => inputs.some((x) => changed(x.n.input)),
       valid: () => inputs.every((x) => (x.n.input.value || "").trim() === "" || readNumber(x.n.input) !== null),
@@ -856,8 +864,7 @@
         h("div", { class: "switch-stack" }, internet.node, nets.node)),
       life ? h("fieldset", null,
         h("legend", null, "Laufzeit"),
-        h("p", { class: "legend-hint" }, "Leer = globaler Wert (Einstellungen), 0 = aus. Löschen und Höchstlaufzeit "
-          + "gelten nur für nicht-persistente Sandboxen."),
+        h("p", { class: "legend-hint" }, "Leer = globaler Wert (Einstellungen), 0 = aus."),
         life.nodes) : null);
   }
 
@@ -3149,8 +3156,7 @@
           "Gilt für alle Clients ohne eigene Werte (Client-Einstellungen → Laufzeit). 0 = aus. Wird eine Frist "
           + "verkürzt, bekommen bestehende Sandboxen ab jetzt noch einmal die volle neue Frist."
           + (info.source === "config" ? " Derzeit gelten die Werte aus albert.env; Speichern übernimmt sie hierher." : "")),
-        inputs.nodes,
-        h("div", { class: "mt-12" }, lifecycleRulesTable(info)),
+        h("div", { class: "life-settings" }, inputs.nodes, lifecycleRulesTable(info)),
         (info.clientsWithOwn || []).length ? h("dl", { class: "kv" },
           h("dt", null, "Clients mit eigenen Werten"),
           h("dd", null, info.clientsWithOwn.map((c, i) => [i ? ", " : null,

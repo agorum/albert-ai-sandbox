@@ -45,7 +45,7 @@ RUN apt-get update && apt-get upgrade -y && \
 	ca-certificates \
 	python3-pip \
 	python3-venv \
-	zenity \
+	yad \
 	&& apt-get clean
 
 # pip installs system-wide as on Ubuntu 22.04: the AI and software profiles

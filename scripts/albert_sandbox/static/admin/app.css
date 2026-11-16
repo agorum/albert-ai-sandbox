@@ -629,8 +629,14 @@ dialog .limit-groups { grid-template-columns: minmax(0, 1fr); }
 /* "Berechtigungen" and "Netz" of a client next to each other when there is room */
 .policy-groups { display: grid; gap: 0 24px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
 .switch-stack > .switch-field { padding-top: 0; }
-.policy-groups .field-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)); }
 .switch-stack > * + * { margin-top: 14px; }
+/* lifetime: one row per value, label left, input right (labels never push inputs down) */
+.life-rows { display: grid; gap: 12px; }
+.life-row { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 14px; align-items: center; cursor: default; }
+.life-row .field-label, .life-row .field-hint { display: block; }
+.life-settings { display: grid; gap: 14px 32px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); align-items: start; }
+@media (max-width: 900px) { .life-settings { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 420px) { .life-row { grid-template-columns: minmax(0, 1fr); } }
 /* label + switch in one row */
 .form-row { display: grid; gap: 12px 24px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; }
 .switch-field { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; padding-top: 22px; }

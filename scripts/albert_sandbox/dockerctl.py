@@ -213,17 +213,21 @@ def network_list() -> List[Dict[str, Any]]:
     return result
 
 
+# yad (GTK3) works on the VNC desktop; zenity of Ubuntu 24.04 (GTK4) needs XInput2,
+# which tightvnc lacks, and crashes. xmessage is the fallback for older images.
 NOTIFY_SCRIPT = (
-    'if command -v zenity >/dev/null 2>&1; then '
-    'zenity --warning --no-wrap --title="$1" --text="$2" --timeout=900; '
+    'if command -v yad >/dev/null 2>&1; then '
+    'yad --title="$1" --text="$2" --image=dialog-warning --button=OK:0 --center --on-top --fixed '
+    '--timeout=900; '
     'else xmessage -center -timeout 900 "$1: $2"; fi'
 )
 
 
 def notify_desktop(container: str, title: str, text: str) -> None:
-    """Show a message on the sandbox desktop (detached; zenity, else xmessage)."""
-    _run(["exec", "-d", "-u", "ubuntu", "-e", "DISPLAY=:1", container, "sh", "-c", NOTIFY_SCRIPT,
-          "albert-notify", title, text], timeout=30)
+    """Show a message on the sandbox desktop (detached; yad, else xmessage)."""
+    # UTF-8 locale: GTK refuses non-ASCII text (umlauts) under the default C locale.
+    _run(["exec", "-d", "-u", "ubuntu", "-e", "DISPLAY=:1", "-e", "LANG=C.UTF-8", "-e", "LC_ALL=C.UTF-8",
+          container, "sh", "-c", NOTIFY_SCRIPT, "albert-notify", title, text], timeout=30)
 
 
 def copy_out_tar(container: str, path: str) -> Optional[bytes]:
