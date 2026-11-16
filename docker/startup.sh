@@ -109,7 +109,7 @@ su - ubuntu -c '/tmp/set_background.sh' &
 
 echo "Starting File Service..."
 export FILE_SERVICE_PORT=${FILE_SERVICE_PORT:-4000}
-python3 /app/file_service.py &
+/opt/albert-file-service/bin/python /app/file_service.py &
 
 echo "Services started. Keeping container alive..."
 tail -f /dev/null

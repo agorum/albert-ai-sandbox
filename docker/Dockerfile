@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Pinned versions of everything the sandbox runs on top of Ubuntu - tested
 # together. Bump deliberately, rebuild (install.sh rebuilds when this file
@@ -44,10 +44,19 @@ RUN apt-get update && apt-get upgrade -y && \
 	lsb-release \
 	ca-certificates \
 	python3-pip \
+	python3-venv \
 	&& apt-get clean
 
-# Python dependencies for the file service
-RUN pip3 install --no-cache-dir "flask==${FLASK_VERSION}"
+# pip installs system-wide as on Ubuntu 22.04: the AI and software profiles
+# install Python packages with pip, which Ubuntu 24.04 refuses by default
+# (PEP 668, "externally-managed-environment").
+RUN printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\n' > /etc/pip.conf
+
+# The file service runs in its own virtual environment: independent of the
+# Python packages of the system (Ubuntu ships some Flask dependencies that pip
+# cannot replace) and of whatever the AI installs later.
+RUN python3 -m venv /opt/albert-file-service && \
+	/opt/albert-file-service/bin/pip install --no-cache-dir "flask==${FLASK_VERSION}"
 
 # Node.js (pinned major line) from NodeSource; npm as bundled with Node
 RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
@@ -95,15 +104,18 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --d
 	apt-get update && \
 	apt-get install -y google-chrome-stable
 
-# (No separate Chromium: Ubuntu 22.04 only ships it as a snap; Playwright's
-# Chromium above serves as fallback browser. The former step mixed focal
-# sources into this jammy system.)
+# (No separate Chromium: Ubuntu only ships it as a snap; Playwright's
+# Chromium above serves as fallback browser.)
 
 # Cleanup
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Create user without password
-RUN useradd -m -s /bin/bash -G sudo ubuntu && \
+# Desktop user without password. The Ubuntu 24.04 image already ships the user
+# "ubuntu" with UID 1000 - the UID useradd gave it on 22.04 - so existing home
+# volumes keep their owner.
+RUN (id ubuntu >/dev/null 2>&1 || useradd -m -u 1000 ubuntu) && \
+	usermod -s /bin/bash -aG sudo ubuntu && \
+	mkdir -p /home/ubuntu && chown ubuntu:ubuntu /home/ubuntu && \
 	echo "ubuntu ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # VNC setup for XFCE
@@ -259,7 +271,7 @@ RUN mkdir -p /home/ubuntu/Desktop && \
 	chown -R ubuntu:ubuntu /home/ubuntu/Desktop
 
 # noVNC Setup
-RUN ln -s /usr/share/novnc/vnc.html /usr/share/novnc/index.html
+RUN ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
 # Copy file upload/download service
 COPY file_service.py /app/file_service.py
