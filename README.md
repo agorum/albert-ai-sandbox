@@ -40,20 +40,60 @@ SQLite is the single source of truth. Docker containers, disk images and nginx r
 - Internet connectivity during installation to fetch Docker components and Python packages.
 
 ## Installation and Update
-```bash
-git clone <repository-url> albert-ai-sandbox
-cd albert-ai-sandbox
-sudo bash install.sh
-```
-The installer provisions all required packages, builds the sandbox image, installs the manager under `/opt/albert-ai-sandbox-manager`, configures nginx and the systemd units, and creates the first admin user `admin` with a random password (printed once).
 
-**Updating** works the same way: pull the new version and run `sudo bash install.sh` again. Running sandboxes keep running; only the manager service restarts briefly. The database schema is migrated automatically. Installations of the former Bash version (JSON registry) are migrated as well: existing sandboxes, their data volumes, ports and credentials are taken over, API keys stay valid. The sandbox image is only rebuilt when `docker/` changed (`--skip-build` / `--force-build` override this). Replaced configuration is backed up to `/opt/albert-ai-sandbox-manager/backups/<timestamp>/`.
+### Before you start
+- **Dedicated host**: Debian 12, root access, internet access (packages, Docker, the sandbox image; later also for image updates and software profiles). The installer disables the Debian default nginx site and serves every host name itself, so the host should not serve anything else on ports 80/443.
+- **Ports** (host firewall and, in a cloud, the security group):
+  | Port | Purpose |
+  |---|---|
+  | 80 | HTTP: Let's Encrypt challenges, redirect to HTTPS (with HTTPS active it refuses API, MCP and file requests) |
+  | 443 | HTTPS: client API, MCP Hub, file service and desktops of the sandboxes |
+  | 8443 | Admin UI (`ALBERT_ADMIN_PORT`) – open it only for your admin networks |
+- **Subnets**: the sandbox networks `172.30.0.0/16` and `172.31.0.0/16` must not overlap your networks (`ALBERT_NETWORK_SUBNET`, `ALBERT_OFFLINE_SUBNET`).
+- **Internal targets**: sandboxes cannot reach private networks. If they must reach internal systems (e.g. an agorum core server), list them in `ALBERT_ALLOW_NETS` before sandboxes are created.
+- **Proxy or load balancer in front**: let nginx on this host terminate TLS (the certificate is managed in the admin UI) and pass on the real client address (nginx `real_ip`); otherwise the admin address list and the login throttle only see the proxy.
 
-**HTTPS** is set up in the admin UI under *Einstellungen*: request a Let's Encrypt certificate (host name must point to the host, port 80 reachable) or upload an own certificate (PEM certificate, intermediates, private key without passphrase). Each change is tested with `nginx -t`; if nginx refuses it, the previous configuration stays active. With HTTPS active the host accepts API, MCP and file requests only over HTTPS (`https_required` over HTTP). CLI: `albert-ai-sandbox-manager tls status|letsencrypt|custom|disable`.
+### New installation
+1. Install:
+   ```bash
+   git clone <repository-url> albert-ai-sandbox
+   cd albert-ai-sandbox
+   sudo bash install.sh
+   ```
+   The installer provisions all required packages, builds the sandbox image, installs the manager under `/opt/albert-ai-sandbox-manager`, writes the nginx site `/etc/nginx/sites-available/albert-sandbox` (main server on 80/443, admin UI on its own port), sets up the systemd units and creates the first admin user `admin`. **Its password is printed only once – store it.**
+2. Optional host hardening (ufw, fail2ban, SSH): `sudo bash scripts/setup-tls.sh --fqdn sandbox.example.com --email admin@example.com`.
+3. Open the admin UI at `http://<host>:8443/manager/admin/` (or through an SSH tunnel to `127.0.0.1:8443`), sign in and change the password (*Admins*).
+4. *Einstellungen*:
+   - **HTTPS**: request a Let's Encrypt certificate (the DNS name must point to the host, port 80 must be reachable from the internet) or upload an own certificate (PEM certificate, intermediates, private key without passphrase). Each change is tested with `nginx -t`; if nginx refuses it, the previous configuration stays active (CLI: `albert-ai-sandbox-manager tls status|letsencrypt|custom|disable`). Afterwards the admin UI moves to `https://<host>:8443/manager/admin/`.
+   - **Allowed addresses** of the admin UI (your own address must be in the list; `127.0.0.1` for an SSH tunnel always works).
+5. *Clients*: create one client per agorum core system. **The API key is shown only once.** Set limits, quotas, internet access and software profile as needed. Leave *Alte Anbindung erlauben* off – switch it on only for an ALBERT | AI without the security update (see below).
+6. In ALBERT | AI, tool configuration `sandbox_manage`: server URL `https://<host>` and the client's API key.
+7. Check: `albert-ai-sandbox-manager selfcheck`; optionally `MANAGER_URL=https://<host>/manager python3 scripts/smoke_test_manager.py --key <API key>` (creates and removes a test sandbox).
 
-Optional host hardening (firewall, fail2ban, SSH, Let's Encrypt through the manager): `sudo bash scripts/setup-tls.sh --fqdn sandbox.example.com --email admin@example.com` (after `install.sh`).
+### Updating an existing host
+1. **Coming from a version without network isolation**: clarify first whether sandboxes need internal targets (`ALBERT_ALLOW_NETS`, see above) – the isolation blocks them otherwise. It is the one point where an update can break something.
+2. Pull the new version and run `sudo bash install.sh` again. Running sandboxes keep running; only the manager service restarts briefly. The sandbox image is rebuilt when `docker/` changed (takes a few minutes; `--skip-build` / `--force-build` override this). The database schema is migrated automatically; installations of the former Bash version (JSON registry) are migrated as well: existing sandboxes, their data volumes and ports are taken over, API keys stay valid. A certificate set up by an older `setup-tls.sh` is taken over. Replaced configuration is backed up to `/opt/albert-ai-sandbox-manager/backups/<timestamp>/`.
+3. **Existing clients keep the former access** (*Alte Anbindung erlauben* is switched on for them), so ALBERT | AI versions without the security update keep working.
+4. The admin UI moves to port 8443: open the port (restricted to admin networks); `/manager/admin/` on the main port redirects there.
+5. **Rebuild the existing sandboxes** (preferably outside working hours): `albert-ai-sandbox-manager recreate --outdated`, or "Neu aufbauen" per sandbox in the admin UI. Until then they are marked *veraltet* but keep working. The rebuild keeps home directory, uploads, ports and limits, renews VNC password and internal tokens (open desktops have to be opened again) and briefly interrupts running sandboxes. Sandboxes migrated from the Bash version keep their Docker volume (no disk limit).
+6. Set up HTTPS in the admin UI (if not done yet). **Then switch the server URL in every connected ALBERT | AI to `https://`** – over HTTP the host refuses API, MCP and file requests (`https_required`).
+7. Once an ALBERT | AI has the security update, switch off *Alte Anbindung erlauben* for its client – **but only after its users have used their sandboxes once** (see "Sandboxes from before the update" below).
 
-The installer writes the nginx site `/etc/nginx/sites-available/albert-sandbox` (main server on 80/443, admin UI on its own port) and disables the Debian default site; a certificate set up by an older `setup-tls.sh` is taken over.
+### ALBERT | AI and sandbox server versions
+Sandbox server and ALBERT | AI can be updated in any order:
+
+| Sandbox server | ALBERT | Result |
+|---|---|---|
+| new | without security update | Works while the client has *Alte Anbindung erlauben* (MCP with the former fixed key, files without key, plain desktop URL, no user binding). Existing clients have it after the update; **new clients do not** – switch it on when creating a client for such an ALBERT. |
+| old | with security update | Works: ALBERT recognises the old server (no `api` in `GET /manager/health`) and uses the former interface – without the new protection. |
+| new | with security update | Full protection once *Alte Anbindung erlauben* is off: API key and user binding for MCP and files, one-time desktop links, no secrets in API answers. |
+
+**Sandboxes from before the update** belong to no user yet. The first ALBERT user who addresses one after the ALBERT update takes it over (ALBERT does this once with the names it knew before) – but only **while the client still has *Alte Anbindung erlauben***. Sandboxes not taken over by then can no longer be reached through ALBERT afterwards; an administrator can only delete them. Non-persistent sandboxes are removed after 24 hours anyway; for persistent ones, switch the former access off only after their users have used them once.
+
+### Things to keep in mind
+- Certificates: Let's Encrypt renews itself (certbot timer); an own certificate must be replaced before it expires (the admin UI warns 14 days ahead).
+- Back up `/opt/albert-ai-sandbox-manager/data/manager.db` (clients, sandbox owners, profiles, admin users) – it is the single source of truth.
+- Clients created later start without the former access; an ALBERT without the security update gets `400 user_required` / `401` until it is switched on.
 
 ## Configuration
 `/opt/albert-ai-sandbox-manager/config/albert.env` (KEY=VALUE, never overwritten by updates) is read by the manager service, the watcher and the CLI. Restart the manager after changes (`systemctl restart albert-container-manager`).
