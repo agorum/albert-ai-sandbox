@@ -184,7 +184,7 @@ def test_upgrade_starts_the_clock_anew(env):
     db.init_db()
     with db.session() as c:
         assert db.kv_get(c, lifecycle.CHANGED_KEY) >= int(time.time()) - 5
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 8
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_desktop_is_warned_once_before_the_max_lifetime(env, make_client, monkeypatch):

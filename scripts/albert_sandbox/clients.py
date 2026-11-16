@@ -21,9 +21,12 @@ Persistent sandboxes (excluded from the automatic max-age removal) are only
 possible for clients with ``allow_persistent``; otherwise creating one or
 switching a sandbox to persistent is refused with ``persistent_not_allowed``.
 
-``profile_id`` selects the sandbox profile (extra software, see profiles.py;
-NULL = standard image). Without ``allow_internet`` the client's sandboxes run
-in the offline network (no internet, no DNS; see netctl.py).
+Software profiles (extra software, see profiles.py): ``profile_id`` is the
+default for new sandboxes (NULL = shipped image); table ``client_profiles``
+plus ``allow_standard_image`` list what the client may choose from when it
+creates a sandbox. The default is always among them; a new default is allowed
+automatically. Without ``allow_internet`` the client's sandboxes run in the
+offline network (no internet, no DNS; see netctl.py).
 
 ``allow_nets`` lists internal targets (IPv4 addresses/networks) the client's
 sandboxes may reach in addition to the global ones (admin UI *Einstellungen*
@@ -47,7 +50,7 @@ import json
 import secrets
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import lifecycle, netctl
 from .config import settings
@@ -55,7 +58,7 @@ from .errors import BadRequest, NotFound, QuotaExceeded
 
 QUOTA_FIELDS = ("quota_cpus", "quota_memory_mb", "quota_disk_gb", "quota_sandboxes", "quota_running")
 DEFAULT_FIELDS = ("default_cpus", "default_memory_mb", "default_disk_gb")
-FLAG_FIELDS = ("allow_persistent", "allow_internet", "legacy_access")
+FLAG_FIELDS = ("allow_persistent", "allow_internet", "legacy_access", "allow_standard_image")
 EDITABLE_FIELDS = ("label", "profile_id", "allow_nets") + QUOTA_FIELDS + DEFAULT_FIELDS + FLAG_FIELDS \
     + lifecycle.COLUMNS
 
@@ -139,6 +142,68 @@ def _check_profile(conn: sqlite3.Connection, clean: Dict[str, Any]) -> None:
         raise BadRequest(f"profile {profile_id} does not exist")
 
 
+def _clean_profile_ids(conn: sqlite3.Connection, value: Any) -> List[int]:
+    """Allowed profiles: a list of profile ids (the shipped image is allow_standard_image)."""
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise BadRequest("allowedProfileIds must be a list of profile ids")
+    ids: List[int] = []
+    for item in value:
+        if isinstance(item, bool):
+            raise BadRequest("allowedProfileIds must be a list of profile ids")
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            raise BadRequest("allowedProfileIds must be a list of profile ids")
+        if not conn.execute("SELECT 1 FROM profiles WHERE id=?", (number,)).fetchone():
+            raise BadRequest(f"profile {number} does not exist")
+        if number not in ids:
+            ids.append(number)
+    return ids
+
+
+def allowed_profile_ids(conn: sqlite3.Connection, client_id: int) -> List[int]:
+    return [r["profile_id"] for r in conn.execute(
+        "SELECT profile_id FROM client_profiles WHERE client_id=? ORDER BY profile_id", (client_id,))]
+
+
+def allowed(conn: sqlite3.Connection, client: sqlite3.Row) -> Dict[str, Any]:
+    """What the client may choose from: {"standard": bool, "profileIds": [...]}."""
+    return {"standard": bool(client["allow_standard_image"]),
+            "profileIds": allowed_profile_ids(conn, client["id"])}
+
+
+def profile_allowed(conn: sqlite3.Connection, client: sqlite3.Row, profile_id: Optional[int]) -> bool:
+    if profile_id is None:
+        return bool(client["allow_standard_image"])
+    return conn.execute("SELECT 1 FROM client_profiles WHERE client_id=? AND profile_id=?",
+                        (client["id"], profile_id)).fetchone() is not None
+
+
+def _resolve_choice(default: Optional[int], standard: int, ids: List[int], default_changed: bool) -> Tuple[int, List[int]]:
+    """Apply the rules: a new default is allowed automatically, the default must stay
+    allowed, at least one entry. Returns (allow_standard_image, profile ids)."""
+    ids = list(ids)
+    if default_changed:
+        if default is None:
+            standard = 1
+        elif default not in ids:
+            ids.append(default)
+    elif (default is None and not standard) or (default is not None and default not in ids):
+        raise BadRequest("the default profile must stay allowed - choose another default profile first",
+                         code="profile_default_not_allowed")
+    if not standard and not ids:
+        raise BadRequest("at least one profile (or the shipped image) must be allowed", code="no_profile_allowed")
+    return standard, ids
+
+
+def _store_allowed(conn: sqlite3.Connection, client_id: int, ids: List[int]) -> None:
+    conn.execute("DELETE FROM client_profiles WHERE client_id=?", (client_id,))
+    conn.executemany("INSERT INTO client_profiles(client_id, profile_id) VALUES(?, ?)",
+                     [(client_id, pid) for pid in ids])
+
+
 def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     clean: Dict[str, Any] = {}
     for key, value in fields.items():
@@ -172,8 +237,17 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def create(conn: sqlite3.Connection, label: str = "", **fields: Any) -> Tuple[sqlite3.Row, str]:
+    """``allowed_profile_ids`` (and ``allow_standard_image``) list the profiles the client may
+    choose from; without them only its default (``profile_id``) is allowed."""
+    given_ids = fields.pop("allowed_profile_ids", None)
     clean = validate_fields({"label": label, **fields})
     _check_profile(conn, clean)
+    default = clean.get("profile_id")
+    standard = clean.get("allow_standard_image")
+    ids = _clean_profile_ids(conn, given_ids)
+    if standard is None:
+        standard = 1 if default is None and (given_ids is None or not ids) else 0
+    clean["allow_standard_image"], ids = _resolve_choice(default, standard, ids, default_changed=True)
     lifecycle.client_change(None, clean, lifecycle.global_values(conn))
     raw = generate_key()
     now = int(time.time())
@@ -181,14 +255,25 @@ def create(conn: sqlite3.Connection, label: str = "", **fields: Any) -> Tuple[sq
     values = [hash_key(raw), now, now] + list(clean.values())
     placeholders = ",".join("?" for _ in columns)
     cur = conn.execute(f"INSERT INTO api_keys({','.join(columns)}) VALUES({placeholders})", values)
+    _store_allowed(conn, cur.lastrowid, ids)
     _ensure_own_network(conn, cur.lastrowid, clean)
     return get(conn, cur.lastrowid), raw
 
 
 def update(conn: sqlite3.Connection, client_id: int, fields: Dict[str, Any]) -> sqlite3.Row:
     before = get(conn, client_id)
+    fields = dict(fields)
+    given_ids = fields.pop("allowed_profile_ids", None)
     clean = validate_fields(fields)
     _check_profile(conn, clean)
+    ids: Optional[List[int]] = None
+    if given_ids is not None or "allow_standard_image" in clean or "profile_id" in clean:
+        current = allowed_profile_ids(conn, client_id)
+        ids = _clean_profile_ids(conn, given_ids) if given_ids is not None else current
+        standard = clean.get("allow_standard_image", before["allow_standard_image"])
+        default = clean.get("profile_id", before["profile_id"])
+        clean["allow_standard_image"], ids = _resolve_choice(
+            default, standard, ids, default_changed="profile_id" in clean and default != before["profile_id"])
     if any(column in clean for column in lifecycle.COLUMNS):
         merged = {column: clean.get(column, before[column]) for column in lifecycle.COLUMNS}
         merged["lifecycle_changed_at"] = before["lifecycle_changed_at"]
@@ -200,6 +285,8 @@ def update(conn: sqlite3.Connection, client_id: int, fields: Dict[str, Any]) -> 
         conn.execute(f"UPDATE api_keys SET {assignments}, updated_at=? WHERE id=?",
                      [*clean.values(), int(time.time()), client_id])
         _ensure_own_network(conn, client_id, clean)
+    if ids is not None:
+        _store_allowed(conn, client_id, ids)
     return get(conn, client_id)
 
 
@@ -222,6 +309,7 @@ def delete_record(conn: sqlite3.Connection, client_id: int) -> None:
     if remaining:
         raise BadRequest(f"client still owns {remaining} sandbox(es)")
     conn.execute("DELETE FROM containers WHERE api_key_id=?", (client_id,))
+    conn.execute("DELETE FROM client_profiles WHERE client_id=?", (client_id,))
     conn.execute("DELETE FROM api_keys WHERE id=?", (client_id,))
 
 

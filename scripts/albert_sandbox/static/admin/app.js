@@ -381,6 +381,10 @@
     tls_busy: "Anfrage läuft bereits",
     invalid_net: "Ungültiges internes Ziel",
     invalid_lifecycle: "Ungültige Laufzeit",
+    profile_not_allowed: "Profil nicht erlaubt",
+    profile_not_found: "Profil unbekannt",
+    profile_default_not_allowed: "Standard-Profil nicht erlaubt",
+    no_profile_allowed: "Kein Profil erlaubt",
     password_required: "Passwort zur Bestätigung",
     host_full: "Sandbox-Server ausgelastet",
     rate_limited: "Zu viele Anfragen",
@@ -887,22 +891,80 @@
     };
   }
 
-  /** "Software-Profil" select. Returns {node, value(), changed()}. */
-  function profileSelectField(client, profiles) {
-    const initial = client && client.profileId ? String(client.profileId) : "";
-    const list = [...(profiles || [])];
-    if (client && client.profile && !list.some((p) => p.id === client.profile.id)) list.push(client.profile);
-    const select = h("select", { name: "profileId", class: "wide" },
-      h("option", { value: "" }, "Standard (mitgeliefertes Image)"),
-      list.map((p) => h("option", { value: String(p.id) },
-        p.name + (p.status === "new" || (p.status === "failed" && !p.image) ? " – noch nicht gebaut" : ""))));
-    select.value = initial;
-    const node = field("Software-Profil", select,
-      "Zusatzsoftware für neue Sandboxen. Bestehende werden als veraltet markiert und per „Neu aufbauen“ umgestellt.");
+  const SHIPPED_IMAGE = "Mitgeliefertes Image";
+
+  /**
+   * Software profiles of a client: the profiles it may choose from ("Erlaubte Profile",
+   * key "" = shipped image) and its default for sandboxes created without a profile.
+   * Returns {defaultNode, allowedNode, values(), changed(), valid(), removed()}.
+   */
+  function profileChoiceFields(client, profileList) {
+    const list = [...(profileList || [])];
+    const initialStd = client ? client.allowStandardImage !== false : true;
+    const initialIds = new Set((client && client.allowedProfileIds) || []);
+    const initialDefault = client && client.profileId ? String(client.profileId) : "";
+    const nameOf = (key) => (key === "" ? SHIPPED_IMAGE : ((list.find((p) => String(p.id) === key) || {}).name
+      || `Profil ${key}`));
+    const notBuilt = (p) => p.status === "new" || (p.status === "failed" && !p.image);
+    const boxes = new Map();
+    const chip = (key, label, sub, checked) => {
+      const input = h("input", { type: "checkbox", checked });
+      boxes.set(key, input);
+      return h("label", { class: "check-chip" }, input,
+        h("span", null, label, sub ? h("span", { class: "faint" }, " " + sub) : null));
+    };
+    const chips = [chip("", SHIPPED_IMAGE, "(standard)", initialStd)];
+    list.forEach((p) => chips.push(chip(String(p.id), p.name, notBuilt(p) ? "(noch nicht gebaut)" : "",
+      initialIds.has(p.id))));
+    const select = h("select", { name: "profileId", class: "wide" });
+    const warn = h("span", { class: "field-hint warn-text" });
+    let wanted = initialDefault;
+    const checkedKeys = () => [...boxes.entries()].filter(([, b]) => b.checked).map(([key]) => key);
+    function fill() {
+      const keys = checkedKeys();
+      select.replaceChildren(...keys.map((key) => h("option", { value: key }, nameOf(key))));
+      select.disabled = !keys.length;
+      select.value = keys.includes(wanted) ? wanted : (keys[0] ?? "");
+      warn.textContent = !keys.length ? "Mindestens ein Profil muss erlaubt sein."
+        : keys.includes(wanted) ? "" : `„${nameOf(wanted)}“ ist nicht mehr erlaubt – neues Standard-Profil: „${nameOf(select.value)}“.`;
+    }
+    select.addEventListener("change", () => { wanted = select.value; fill(); });
+    boxes.forEach((b) => b.addEventListener("change", fill));
+    fill();
+    const defaultNode = h("label", { class: "field" },
+      h("span", { class: "field-label" }, "Standard-Profil"), select,
+      h("span", { class: "field-hint" }, "Gilt für neue Sandboxen ohne Profilangabe. Bestehende Sandboxen behalten "
+        + "ihr Profil."), warn);
+    const allowedNode = h("fieldset", null,
+      h("legend", null, "Erlaubte Profile"),
+      h("p", { class: "legend-hint" }, "Aus diesen wählt die KI beim Anlegen einer Sandbox (Parameter „profile“); "
+        + "sie sieht Name, Beschreibung und Paketliste. Noch nicht gebaute Profile werden ihr nicht angeboten."),
+      h("div", { class: "check-chips" }, chips));
+    const values = () => {
+      const keys = checkedKeys();
+      return {
+        profileId: select.value ? Number(select.value) : null,
+        allowStandardImage: keys.includes(""),
+        allowedProfileIds: keys.filter((k) => k !== "").map(Number),
+      };
+    };
     return {
-      node,
-      value: () => (select.value ? Number(select.value) : null),
-      changed: () => select.value !== initial,
+      defaultNode,
+      allowedNode,
+      values,
+      valid: () => checkedKeys().length > 0,
+      changed: () => {
+        const v = values();
+        return String(v.profileId ?? "") !== initialDefault || v.allowStandardImage !== initialStd
+          || v.allowedProfileIds.length !== initialIds.size || v.allowedProfileIds.some((id) => !initialIds.has(id));
+      },
+      /** Allowed entries that were removed: profile ids, null = shipped image. */
+      removed: () => {
+        const v = values();
+        const out = [...initialIds].filter((id) => !v.allowedProfileIds.includes(id));
+        if (initialStd && !v.allowStandardImage) out.push(null);
+        return out;
+      },
     };
   }
 
@@ -1470,8 +1532,13 @@
   function softwareNetText(client) {
     return h("div", null,
       client.profile
-        ? h("a", { href: "#/profiles/" + enc(client.profile.id), title: "Software-Profil" }, client.profile.name)
+        ? h("a", { href: "#/profiles/" + enc(client.profile.id), title: "Standard-Profil" }, client.profile.name)
         : h("span", { class: "muted", title: "Mitgeliefertes Sandbox-Image" }, "Standard"),
+      (() => {
+        const more = (client.allowedProfileIds || []).length + (client.allowStandardImage ? 1 : 0) - 1;
+        return more > 0 ? h("span", { class: "faint", title: "Weitere erlaubte Profile (Auswahl beim Anlegen)" },
+          ` +${more}`) : null;
+      })(),
       h("div", { class: "cell-sub" }, client.allowInternet === false
         ? h("span", { class: "badge warn" }, "ohne Internet")
         : "mit Internet"),
@@ -1528,13 +1595,15 @@
     const legacy = legacyAccessField(null);
     const nets = allowNetsField(null);
     const life = lifecycleInputs(null, ov && ov.lifecycle);
-    const profile = profileSelectField(null, profiles);
+    const choice = profileChoiceFields(null, profiles);
     const created = await modal({
       title: "Client anlegen",
       wide: true,
       submitLabel: "Client anlegen",
       body: [
-        h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"), profile.node),
+        h("div", { class: "form-row" }, field("Bezeichnung", label, "z. B. Kunde, Team oder Anwendung"),
+          choice.defaultNode),
+        choice.allowedNode,
         clientPolicyGroups(policy, legacy, internet, nets, life),
         limits.nodes,
       ],
@@ -1546,11 +1615,15 @@
           label.setCustomValidity("");
           return false;
         }
+        if (!choice.valid()) {
+          toast("Mindestens ein Profil muss erlaubt sein.", { type: "error" });
+          return false;
+        }
         return api("clients", {
           method: "POST",
           body: {
             label: text, ...limits.values(), allowPersistent: policy.value(), allowInternet: internet.value(),
-            profileId: profile.value(), legacyAccess: legacy.value(), allowNets: nets.value(), ...life.values(),
+            ...choice.values(), legacyAccess: legacy.value(), allowNets: nets.value(), ...life.values(),
           },
         });
       },
@@ -1683,6 +1756,24 @@
       });
     }
 
+    /** Sandboxes that run with a profile that is withdrawn now - ask first. */
+    async function confirmProfileWithdrawal(removed) {
+      if (!removed.length) return true;
+      const using = (client.sandboxes || []).filter((s) => removed.includes(s.profile ? s.profile.id : null));
+      if (!using.length) return true;
+      return confirmDialog({
+        title: "Profil entziehen",
+        message: [
+          h("p", null, using.length === 1 ? "1 Sandbox nutzt" : `${using.length} Sandboxen nutzen`,
+            " ein Profil, das nicht mehr erlaubt sein soll."),
+          notice("ok", "Sie laufen weiter.",
+            "Sie werden als veraltet markiert und wechseln beim nächsten Neuaufbau auf das Standard-Profil des "
+            + "Clients; nachinstallierte Software geht dabei verloren, das Home-Verzeichnis bleibt."),
+        ],
+        confirmLabel: "Speichern",
+      });
+    }
+
     /** The first own target moves the client's sandboxes into an own network - ask first. */
     async function confirmOwnNetwork(list) {
       const sandboxesOf = client.sandboxes || [];
@@ -1717,12 +1808,13 @@
       const legacy = legacyAccessField(client);
       const nets = allowNetsField(client);
       const life = lifecycleInputs((client.lifecycle || {}).own, ov && ov.lifecycle);
-      const profile = profileSelectField(client, profiles);
+      const choice = profileChoiceFields(client, profiles);
       const saveBtn = h("button", { type: "submit", class: "btn primary" }, "Änderungen speichern");
       const resetBtn = h("button", { type: "button", class: "btn" }, "Zurücksetzen");
       const status = h("span", { class: "state" });
       const form = h("form", { class: "panel panel-body" },
-        h("div", { class: "form-row" }, field("Bezeichnung", label), profile.node),
+        h("div", { class: "form-row" }, field("Bezeichnung", label), choice.defaultNode),
+        choice.allowedNode,
         clientPolicyGroups(policy, legacy, internet, nets, life),
         limits.nodes,
         h("div", { class: "form-actions" }, saveBtn, resetBtn, status));
@@ -1735,7 +1827,14 @@
         }
         const payload = limits.changedValues();
         if (policy.changed()) payload.allowPersistent = policy.value();
-        if (profile.changed()) payload.profileId = profile.value();
+        if (choice.changed()) {
+          if (!choice.valid()) {
+            toast("Mindestens ein Profil muss erlaubt sein.", { type: "error" });
+            return;
+          }
+          if (!(await confirmProfileWithdrawal(choice.removed()))) return;
+          Object.assign(payload, choice.values());
+        }
         if (legacy.changed()) payload.legacyAccess = legacy.value();
         if (life.changed()) Object.assign(payload, life.values());
         if (nets.changed()) {
@@ -1777,7 +1876,8 @@
           renderQuota();
           renderForm();
           // persistence switches, profile and network state in the sandbox table
-          if (["allowPersistent", "profileId", "allowInternet", "allowNets"].some((k) => k in payload)) {
+          if (["allowPersistent", "profileId", "allowedProfileIds", "allowInternet", "allowNets"]
+            .some((k) => k in payload)) {
             refresh({ silent: true });
           }
         } catch (err) {
@@ -1887,6 +1987,7 @@
     hardening: "ohne aktuelle Container-Härtung",
     network: "Netz passt nicht zur Client-Einstellung",
     auth: "ohne Zugangsschutz für MCP und Dateien (interne Tokens)",
+    profile: "Profil nicht mehr erlaubt (Neuaufbau wechselt auf das Standard-Profil)",
   };
 
   function outdatedBadge(s) {
@@ -1982,7 +2083,7 @@
       (s.profile || s.internet === false || s.user) ? h("div", { class: "cell-tags" },
         s.user ? h("span", { class: "tag", title: "Gebunden an diesen ALBERT-Benutzer (Pseudonym)" },
           "Benutzer " + s.user) : null,
-        s.profile ? h("span", { class: "tag", title: "Software-Profil des Clients" }, s.profile.name) : null,
+        s.profile ? h("span", { class: "tag", title: "Software-Profil der Sandbox" }, s.profile.name) : null,
         s.internet === false ? h("span", { class: "tag warn", title: "Kein Internetzugriff, keine Namensauflösung" },
           "ohne Internet") : null) : null,
       s.lastError ? h("div", { class: "err-line", title: s.lastError }, "Fehler: " + s.lastError) : null);
@@ -2133,13 +2234,33 @@
   async function recreateSandbox(s) {
     if (state.pending.has(s.name)) return;
     const reasons = (s.outdated || []).map((r) => OUTDATED_LABEL[r] || r);
+    // Profiles the client allows: the rebuild can switch to another one.
+    let options = [];
+    try {
+      const [detail, profileList] = await Promise.all([api("clients/" + enc(s.clientId)), getProfiles()]);
+      const c = detail.client;
+      if (c.allowStandardImage) options.push({ key: "", label: SHIPPED_IMAGE });
+      (c.allowedProfileIds || []).forEach((id) => {
+        const p = (profileList || []).find((x) => x.id === id);
+        options.push({ key: String(id), label: p ? p.name : `Profil ${id}` });
+      });
+      const current = s.profile ? String(s.profile.id) : "";
+      const keep = options.some((o) => o.key === current) ? current : (c.profileId ? String(c.profileId) : "");
+      options = options.map((o) => ({ ...o, selected: o.key === keep }));
+    } catch (_) {
+      options = [];
+    }
+    const select = options.length > 1 ? h("select", { class: "wide" },
+      options.map((o) => h("option", { value: o.key, selected: o.selected }, o.label))) : null;
     const ok = await confirmDialog({
       title: "Sandbox neu aufbauen",
       message: [
         h("p", null, "Der Container von ", h("strong", { class: "mono" }, s.name),
-          " wird mit dem aktuellen Image des Clients (", s.profile ? `Profil „${s.profile.name}“` : "Standard",
+          " wird mit dem aktuellen Image seines Profils (", s.profile ? `„${s.profile.name}“` : SHIPPED_IMAGE,
           "), der aktuellen Härtung und im passenden Netz (",
           s.internet === false ? "ohne Internet" : "mit Internet", ") neu erstellt."),
+        select ? field("Profil", select, "Ein anderes erlaubtes Profil wählen, um die Sandbox umzustellen; "
+          + "nachinstallierte Software geht beim Neuaufbau ohnehin verloren.") : null,
         reasons.length ? h("p", null, "Grund: " + reasons.join(", ") + ".") : null,
         notice("ok", "Daten bleiben erhalten.",
           "Home-Verzeichnis, Uploads, Ports und Desktop-URL bleiben gleich; VNC-Passwort und interne Tokens werden "
@@ -2153,8 +2274,10 @@
     if (!ok) return;
     state.pending.set(s.name, { action: "recreate", since: Date.now() });
     rerenderView();
+    const current = s.profile ? String(s.profile.id) : "";
+    const body = select && select.value !== current ? { profileId: select.value ? Number(select.value) : null } : {};
     try {
-      await api(`sandboxes/${enc(s.name)}/recreate`, { method: "POST" });
+      await api(`sandboxes/${enc(s.name)}/recreate`, { method: "POST", body });
       toast(`Sandbox ${s.name} neu aufgebaut.`, { type: "success" });
     } catch (err) {
       showError(err, "Neu aufbauen fehlgeschlagen");
@@ -2600,7 +2723,8 @@
   function clientLinks(list) {
     if (!list || !list.length) return h("span", { class: "faint" }, "keinem Client");
     return h("div", { class: "link-list" }, list.map((c, i) => [i ? ", " : null,
-      h("a", { href: "#/clients/" + enc(c.id) }, c.label || `Client ${c.id}`)]));
+      h("a", { href: "#/clients/" + enc(c.id) }, c.label || `Client ${c.id}`),
+      c.default ? h("span", { class: "faint" }, " (Standard)") : null]));
   }
 
   async function buildProfile(p, { after = null } = {}) {
@@ -2698,7 +2822,8 @@
       submitLabel: "Anlegen",
       body: [
         field("Name", name, "z. B. Office + OCR"),
-        field("Beschreibung", description, "optional – wofür das Profil gedacht ist"),
+        field("Beschreibung", description, "Wird auch der KI angezeigt: wofür das Profil gedacht ist und was es "
+          + "enthält, z. B. „Office-Dokumente und Texterkennung“."),
         h("p", { class: "muted small mt-12" }, "Pakete und Bau folgen auf der nächsten Seite."),
       ],
       onSubmit: () => api("profiles", {
@@ -2792,7 +2917,8 @@
             h("dt", null, "Image"), h("dd", null, imageCell(profile)),
             h("dt", null, "Letzter Bau"), h("dd", null, lastBuild),
             h("dt", null, "Basis"), h("dd", { class: "mono small" }, state.baseImage || "albert-ai-sandbox:latest"),
-            h("dt", null, "Verwendet von"), h("dd", null, clientLinks(profile.clients))))),
+            h("dt", null, "Erlaubt für"), h("dd", null, clientLinks(profile.clients)),
+            h("dt", null, "Sandboxen"), h("dd", null, fmtNum(profile.sandboxes || 0, 0))))),
       ];
       if (profile.status === "new") {
         out.push(notice("warn", "Das Profil wurde noch nicht gebaut.",
@@ -2841,7 +2967,8 @@
       const saveBuildBtn = h("button", { type: "button", class: "btn primary" }, "Speichern und bauen");
       const resetBtn = h("button", { type: "button", class: "btn ghost" }, "Zurücksetzen");
       const form = h("form", { class: "panel panel-body" },
-        h("div", { class: "form-row" }, field("Name", name), field("Beschreibung", description)),
+        h("div", { class: "form-row" }, field("Name", name),
+          field("Beschreibung", description, "Wird auch der KI angezeigt: wofür das Profil gedacht ist.")),
         h("div", { class: "grid cols-3 mt-12" }, pkgFields),
         advanced,
         dockerfile,

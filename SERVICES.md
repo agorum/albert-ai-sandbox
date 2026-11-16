@@ -20,7 +20,9 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 | 401 | – | missing/invalid API key |
 | 403 | `persistent_not_allowed` | the client may not have persistent sandboxes (`POST /containers` with `"persistent": true`, or switching a sandbox to persistent) |
 | 404 | `not_found` | unknown sandbox (or owned by another client) |
-| 503 | `profile_not_ready` | the software profile assigned to the client has not been built yet (an admin has to build it) |
+| 503 | `profile_not_ready` | the chosen (or default) software profile has not been built yet (an admin has to build it) |
+| 403 | `profile_not_allowed` | the profile given in `POST /containers` is not allowed for the client; details: `allowed` (names) |
+| 404 | `profile_not_found` | no profile with this name |
 | 409 | `running_limit_exceeded` | the client already runs as many sandboxes as allowed (create or start); details: `limit`, `used`, `runningSandboxes` (only the asking user's own) – stop one of them first |
 | 409 | `quota_exceeded` | client quota (CPU/RAM of running sandboxes, disk, count) would be exceeded; details: `resource`, `limit`, `used`, `requested` |
 | 503 | `host_full` | the host cannot hold another running sandbox (memory guard: RAM limits of all running sandboxes, or free memory below the reserve); create, start or more RAM; details: `limit`, `used`, `requested`, `availableMb`, `runningSandboxes` (only the asking user's own) – stop one of them or retry later |
@@ -67,7 +69,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 `status` is `running`, `stopped`, `creating`, `removing`, `rebuilding` or `error` (a rebuild failed; the sandbox and its data are kept until an admin acts). `outdated` lists why the container should be rebuilt (`image`, `hardening`, `network`, `auth` = container from before the internal tokens of MCP Hub and file service); empty when up to date. `user` is the ALBERT user the sandbox is bound to (`null` = no binding). `urls.desktop` without a one-time link only works for legacy clients; use `POST /containers/{name}/desktop`. `persistentAllowed` tells whether the owning client may switch the sandbox to persistent. `internet` is false for clients without internet access (no outgoing connections, no name resolution). `profile` is the client's software profile (`null` = standard image); `outdated` contains `image` while the sandbox still runs an older image than the client's current one and `network` while its network does not match the internet setting. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
 
 ### `GET /health`
-`{"status": "ok", "docker": "up", "api": 3, "features": ["quota", "profiles", "user-binding", "service-auth", "desktop-link", "no-secrets"], "legacyAccess": false, "https": true}` (API key needed, `X-Albert-User` not). `api`/`features` tell this server from older ones (no `api` field: former interface, MCP with the fixed key, no user binding). Every client API response also carries the header `X-Albert-Sandbox-Api: 3`. `legacyAccess`: the client still has the former access; `https`: HTTPS is active (API only over HTTPS).
+`{"status": "ok", "docker": "up", "api": 3, "features": ["quota", "profiles", "profile-choice", "user-binding", "service-auth", "desktop-link", "no-secrets"], "legacyAccess": false, "https": true}` (API key needed, `X-Albert-User` not). `api`/`features` tell this server from older ones (no `api` field: former interface, MCP with the fixed key, no user binding). Every client API response also carries the header `X-Albert-Sandbox-Api: 3`. `legacyAccess`: the client still has the former access; `https`: HTTPS is active (API only over HTTPS).
 
 ### `GET /quota` (new)
 ```json
@@ -87,12 +89,21 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 
 Every sandbox object carries `lifecycle` (`stopAfterIdleSeconds`, `deleteWhenUnusedAfter`, `deleteAtLatest` as timestamps, `null` for persistent sandboxes) and `expiresAt` (`deleteAtLatest`, or `deleteWhenUnusedAfter` without max lifetime; `null` = no automatic deletion).
 
+### `GET /profiles` (new, feature `profile-choice`)
+```json
+{"profiles": [
+  {"name": "standard", "description": "Shipped image without extra software: …", "packages": [], "default": false, "state": "ready"},
+  {"name": "Office", "description": "Office-Dokumente und Texterkennung", "packages": ["libreoffice", "tesseract-ocr-deu", "pandas"], "default": true, "state": "ready"}
+]}
+```
+Profiles the client may choose from when it creates a sandbox (`state`: `ready`, or `building` while the first build runs). `default` marks the one used without a choice. Never built profiles are not listed; setup commands are never shown.
+
 ### `POST /containers`
 Body (all optional):
 ```json
 {"name": "agent-lab-01", "persistent": false, "resources": {"cpus": 1, "memoryMb": 2048, "diskGb": 10}}
 ```
-`name` is a hint; the final name gets a random suffix. Missing resources default to the client's per-sandbox limit; larger values are refused (`sandbox_limit_exceeded`). `"persistent": true` needs the client's permission (`persistent_not_allowed` otherwise); a new sandbox counts against the running limit (`running_limit_exceeded`). Response `201 {"container": {…sandbox object…, "result": "created"}}`. VNC password and internal tokens are no longer returned (former fields `vncPassword`, `fileServiceToken`): nginx uses them, clients authenticate with their API key. The call returns when MCP Hub inside the sandbox answers (up to ~2 minutes).
+`"profile": "<name>"` (optional, case-insensitive; `standard` = shipped image) chooses one of the profiles of `GET /profiles`; without it the client's default is used (`403 profile_not_allowed`, `404 profile_not_found`, `503 profile_not_ready`). The sandbox object names its profile in `profile` (`null` = shipped image). `name` is a hint; the final name gets a random suffix. Missing resources default to the client's per-sandbox limit; larger values are refused (`sandbox_limit_exceeded`). `"persistent": true` needs the client's permission (`persistent_not_allowed` otherwise); a new sandbox counts against the running limit (`running_limit_exceeded`). Response `201 {"container": {…sandbox object…, "result": "created"}}`. VNC password and internal tokens are no longer returned (former fields `vncPassword`, `fileServiceToken`): nginx uses them, clients authenticate with their API key. The call returns when MCP Hub inside the sandbox answers (up to ~2 minutes).
 
 ### `GET /containers`
 `{"containers": [ …sandbox objects… ]}`
@@ -121,7 +132,7 @@ Used by the web UI under `/manager/admin/` on its **own port** (`ALBERT_ADMIN_PO
 | POST | `api/login`, `api/logout` | session |
 | GET | `api/overview` | host resources, totals, defaults, network isolation status |
 | GET/POST | `api/clients` | list (with usage) / create (returns `apiKey` once) |
-| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes`, `quotaRunning` (null = unset), `allowPersistent` (bool), `allowInternet` (bool; a change moves and rebuilds the client's sandboxes in the background, response field `networkPolicy: "applying"`), `profileId` (null = standard image), `legacyAccess` (bool, former access without API key / user binding), `inactivitySeconds`, `maxAgeSeconds`, `maxLifetimeSeconds` (own lifetime of the client's sandboxes, null = global value, 0 = off), `allowNets` (list of IPv4 addresses/networks the client's sandboxes may reach in addition to the global ones, `[]` = none, `400 invalid_net`; the first own target gives the client an own network: `netSubnet`, `network`, existing sandboxes are moved without rebuild, `networkPolicy: "applying"`) / delete with all sandboxes |
+| GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes`, `quotaRunning` (null = unset), `allowPersistent` (bool), `allowInternet` (bool; a change moves and rebuilds the client's sandboxes in the background, response field `networkPolicy: "applying"`), `profileId` (default profile, null = shipped image; allowed automatically), `allowStandardImage` (bool) and `allowedProfileIds` (list) – the profiles the client may choose from (the default must stay among them: `400 profile_default_not_allowed`; at least one: `400 no_profile_allowed`), `legacyAccess` (bool, former access without API key / user binding), `inactivitySeconds`, `maxAgeSeconds`, `maxLifetimeSeconds` (own lifetime of the client's sandboxes, null = global value, 0 = off), `allowNets` (list of IPv4 addresses/networks the client's sandboxes may reach in addition to the global ones, `[]` = none, `400 invalid_net`; the first own target gives the client an own network: `netSubnet`, `network`, existing sandboxes are moved without rebuild, `networkPolicy: "applying"`) / delete with all sandboxes |
 | POST | `api/clients/{id}/rotate-key` | new API key, sandboxes stay |
 | GET/POST | `api/profiles` | list (status, image, clients) / create `{name, description, packages: {apt, pip, npm}, setupScript}` |
 | GET/PATCH/DELETE | `api/profiles/{id}` | detail incl. generated `dockerfile` / change (same fields) / delete (400 `profile_in_use` while assigned) |
@@ -129,7 +140,7 @@ Used by the web UI under `/manager/admin/` on its **own port** (`ALBERT_ADMIN_PO
 | GET | `api/profiles/{id}/log?seq=&offset=` | build output from `offset` (`text`, next `offset`, `running`) |
 | GET | `api/sandboxes[?client=id]` | all sandboxes |
 | PATCH/DELETE | `api/sandboxes/{name}` | `persistent`, `cpus`, `memoryMb`, `diskGb` (disk can only grow) / delete |
-| POST | `api/sandboxes/{name}/start|stop|restart|recreate` | lifecycle; `recreate` rebuilds the container with the current image/hardening/network, keeping data and ports; VNC password and internal tokens are renewed |
+| POST | `api/sandboxes/{name}/start|stop|restart|recreate` | lifecycle; `recreate` rebuilds the container with the current image of the sandbox's profile, hardening and network, keeping data and ports; VNC password and internal tokens are renewed; `{"profileId": id|null}` switches to another allowed profile (null = shipped image). Outdated reason `profile`: the profile is no longer allowed, a rebuild switches to the client's default |
 | POST | `api/sandboxes/{name}/desktop` | one-time desktop link for the admin |
 | PUT | `api/settings/lifecycle` | `{"inactivitySeconds", "maxAgeSeconds", "maxLifetimeSeconds"}` (0 = off) – lifetime of sandboxes for all clients without own values; `{"reset": true}` = back to albert.env. Shorter deadlines give existing sandboxes the full new period from now |
 | POST | `api/profiles/{id}/clone` | `{"name"}` (optional, default "‹name› (Kopie)") – new profile with the same description, packages and setup script; not built, assigned to no client |

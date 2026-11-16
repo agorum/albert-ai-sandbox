@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from .config import settings
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -201,6 +201,20 @@ API_KEY_V8_COLUMNS = {
     "lifecycle_changed_at": "INTEGER",
 }
 
+# v9: profiles a client may choose from when creating a sandbox (its default
+# stays api_keys.profile_id) and the profile every sandbox was created with.
+# Existing clients keep exactly their former profile (default = only choice).
+V9_SCHEMA = """
+CREATE TABLE IF NOT EXISTS client_profiles (
+  client_id INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  PRIMARY KEY (client_id, profile_id)
+);
+CREATE INDEX IF NOT EXISTS idx_client_profiles_profile ON client_profiles(profile_id);
+"""
+API_KEY_V9_COLUMN = ("allow_standard_image", "INTEGER NOT NULL DEFAULT 1")
+SANDBOX_V9_COLUMN = ("profile_id", "INTEGER")  # NULL = shipped image
+
 
 def connect() -> sqlite3.Connection:
     path = settings().db_path
@@ -278,10 +292,22 @@ def init_db() -> None:
             # The default removal of non-persistent sandboxes went from 24 to 4
             # hours: existing sandboxes get the full new period from now on.
             kv_set(conn, "lifecycle_changed_at", int(time.time()))
+        conn.executescript(V9_SCHEMA)
+        if API_KEY_V9_COLUMN[0] not in existing:
+            with transaction(conn):
+                conn.execute(f"ALTER TABLE api_keys ADD COLUMN {API_KEY_V9_COLUMN[0]} {API_KEY_V9_COLUMN[1]}")
+                conn.execute("UPDATE api_keys SET allow_standard_image = CASE WHEN profile_id IS NULL THEN 1 ELSE 0 END")
+                conn.execute("INSERT OR IGNORE INTO client_profiles(client_id, profile_id) "
+                             "SELECT id, profile_id FROM api_keys WHERE profile_id IS NOT NULL")
         existing = _columns(conn, "sandboxes")
         for column, ctype in SANDBOX_V6_COLUMNS.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE sandboxes ADD COLUMN {column} {ctype}")
+        if SANDBOX_V9_COLUMN[0] not in existing:
+            with transaction(conn):
+                conn.execute(f"ALTER TABLE sandboxes ADD COLUMN {SANDBOX_V9_COLUMN[0]} {SANDBOX_V9_COLUMN[1]}")
+                conn.execute("UPDATE sandboxes SET profile_id = "
+                             "(SELECT profile_id FROM api_keys k WHERE k.id = sandboxes.api_key_id)")
         conn.executescript(V6_SCHEMA)
         existing = _columns(conn, "admin_users")
         for column, ctype in ADMIN_V3_COLUMNS.items():

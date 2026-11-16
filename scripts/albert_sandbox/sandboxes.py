@@ -238,27 +238,29 @@ def owner_context(conn: sqlite3.Connection, client_ids: Optional[List[int]] = No
         ids = sorted(set(client_ids))
         owners = conn.execute(f"SELECT * FROM api_keys WHERE id IN ({','.join('?' for _ in ids)})",
                               ids).fetchall() if ids else []
-    base_id: Optional[str] = None
-    profile_rows: Dict[int, Optional[sqlite3.Row]] = {}
     result: Dict[int, Dict[str, Any]] = {}
-    glob = lifecycle.global_values(conn) if owners else {}
+    if not owners:
+        return result
+    glob = lifecycle.global_values(conn)
+    # Profiles are few: load them once; the shipped image id only when needed.
+    profile_rows = {r["id"]: r for r in conn.execute("SELECT * FROM profiles")}
+    base = {"id": None, "loaded": False}
+
+    def base_id() -> Optional[str]:
+        if not base["loaded"]:
+            base["id"], base["loaded"] = dockerctl.image_id(settings().docker_image) or None, True
+        return base["id"]
+
     for owner in owners:
-        profile_row = None
-        if owner["profile_id"]:
-            if owner["profile_id"] not in profile_rows:
-                profile_rows[owner["profile_id"]] = conn.execute(
-                    "SELECT * FROM profiles WHERE id=?", (owner["profile_id"],)).fetchone()
-            profile_row = profile_rows[owner["profile_id"]]
-            image_id = profile_row["image_id"] if profile_row else None
-        else:
-            if base_id is None:
-                base_id = dockerctl.image_id(settings().docker_image) or ""
-            image_id = base_id or None
+        default_row = profile_rows.get(owner["profile_id"]) if owner["profile_id"] else None
         result[owner["id"]] = {
-            "image_id": image_id,
+            "profile_rows": profile_rows,
+            "base_id": base_id,
+            "allowed_ids": set(clients.allowed_profile_ids(conn, owner["id"])),
+            "allow_standard": bool(owner["allow_standard_image"]),
             "offline": not clients.internet_allowed(owner),
             "placement": netctl.placement(owner),
-            "profile": profiles.summary(profile_row),
+            "profile": profiles.summary(default_row),
             "persistent_allowed": clients.persistent_allowed(owner),
             "label": owner["label"] or "",
             "lifecycle": lifecycle.effective(owner, glob),
@@ -317,15 +319,25 @@ def serialize(row: sqlite3.Row, info: Optional[Dict[str, Any]] = None, *,
         "clientId": row["api_key_id"],
         # Pseudonymous ALBERT user the sandbox is bound to (X-Albert-User), None = no binding.
         "user": row["owner"],
-        # Non-empty: the container predates the current image/hardening/network
-        # setup; "recreate" rebuilds it with the same data, ports and credentials.
-        "outdated": outdated_reasons(info, context.get("image_id"),
-                                     context.get("placement") or bool(context.get("offline"))),
     }
+    profile_row = None
     if context:
-        # Internet access and software profile of the owning client.
+        pid = _row_profile_id(row)
+        profile_row = context["profile_rows"].get(pid) if pid else None
+        expected = profile_row["image_id"] if profile_row else (context["base_id"]() if not pid else None)
+        allowed = context["allow_standard"] if not pid else pid in context["allowed_ids"]
+    else:
+        expected, allowed = None, True
+    # Non-empty: the container predates the current image/hardening/network
+    # setup ("recreate" rebuilds it with the same data, ports and credentials),
+    # or its profile is no longer allowed for the client ("profile": a rebuild
+    # switches it to the client's default profile).
+    data["outdated"] = outdated_reasons(info, expected, context.get("placement") or bool(context.get("offline"))) \
+        + ([] if allowed else ["profile"])
+    if context:
+        # Internet access of the client, software profile of this sandbox (None = shipped image).
         data["internet"] = not context["offline"]
-        data["profile"] = context["profile"]
+        data["profile"] = profiles.summary(profile_row)
         # Whether the owning client may switch this sandbox to persistent.
         data["persistentAllowed"] = context["persistent_allowed"]
         if with_client_label:
@@ -486,21 +498,57 @@ def _ensure_route(row: sqlite3.Row) -> None:
             nginxctl.reload()
 
 
+def _row_profile_id(row: Any) -> Optional[int]:
+    try:
+        return row["profile_id"]
+    except (IndexError, KeyError):
+        return None
+
+
+KEEP = object()  # recreate: keep the sandbox's profile (if still allowed)
+
+
+def resolve_profile(conn: sqlite3.Connection, client: sqlite3.Row, ref: Any) -> Optional[sqlite3.Row]:
+    """Profile for a new sandbox: ``ref`` None = the client's default, "standard" = the
+    shipped image, otherwise a profile name (case-insensitive) or id the client may use.
+    Returns the profile row (None = shipped image)."""
+    if ref is None or (isinstance(ref, str) and not ref.strip()):
+        return profiles.get(conn, client["profile_id"]) if client["profile_id"] else None
+    text = str(ref).strip()
+    row = None
+    if text.lower() != profiles.STANDARD_NAME:
+        row = conn.execute("SELECT * FROM profiles WHERE name=?", (text,)).fetchone()
+        if row is None and text.isdigit():
+            row = conn.execute("SELECT * FROM profiles WHERE id=?", (int(text),)).fetchone()
+        if row is None:
+            raise NotFound(f"profile '{text}' does not exist", code="profile_not_found")
+    if not clients.profile_allowed(conn, client, row["id"] if row else None):
+        names = [profiles.STANDARD_NAME] if client["allow_standard_image"] else []
+        names += [r["name"] for r in conn.execute(
+            "SELECT p.name FROM profiles p JOIN client_profiles cp ON cp.profile_id=p.id "
+            "WHERE cp.client_id=? ORDER BY p.name COLLATE NOCASE", (client["id"],))]
+        raise Forbidden(f"profile '{text}' is not allowed for this client; allowed: {', '.join(names)} "
+                        "(GET /profiles lists them)", code="profile_not_allowed", details={"allowed": names})
+    return row
+
+
 # --------------------------------------------------------------------------
 # operations
 # --------------------------------------------------------------------------
 
 def create(client_id: int, requested_name: Optional[str] = None, persistent: bool = False,
            resources: Optional[Dict[str, Any]] = None, actor: str = "api",
-           owner: Optional[str] = None) -> Dict[str, Any]:
-    """Create a sandbox. ``owner``: ALBERT user it is bound to (X-Albert-User)."""
+           owner: Optional[str] = None, profile: Any = None) -> Dict[str, Any]:
+    """Create a sandbox. ``owner``: ALBERT user it is bound to (X-Albert-User);
+    ``profile``: name of an allowed profile (None = the client's default)."""
     s = settings()
     with db.session() as conn:
         client = clients.get(conn, client_id)
         if persistent:
             _require_persistent_allowed(client)
         res = resolve_resources(client, resources)
-        image, _profile = profiles.target_image(conn, client)
+        profile_row = resolve_profile(conn, client, profile)
+        image = profiles.image_of(profile_row)
         if not dockerctl.image_id(image):
             raise SandboxError(f"Docker image '{image}' not found. Run 'build' first.", code="image_missing")
         # Never start a sandbox without its network isolation in place.
@@ -520,14 +568,17 @@ def create(client_id: int, requested_name: Optional[str] = None, persistent: boo
                 conn.execute(
                     """INSERT INTO sandboxes(name, api_key_id, image, state, created_at, persistent,
                          novnc_port, mcphub_port, filesvc_port, vnc_password, filesvc_token, mcphub_token,
-                         cpus, memory_mb, disk_gb, storage, last_activity_at, last_started_at, owner)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         cpus, memory_mb, disk_gb, storage, last_activity_at, last_started_at, owner, profile_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (name, client_id, image, STATE_CREATING, now, 1 if persistent else 0,
                      novnc, mcphub, filesvc, cred["vnc_password"], cred["filesvc_token"], cred["mcphub_token"],
-                     res["cpus"], res["memory_mb"], res["disk_gb"], "image", now, now, owner),
+                     res["cpus"], res["memory_mb"], res["disk_gb"], "image", now, now, owner,
+                     profile_row["id"] if profile_row else None),
                 )
                 db.audit(conn, actor, "sandbox.create", name, {"clientId": client_id, **res,
                                                                "persistent": bool(persistent),
+                                                               "profile": profile_row["name"] if profile_row
+                                                               else profiles.STANDARD_NAME,
                                                                **({"user": owner} if owner else {})})
         row = get_row(conn, name)
         try:
@@ -638,11 +689,13 @@ def restart(name: str, client_id: Optional[int] = None, actor: str = "api") -> D
 
 
 def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
-             force: bool = False, run: Optional[bool] = None) -> Dict[str, Any]:
+             force: bool = False, run: Optional[bool] = None, profile: Any = KEEP) -> Dict[str, Any]:
     """Rebuild the container with the current image, hardening and network.
 
-    The image is the owner's current one (standard or profile image), the
-    network follows the owner's internet access. Data, ports and limits stay
+    The image is the current one of the sandbox's profile - or of the client's
+    default profile once that profile is no longer allowed; ``profile`` (name,
+    "standard") switches to another allowed profile. The network follows the
+    owner's internet access. Data, ports and limits stay
     the same; VNC password and internal tokens are renewed (values that ever
     showed up in old chats or logs become worthless), open desktops end. Disk-image sandboxes keep everything (home and
     uploads live on the disk image); sandboxes migrated from the former
@@ -659,7 +712,14 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
         if row["state"] not in allowed:
             raise Conflict(f"Sandbox '{name}' is {row['state']}")
         client = clients.get(conn, row["api_key_id"])
-        image, _profile = profiles.target_image(conn, client)
+        if profile is not KEEP:
+            profile_row = resolve_profile(conn, client, profile if profile is not None else profiles.STANDARD_NAME)
+        elif clients.profile_allowed(conn, client, _row_profile_id(row)):
+            profile_row = profiles.get(conn, row["profile_id"]) if _row_profile_id(row) else None
+        else:
+            profile_row = resolve_profile(conn, client, None)  # no longer allowed: the default
+        target_profile_id = profile_row["id"] if profile_row else None
+        image = target_image = profiles.image_of(profile_row)
         if not dockerctl.image_id(image):
             raise SandboxError(f"Docker image '{image}' not found. Run 'build' first.", code="image_missing")
         netctl.ensure_ready(_placement(client))
@@ -730,11 +790,15 @@ def recreate(name: str, client_id: Optional[int] = None, actor: str = "admin",
         conn.execute(
             "UPDATE sandboxes SET state=?, container_id=?, image=?, vnc_port=NULL, error=?, "
             "last_started_at=CASE WHEN ? THEN ? ELSE last_started_at END, "
-            "last_activity_at=CASE WHEN ? THEN ? ELSE last_activity_at END WHERE name=?",
+            "last_activity_at=CASE WHEN ? THEN ? ELSE last_activity_at END, "
+            "profile_id=CASE WHEN ? THEN ? ELSE profile_id END WHERE name=?",
             (STATE_READY, container_id, image, error, 1 if start_after else 0, now,
-             1 if start_after and not was_running else 0, now, name),
+             1 if start_after and not was_running else 0, now,
+             1 if image == target_image else 0, target_profile_id, name),  # not on fallback to the old image
         )
         db.audit(conn, actor, "sandbox.recreate", name, {"image": image, "error": error,
+                                                         "profile": profile_row["name"] if profile_row
+                                                         else profiles.STANDARD_NAME,
                                                          "internet": not _offline(client)})
         if start_after:
             wait_for_mcphub(row["mcphub_port"])

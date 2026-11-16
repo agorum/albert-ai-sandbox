@@ -143,7 +143,7 @@ A client is an API key plus settings:
   - Maximum number of sandboxes (running or stopped).
   - Maximum number of sandboxes **running at the same time** ("davon laufend"). Creating or starting one more is refused with HTTP 409 `running_limit_exceeded`; the message names the running sandboxes so the agent can stop one first. `0` = the client may not run sandboxes. Lowering the limit stops nothing; it applies to the next start.
 - **Persistent sandboxes** ("Persistente Sandboxen erlauben"): only clients with this permission may create persistent sandboxes or switch one to persistent; otherwise the request is refused with HTTP 403 `persistent_not_allowed`. New clients start without it. Clients that existed before the update keep it, so nothing changes for them until an admin switches it off. Withdrawing the permission leaves existing persistent sandboxes as they are (they can still be switched off, not on again).
-- **Software profile** ("Software-Profil", see below): which image new sandboxes of the client are created from. Default: the shipped image.
+- **Software profiles** (see below): "Erlaubte Profile" – the profiles (and/or the shipped image) the client may choose from when it creates a sandbox – and the "Standard-Profil" used without a choice. New clients: only the shipped image.
 - **Internet access** ("Internetzugriff", default on): without it the client's sandboxes cannot open any connection to the outside and cannot resolve names; only the internal targets (global and the client's own) stay reachable. ALBERT | AI still reaches the sandbox (desktop, MCP Hub, file service), because those connections come in through nginx. Switching the setting applies at once to all existing sandboxes of the client: they are moved into the other network and rebuilt (data, ports and credentials are kept; running ones are briefly unreachable). The client API reports the setting (`internetAccess` in `/quota`, `internet` in the sandbox object) so the agent knows it cannot download anything.
 - **Internal targets of the client** ("Interne Ziele dieses Clients"): IPv4 addresses or networks its sandboxes may reach in addition to the targets for all sandboxes, see below.
 
@@ -173,7 +173,9 @@ A profile adds software to the shipped sandbox image, e.g. for customers whose s
 
 "Bauen" in the admin UI (Profile) generates a Dockerfile `FROM albert-ai-sandbox:latest` and builds `albert-ai-sandbox-profile-<id>:<n>`; the output is shown live. Builds run one after another as separate jobs (`systemd-run`), so they continue when the manager restarts. A failed build keeps the previous image in use. The host needs internet access (package mirrors) while building; the sandboxes do not.
 
-Assign a profile to a client ("Software-Profil"); its new sandboxes are created from the profile image. A client whose profile was never built gets HTTP 503 `profile_not_ready`. Existing sandboxes are marked outdated after a profile change or a new build and are switched with "Neu aufbauen" / `recreate --outdated` (data is kept).
+Allow profiles per client ("Erlaubte Profile", the shipped image is an entry of its own) and choose its default ("Standard-Profil", always among the allowed ones; a new default is allowed automatically). ALBERT | AI lists the allowed profiles (`GET /profiles`: name, description, package names, default, ready/building – never the setup commands; profiles never built are not offered) and chooses one when it creates a sandbox (`"profile": "<name>"`, `standard` = shipped image); without a choice the default is used. A profile outside the list is refused with `403 profile_not_allowed`, one that was never built with `503 profile_not_ready`. The description of a profile is shown to the AI – write what it is for and what it contains.
+
+Every sandbox keeps the profile it was created with: a new default only applies to new sandboxes, and a rebuild uses the current image of the sandbox's own profile (marked outdated after a new build of that profile). If a profile is withdrawn from a client, its sandboxes keep running, are marked outdated ("Profil nicht mehr erlaubt") and switch to the client's default at the next rebuild. "Neu aufbauen" in the admin UI (or `recreate <name> --profile <name>`) can switch a sandbox to another allowed profile. A profile can only be deleted once no client allows it and no sandbox uses it. Existing clients keep exactly their former profile after the update. CLI: `client set <id> --profiles standard,Office --profile Office`, `create --profile Office`.
 
 When `install.sh` rebuilds the shipped image, it rebuilds all profiles built on the previous version automatically. Profile images no longer used by a profile or a container are removed by the cleanup. Profiles that are still assigned to a client cannot be deleted.
 
@@ -233,10 +235,10 @@ Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove
 
 ## Manage Sandboxes from the Command Line
 `albert-ai-sandbox-manager` (in `/usr/local/bin`) keeps the commands of the former Bash manager. With `--api-key <PLAINTEXT>` or `--api-key-hash <HASH>` it acts as that client; without a key it works in operator mode on all sandboxes (`create` always needs a key).
-- `create [name] [--persistent] [--cpus N] [--memory-mb N] [--disk-gb N]`
+- `create [name] [--persistent] [--cpus N] [--memory-mb N] [--disk-gb N] [--profile NAME]`
 - `list` / `status [name]`, `start`, `stop`, `restart`, `remove <name>` (always deletes the data)
 - `resources <name> --cpus N --memory-mb N --disk-gb N`, `persistent <name> on|off`
-- `recreate <name>` / `recreate --outdated` – rebuild with current image and hardening, data is kept
+- `recreate <name> [--profile NAME]` / `recreate --outdated` – rebuild with current image and hardening (optionally another allowed profile), data is kept
 - `firewall apply|status|remove` – network isolation
 - `profile list|show|create|set|delete|build|log|rebuild-outdated` – sandbox profiles
 - `desktop <name>` – one-time link to the desktop

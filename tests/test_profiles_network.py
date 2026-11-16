@@ -181,6 +181,9 @@ def test_delete_profile_and_cleanup_of_old_images(env, make_client):
     sandboxes.remove(name)
     with db.session() as conn:
         clients.update(conn, client["id"], {"profile_id": None})
+        with pytest.raises(BadRequest):  # still allowed for the client
+            profiles.delete(conn, row["id"])
+        clients.update(conn, client["id"], {"allowed_profile_ids": []})
         profiles.delete(conn, row["id"])
     report = reconcile.reconcile()
     assert ("remove-image", "albert-ai-sandbox-profile-1:2") in {(a["action"], a["target"]) for a in report["actions"]}
@@ -298,20 +301,22 @@ def test_admin_api_profiles_and_client_settings(env, make_client, http):
                       json={"profileId": profile["id"], "allowInternet": False}).get_json()["client"]
     assert data["profile"] == {"id": profile["id"], "name": "Daten"} and data["allowInternet"] is False
     assert data["networkPolicy"] == "applying"
-    # applied right away (inline in tests); the rebuild for the DNS setting also brings the new profile
+    # applied right away (inline in tests); the rebuild for the DNS setting keeps the sandbox's
+    # own profile (the shipped image) - a new default only applies to new sandboxes
     assert _networks(env, name) == [OFFLINE] and _dns(env, name) == [DEAD_DNS]
     assert sandboxes.describe(name)["outdated"] == []
-    assert env["docker"].run_calls[-1][-1] == "albert-ai-sandbox-profile-1:1"
-    # a profile change alone does not rebuild anything: the sandbox is only marked outdated
+    assert env["docker"].run_calls[-1][-1] == "albert-ai-sandbox:latest"
+    assert data["allowedProfileIds"] == [profile["id"]] and data["allowStandardImage"] is True
     other = _built("Anders", apt_packages="jq")
     http.patch(f"/admin/api/clients/{client['id']}", headers=h, json={"profileId": other["id"]})
-    assert sandboxes.describe(name)["outdated"] == ["image"]
+    assert sandboxes.describe(name)["outdated"] == []
 
     listed = {p["name"]: p for p in http.get("/admin/api/profiles").get_json()["profiles"]}
-    assert listed["Anders"]["clients"] == [{"id": client["id"], "label": "Kunde"}]
-    assert listed["Daten"]["clients"] == []
+    assert listed["Anders"]["clients"] == [{"id": client["id"], "label": "Kunde", "default": True}]
+    assert listed["Daten"]["clients"] == [{"id": client["id"], "label": "Kunde", "default": False}]
     in_use = http.delete(f"/admin/api/profiles/{other['id']}", headers=h)
     assert in_use.status_code == 400 and in_use.get_json()["error"] == "profile_in_use"
+    http.patch(f"/admin/api/clients/{client['id']}", headers=h, json={"allowedProfileIds": [other["id"]]})
     assert http.delete(f"/admin/api/profiles/{profile['id']}", headers=h).status_code == 200
     overview = http.get("/admin/api/overview").get_json()
     assert overview["profiles"] == 1 and overview["clientsOffline"] == 1

@@ -116,6 +116,8 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
             name = (value or "").strip() if isinstance(value, str) else ""
             if not name:
                 raise BadRequest("name is required")
+            if name.lower() == STANDARD_NAME:
+                raise BadRequest(f"'{STANDARD_NAME}' is reserved for the shipped image")
             if len(name) > 80:
                 raise BadRequest("name too long (max 80 characters)")
             clean[key] = name
@@ -210,7 +212,16 @@ def update(conn: sqlite3.Connection, profile_id: int, fields: Dict[str, Any]) ->
 
 
 def clients_using(conn: sqlite3.Connection, profile_id: int) -> List[sqlite3.Row]:
-    return conn.execute("SELECT id, label FROM api_keys WHERE profile_id=? ORDER BY label", (profile_id,)).fetchall()
+    """Clients that may use the profile (allowed or default); column is_default."""
+    return conn.execute(
+        "SELECT k.id, k.label, (k.profile_id IS ?) AS is_default FROM api_keys k "
+        "WHERE k.profile_id=? OR EXISTS (SELECT 1 FROM client_profiles cp "
+        "WHERE cp.client_id=k.id AND cp.profile_id=?) ORDER BY k.label",
+        (profile_id, profile_id, profile_id)).fetchall()
+
+
+def sandboxes_using(conn: sqlite3.Connection, profile_id: int) -> int:
+    return conn.execute("SELECT COUNT(*) FROM sandboxes WHERE profile_id=?", (profile_id,)).fetchone()[0]
 
 
 def delete(conn: sqlite3.Connection, profile_id: int) -> sqlite3.Row:
@@ -219,8 +230,12 @@ def delete(conn: sqlite3.Connection, profile_id: int) -> sqlite3.Row:
     users = clients_using(conn, profile_id)
     if users:
         names = ", ".join((u["label"] or f"#{u['id']}") for u in users)
-        raise BadRequest(f"profile is still assigned to: {names}", code="profile_in_use",
+        raise BadRequest(f"profile is still allowed for: {names}", code="profile_in_use",
                          details={"clients": [u["id"] for u in users]})
+    used = sandboxes_using(conn, profile_id)
+    if used:
+        raise BadRequest(f"{used} sandbox(es) still run with this profile; remove or rebuild them first",
+                         code="profile_in_use", details={"sandboxes": used})
     if row["build_state"] in BUILD_ACTIVE:
         raise Conflict("profile is being built; wait until the build has finished")
     conn.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
@@ -287,8 +302,33 @@ def serialize(conn: sqlite3.Connection, row: sqlite3.Row, base_id: Optional[str]
         "updatedAt": iso(row["updated_at"]),
     }
     if with_clients:
-        data["clients"] = [{"id": c["id"], "label": c["label"] or ""} for c in clients_using(conn, row["id"])]
+        data["clients"] = [{"id": c["id"], "label": c["label"] or "", "default": bool(c["is_default"])}
+                           for c in clients_using(conn, row["id"])]
+        data["sandboxes"] = sandboxes_using(conn, row["id"])
     return data
+
+
+STANDARD_NAME = "standard"
+STANDARD_DESCRIPTION = ("Shipped image without extra software: Ubuntu desktop with Firefox, Chrome, Python 3 and "
+                        "Node.js; more can be installed with apt, pip or npm if the client has internet access.")
+AI_PACKAGES_MAX = 100
+
+
+def ai_view(row: Optional[sqlite3.Row], default: bool) -> Optional[Dict[str, Any]]:
+    """What ALBERT | AI learns about a profile it may choose (None = not offered:
+    never built, or the last build failed without an image). No setup script."""
+    if row is None:
+        return {"name": STANDARD_NAME, "description": STANDARD_DESCRIPTION, "packages": [],
+                "default": default, "state": "ready"}
+    if row["image"]:
+        state = "ready"
+    elif row["build_state"] in BUILD_ACTIVE:
+        state = "building"
+    else:
+        return None
+    names = [p for kind in ("apt", "pip", "npm") for p in packages(row)[kind]][:AI_PACKAGES_MAX]
+    return {"name": row["name"], "description": row["description"] or "", "packages": names,
+            "default": default, "state": state}
 
 
 def summary(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -309,17 +349,22 @@ def expire_stale(conn: sqlite3.Connection) -> int:
         (int(time.time()), limit)).rowcount
 
 
-def target_image(conn: sqlite3.Connection, client: sqlite3.Row) -> Tuple[str, Optional[sqlite3.Row]]:
-    """Image tag new or rebuilt sandboxes of ``client`` use, and its profile."""
-    if not client["profile_id"]:
-        return settings().docker_image, None
-    row = get(conn, client["profile_id"])
+def image_of(row: Optional[sqlite3.Row]) -> str:
+    """Image tag of a profile (None = shipped image); refused while it was never built."""
+    if row is None:
+        return settings().docker_image
     if not row["image"]:
         raise Unavailable(
-            f"The sandbox profile '{row['name']}' assigned to this client has not been built yet, so no sandbox "
-            "can be created. An administrator has to build it first (admin UI: Profile).",
+            f"The sandbox profile '{row['name']}' has not been built yet, so no sandbox can be created with it. "
+            "Choose another profile or ask an administrator to build it (admin UI: Profile).",
             code="profile_not_ready")
-    return row["image"], row
+    return row["image"]
+
+
+def target_image(conn: sqlite3.Connection, client: sqlite3.Row) -> Tuple[str, Optional[sqlite3.Row]]:
+    """Image tag of the client's default profile, and the profile."""
+    row = get(conn, client["profile_id"]) if client["profile_id"] else None
+    return image_of(row), row
 
 
 # --------------------------------------------------------------------------

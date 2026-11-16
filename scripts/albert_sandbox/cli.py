@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("create", "create a sandbox (needs --api-key)")
     p.add_argument("name", nargs="?", help="optional name hint")
+    p.add_argument("--profile", help="software profile (name, 'standard' = shipped image; default: the client's)")
     p.add_argument("--persistent", action="store_true", help="exclude from automatic max-age removal")
     p.add_argument("--cpus", type=float)
     p.add_argument("--memory-mb", type=int)
@@ -80,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "(data, ports and credentials are kept)")
     p.add_argument("name", nargs="?")
     p.add_argument("--outdated", action="store_true", help="rebuild every outdated sandbox")
+    p.add_argument("--profile", help="switch to this allowed profile ('standard' = shipped image)")
     p.add_argument("--force", action="store_true", help="also rebuild sandboxes stuck in 'rebuilding'")
 
     p = add("desktop", "print a one-time link to the desktop of a sandbox")
@@ -236,7 +238,10 @@ def _client_options(p: argparse.ArgumentParser) -> None:
                    help="may the client create persistent sandboxes (new clients: no)")
     p.add_argument("--internet", choices=("yes", "no"),
                    help="internet access of the client's sandboxes (default: yes)")
-    p.add_argument("--profile", help="sandbox profile (id or name; 'none' = standard image)")
+    p.add_argument("--profile", help="default software profile (id or name; 'none' = shipped image); "
+                                     "allowed automatically")
+    p.add_argument("--profiles", help="profiles the client may choose from, comma separated "
+                                      "('standard' = shipped image); must include the default")
     p.add_argument("--allow-nets", help="internal targets of the client in addition to the global ones, "
                                         "comma separated ('none' = none); the client gets an own network")
     _lifecycle_options(p, per_client=True)
@@ -329,7 +334,7 @@ def cmd_sandbox(args: argparse.Namespace, out: Out) -> None:
     if command == "create":
         resources = {"cpus": args.cpus, "memoryMb": args.memory_mb, "diskGb": args.disk_gb}
         result = sandboxes.create(client_id, requested_name=args.name, persistent=args.persistent,
-                                  resources=resources, actor=actor)
+                                  resources=resources, actor=actor, profile=args.profile)
         result["ownerHash"] = client["key_hash"]
         out.emit(result, "\n".join([
             f"{GREEN}Sandbox created: {result['name']}{NC}",
@@ -413,6 +418,13 @@ def _client_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     nets = getattr(args, "allow_nets", None)
     if nets is not None:
         fields["allow_nets"] = "" if nets.strip().lower() in ("none", "-", "") else nets
+    allowed = getattr(args, "profiles", None)
+    if allowed is not None:
+        names = [n.strip() for n in allowed.split(",") if n.strip()]
+        fields["allow_standard_image"] = any(n.lower() in ("standard", "none") for n in names)
+        with db.session() as conn:
+            fields["allowed_profile_ids"] = [profiles.find(conn, n)["id"] for n in names
+                                             if n.lower() not in ("standard", "none")]
     ref = getattr(args, "profile", None)
     if ref is not None:
         if ref.strip().lower() in ("none", "standard", "-", ""):
@@ -436,6 +448,8 @@ def _client_summary(conn: Any, row: Any, running: set) -> Dict[str, Any]:
         "allowNets": clients.allow_nets(row),
         "network": netctl.placement(row).network,
         "profile": profiles.summary(profiles.get(conn, row["profile_id"])) if row["profile_id"] else None,
+        "allowedProfiles": ([profiles.STANDARD_NAME] if row["allow_standard_image"] else [])
+        + [profiles.get(conn, pid)["name"] for pid in clients.allowed_profile_ids(conn, row["id"])],
     }
 
 
@@ -706,7 +720,8 @@ def cmd_recreate(args: argparse.Namespace, out: Out) -> None:
         if not out.json and not out.quiet:
             print(f"{YELLOW}Rebuilding {name} ...{NC}", flush=True)
         try:
-            sandboxes.recreate(name, client_id, actor="cli", force=args.force)
+            extra = {"profile": args.profile} if getattr(args, "profile", None) else {}
+            sandboxes.recreate(name, client_id, actor="cli", force=args.force, **extra)
             results[name] = "ok"
         except SandboxError as exc:
             results[name] = exc.message

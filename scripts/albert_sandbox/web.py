@@ -129,6 +129,7 @@ API_VERSION = 3
 API_FEATURES = (
     "quota",          # GET /quota
     "profiles",       # software profiles, internetAccess/profile in /quota
+    "profile-choice", # GET /profiles, POST /containers {"profile": ...}
     "user-binding",   # X-Albert-User; lists and actions limited to the user's sandboxes
     "service-auth",   # MCP Hub and file service need the API key (+ user)
     "desktop-link",   # POST /containers/<name>/desktop, one-time links
@@ -181,10 +182,31 @@ def create_container() -> Any:
     for key in ("cpus", "memoryMb", "diskGb"):
         if key in body and key not in resources:
             resources[key] = body[key]
+    profile = body.get("profile")
+    if profile is not None and not isinstance(profile, (str, int)):
+        raise BadRequest("profile must be the name of a profile (GET /profiles)")
     result = sandboxes.create(g.client["id"], requested_name=body.get("name") or None,
                               persistent=_bool(body.get("persistent")), resources=resources,
-                              actor=g.client_actor, owner=g.albert_user)
+                              actor=g.client_actor, owner=g.albert_user, profile=profile)
     return jsonify({"container": result}), 201
+
+
+@client_api.get("/profiles")
+@client_required
+def client_profiles() -> Any:
+    """Profiles the client may choose from when creating a sandbox (POST /containers
+    "profile"; without it the default is used). Only built ones (or being built)."""
+    with db.session() as conn:
+        client = clients.get(conn, g.client["id"])
+        items = []
+        if client["allow_standard_image"]:
+            items.append(profiles.ai_view(None, default=client["profile_id"] is None))
+        for row in conn.execute("SELECT p.* FROM profiles p JOIN client_profiles cp ON cp.profile_id=p.id "
+                                "WHERE cp.client_id=? ORDER BY p.name COLLATE NOCASE", (client["id"],)):
+            view = profiles.ai_view(row, default=client["profile_id"] == row["id"])
+            if view:
+                items.append(view)
+    return jsonify({"profiles": items})
 
 
 @client_api.get("/containers")
@@ -499,6 +521,9 @@ def _client_dict(conn: Any, client: Any, running: set) -> Dict[str, Any]:
         "lifecycle": lifecycle.client_view(client, lifecycle.global_values(conn)),
         "netSubnet": client["net_subnet"],
         "profileId": client["profile_id"],
+        # Profiles the client may choose from (its default is always among them).
+        "allowStandardImage": bool(client["allow_standard_image"]),
+        "allowedProfileIds": clients.allowed_profile_ids(conn, client["id"]),
         "profile": {"id": profile["id"], "name": profile["name"]} if profile else None,
     }
 
@@ -518,6 +543,8 @@ _CLIENT_FIELD_MAP = {
     "maxAgeSeconds": "max_age_seconds",
     "maxLifetimeSeconds": "max_lifetime_seconds",
     "profileId": "profile_id",
+    "allowStandardImage": "allow_standard_image",
+    "allowedProfileIds": "allowed_profile_ids",
     "defaultCpus": "default_cpus",
     "defaultMemoryMb": "default_memory_mb",
     "defaultDiskGb": "default_disk_gb",
@@ -740,6 +767,12 @@ def admin_sandbox_action(name: str, action: str) -> Any:
                 "recreate": sandboxes.recreate}
     if action not in handlers:
         raise BadRequest(f"unknown action {action}")
+    body = _body()
+    if action == "recreate" and "profileId" in body:
+        # rebuild with another allowed profile (null = shipped image)
+        wanted = body["profileId"]
+        ref = profiles.STANDARD_NAME if wanted in (None, "", 0) else str(wanted)
+        return jsonify({"sandbox": sandboxes.recreate(name, actor=g.actor, profile=ref)})
     return jsonify({"sandbox": handlers[action](name, actor=g.actor)})
 
 

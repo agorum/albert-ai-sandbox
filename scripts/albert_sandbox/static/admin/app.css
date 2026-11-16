@@ -630,6 +630,10 @@ dialog .limit-groups { grid-template-columns: minmax(0, 1fr); }
 .policy-groups { display: grid; gap: 0 24px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
 .switch-stack > .switch-field { padding-top: 0; }
 .switch-stack > * + * { margin-top: 14px; }
+/* allowed profiles of a client */
+.check-chips { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+.check-chip { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
+.warn-text { color: var(--warn, #b7791f); }
 /* lifetime: one row per value, label left, input right (labels never push inputs down) */
 .life-rows { display: grid; gap: 12px; }
 .life-row { display: grid; grid-template-columns: minmax(0, 1fr) 130px; gap: 12px; align-items: center; cursor: default; }
