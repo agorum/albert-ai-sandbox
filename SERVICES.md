@@ -11,7 +11,7 @@ Every endpoint expects `Authorization: Bearer <PLAINTEXT_API_KEY>`. Sandboxes of
 
 **HTTPS:** once a certificate is active (admin UI, Einstellungen) the host answers API, MCP and file requests only over HTTPS; over HTTP they get `403 {"error": "https_required"}`. Use the `https://` base URL and verify the certificate.
 
-Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
+Errors use the shape `{"error": "<code>", "message": "<text>", ...}`. The extra fields listed as "details" below sit at the top level next to `error` and `message`, e.g. `{"error": "profile_not_allowed", "message": "…", "allowed": ["standard"]}`:
 
 | Status | `error` | When |
 |---|---|---|
@@ -21,7 +21,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`:
 | 403 | `persistent_not_allowed` | the client may not have persistent sandboxes (`POST /containers` with `"persistent": true`, or switching a sandbox to persistent) |
 | 404 | `not_found` | unknown sandbox (or owned by another client) |
 | 503 | `profile_not_ready` | the chosen (or default) software profile has not been built yet (an admin has to build it) |
-| 403 | `profile_not_allowed` | the profile given in `POST /containers` is not allowed for the client; details: `allowed` (names) |
+| 403 | `profile_not_allowed` | the profile given in `POST /containers` is not allowed for the client; details: `allowed` (names of the allowed profiles) |
 | 404 | `profile_not_found` | no profile with this name |
 | 409 | `running_limit_exceeded` | the client already runs as many sandboxes as allowed (create or start); details: `limit`, `used`, `runningSandboxes` (only the asking user's own) – stop one of them first |
 | 409 | `quota_exceeded` | client quota (CPU/RAM of running sandboxes, disk, count) would be exceeded; details: `resource`, `limit`, `used`, `requested` |
