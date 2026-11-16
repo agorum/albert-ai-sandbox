@@ -114,7 +114,7 @@ def test_upgrade_keeps_each_client_on_its_profile(env):
         assert clients.allowed(c, mit) == {"standard": False, "profileIds": [office["id"]]}
         assert clients.allowed(c, ohne) == {"standard": True, "profileIds": []}
         assert c.execute("SELECT profile_id FROM sandboxes WHERE name='sbx-alt'").fetchone()[0] == office["id"]
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 9
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 # --------------------------------------------------------------------------

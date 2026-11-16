@@ -169,13 +169,19 @@ The plaintext key is shown once; only its SHA-256 hash is stored. `scripts/api-k
 A profile adds software to the shipped sandbox image, e.g. for customers whose sandboxes have no internet access and therefore cannot install anything at runtime. It consists of:
 
 - **OS packages** (apt), **Python packages** (pip) and **global Node packages** (npm), one per line or separated by spaces, optionally with a version (`tesseract-ocr-deu=4.1.1-2`, `openpyxl==3.1.5`, `@mermaid-js/mermaid-cli@11.4.2`). Names are validated, so nothing can be injected through them.
-- optional **setup commands** for anything that is not a package (e.g. adding a vendor's APT repository). They run as root at the end of the build inside the build container – never on the host – with `bash -euo pipefail`.
+- an optional **preparation script** that runs before the packages are installed, e.g. to add a vendor's APT repository and key ("Vorbereitung").
+- optional **setup commands** for anything that is not a package. They run as root at the end of the build inside the build container – never on the host – with `bash -euo pipefail` (as does the preparation script).
 
 "Bauen" in the admin UI (Profile) generates a Dockerfile `FROM albert-ai-sandbox:latest` and builds `albert-ai-sandbox-profile-<id>:<n>`; the output is shown live. Builds run one after another as separate jobs (`systemd-run`), so they continue when the manager restarts. A failed build keeps the previous image in use. The host needs internet access (package mirrors) while building; the sandboxes do not.
 
 Allow profiles per client ("Erlaubte Profile", the shipped image is an entry of its own) and choose its default ("Standard-Profil", always among the allowed ones; a new default is allowed automatically). ALBERT | AI lists the allowed profiles (`GET /profiles`: name, description, package names, default, ready/building – never the setup commands; profiles never built are not offered) and chooses one when it creates a sandbox (`"profile": "<name>"`, `standard` = shipped image); without a choice the default is used. A profile outside the list is refused with `403 profile_not_allowed`, one that was never built with `503 profile_not_ready`. The description of a profile is shown to the AI – write what it is for and what it contains.
 
 Every sandbox keeps the profile it was created with: a new default only applies to new sandboxes, and a rebuild uses the current image of the sandbox's own profile (marked outdated after a new build of that profile). If a profile is withdrawn from a client, its sandboxes keep running, are marked outdated ("Profil nicht mehr erlaubt") and switch to the client's default at the next rebuild. "Neu aufbauen" in the admin UI (or `recreate <name> --profile <name>`) can switch a sandbox to another allowed profile. A profile can only be deleted once no client allows it and no sandbox uses it. Existing clients keep exactly their former profile after the update. CLI: `client set <id> --profiles standard,Office --profile Office`, `create --profile Office`.
+
+### Profiles from a sandbox
+"Als Profil speichern" on a running sandbox (admin UI, CLI `profile capture <sandbox> --name …`) creates a profile from the software installed in it: the packages added compared to the sandbox's image – apt packages installed by hand (without versions), pip packages (system-wide or `--user` in the home directory) and global npm packages (with versions) – and the APT sources and keys added in the sandbox (into the preparation script). If the sandbox was created from a profile, that profile's packages and commands are kept and the new ones added. Files are never copied, neither the home directory nor anything outside the package management; the capture lists such changes (and removed packages) as hints, so an administrator can turn what is needed into setup commands. The new profile is not built and allowed for no client.
+
+ALBERT | AI can do the same for a sandbox of its own (`POST /containers/<name>/profile`, `sandbox_manage` command): this only creates a **proposal**. It is listed under Profile → "Vorschläge von ALBERT | AI" (and counted next to "Profile" in the navigation), is never built by itself and is not offered to the AI. "Annehmen und bauen" builds it and allows it for the client that proposed it; "Verwerfen" deletes it. At most 5 proposals per client wait at the same time. Check proposals before accepting them: the build downloads the packages and runs their install scripts on the host's build network, outside the sandbox firewall. CLI: `profile accept <id|name>`, `profile delete <id|name>`.
 
 When `install.sh` rebuilds the shipped image, it rebuilds all profiles built on the previous version automatically. Profile images no longer used by a profile or a container are removed by the cleanup. Profiles that are still assigned to a client cannot be deleted.
 
@@ -247,6 +253,7 @@ Admin users on the host: `albert-ai-sandbox-manager admin add|list|passwd|remove
 - `allow-nets show|set <net…>|reset` – internal targets of all sandboxes; `client set <id> --allow-nets <net,…>|none` – of one client
 - `lifecycle show|set|reset` – lifetime of sandboxes; `client set <id> --inactivity-minutes|--max-age-hours|--max-lifetime-hours <n>|none` – of one client
 - `profile clone <id|name> [--name …]` – copy of a profile's settings
+- `profile capture <sandbox> --name … [--description …] [--preview]` – new profile from the software of a running sandbox; `profile accept <id|name>` – accept a proposal of ALBERT | AI (allow for its client, build); `profile set … --prepare-file <file>` – preparation script
 - `reconcile [--dry-run]` – clean up leftovers, `selfcheck`, `build` – rebuild the image
 
 Add `--json` for machine-readable output.

@@ -212,6 +212,13 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 }
 .mainnav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
 .mainnav a.active { background: var(--accent-soft); color: var(--accent); }
+.mainnav .nav-count {
+  display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 5px; border-radius: 9px;
+  background: var(--warn-fill); color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center;
+}
+.title-badge { margin-left: 10px; vertical-align: middle; font-size: 12px; }
+.capture-list { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
+div.capture-list { padding-left: 0; }
 
 .userbox { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
 .userbox-name { color: var(--text-muted); }

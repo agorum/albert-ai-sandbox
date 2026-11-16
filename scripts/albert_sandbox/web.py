@@ -10,6 +10,8 @@ Client API (unchanged paths and payloads, plus additions):
   POST   /containers/<name>/start|stop|restart
   PATCH  /containers/<name>/persistent  (POST also accepted)
   POST   /containers/<name>/desktop     (new) one-time link to the desktop
+  POST   /containers/<name>/profile     (new) save the sandbox's software as a profile proposal
+  GET    /profiles                      (new) profiles to choose from, open proposals
   DELETE /containers/<name>
 Header X-Albert-User binds sandboxes to an ALBERT user (required unless the
 client has legacy access, see access.py).
@@ -37,8 +39,8 @@ from flask import Blueprint, Flask, Response, g, jsonify, redirect, request, sen
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, access, admins, clients, db, dockerctl, lifecycle, netctl, nginxctl, profiles, \
-    reconcile, sandboxes, storage, tlsctl
+from . import __version__, access, admins, capture, clients, db, dockerctl, lifecycle, netctl, nginxctl, \
+    profiles, reconcile, sandboxes, storage, tlsctl
 from .config import settings
 from .errors import BadRequest, SandboxError
 
@@ -130,6 +132,7 @@ API_FEATURES = (
     "quota",          # GET /quota
     "profiles",       # software profiles, internetAccess/profile in /quota
     "profile-choice", # GET /profiles, POST /containers {"profile": ...}
+    "profile-proposals",  # POST /containers/<name>/profile, GET /profiles "proposals"
     "user-binding",   # X-Albert-User; lists and actions limited to the user's sandboxes
     "service-auth",   # MCP Hub and file service need the API key (+ user)
     "desktop-link",   # POST /containers/<name>/desktop, one-time links
@@ -206,7 +209,15 @@ def client_profiles() -> Any:
             view = profiles.ai_view(row, default=client["profile_id"] == row["id"])
             if view:
                 items.append(view)
-    return jsonify({"profiles": items})
+        pending = [_proposal_view(r) for r in profiles.open_proposals(conn, client["id"])]
+    return jsonify({"profiles": items, "proposals": pending})
+
+
+def _proposal_view(row: Any) -> Dict[str, Any]:
+    pk = profiles.packages(row)
+    return {"name": row["name"], "description": row["description"] or "", "state": "proposed",
+            "packages": [p for kind in ("apt", "pip", "npm") for p in pk[kind]][:profiles.AI_PACKAGES_MAX],
+            "sandbox": row["origin_sandbox"], "createdAt": sandboxes.iso(row["created_at"])}
 
 
 @client_api.get("/containers")
@@ -263,6 +274,24 @@ def desktop_container(name: str) -> Any:
         access.check_sandbox(conn, name, g.client, g.albert_user, g.client_actor)
         link = access.create_desktop_link(conn, name, g.client_actor)
     return jsonify({"desktop": link}), 201
+
+
+@client_api.post("/containers/<name>/profile")
+@client_required
+def save_as_profile(name: str) -> Any:
+    """Save the software installed in the sandbox as a profile proposal (package
+    lists, APT sources; no files). An administrator builds it and allows it for
+    the client; until then it is listed in GET /profiles "proposals".
+    ``"preview": true`` only shows what would be saved."""
+    body = _body()
+    _own_sandbox(name)
+    preview = _bool(body.get("preview"))
+    result, _ = capture.from_sandbox(name, profile_name=body.get("name"), description=body.get("description"),
+                                     preview=preview, proposal=True, actor=g.client_actor)
+    result.pop("id", None)
+    if preview:
+        return jsonify({"preview": result})
+    return jsonify({"proposal": result}), 201
 
 
 @client_api.delete("/containers/<name>")
@@ -568,7 +597,10 @@ def run_in_background(target: Callable, *args: Any, **kwargs: Any) -> None:
 @admin_bp.get("/api/overview")
 @admin_required
 def admin_overview() -> Any:
-    return jsonify(sandboxes.host_overview())
+    data = sandboxes.host_overview()
+    with db.session() as conn:
+        data["profileProposals"] = profiles.proposal_count(conn)
+    return jsonify(data)
 
 
 @admin_bp.get("/api/clients")
@@ -648,6 +680,7 @@ _PROFILE_FIELD_MAP = {
     "name": "name",
     "description": "description",
     "setupScript": "setup_script",
+    "prepareScript": "prepare_script",
 }
 
 
@@ -725,8 +758,22 @@ def admin_update_profile(profile_id: int) -> Any:
 def admin_delete_profile(profile_id: int) -> Any:
     with db.session() as conn:
         row = profiles.delete(conn, profile_id)
-        db.audit(conn, g.actor, "profile.delete", row["name"], {"profileId": profile_id})
+        db.audit(conn, g.actor, "profile.reject" if row["proposal"] else "profile.delete", row["name"],
+                 {"profileId": profile_id})
     return jsonify({"deleted": profile_id})
+
+
+@admin_bp.post("/api/profiles/<int:profile_id>/accept")
+@admin_required
+def admin_accept_profile(profile_id: int) -> Any:
+    """Accept a proposal of ALBERT | AI: allowed for its client and built."""
+    with db.session() as conn:
+        row = profiles.accept(conn, profile_id)
+        db.audit(conn, g.actor, "profile.accept", row["name"],
+                 {"profileId": profile_id, "clientId": row["origin_client_id"]})
+    profiles.request_build(profile_id, actor=g.actor)
+    with db.session() as conn:
+        return jsonify({"profile": _profile_view(conn, profiles.get(conn, profile_id), with_dockerfile=True)}), 202
 
 
 @admin_bp.post("/api/profiles/<int:profile_id>/build")
@@ -803,6 +850,20 @@ def admin_update_sandbox(name: str) -> Any:
 def admin_delete_sandbox(name: str) -> Any:
     sandboxes.remove(name, actor=g.actor)
     return jsonify({"deleted": name})
+
+
+@admin_bp.post("/api/sandboxes/<name>/capture")
+@admin_required
+def admin_sandbox_capture(name: str) -> Any:
+    """New profile with the software of a running sandbox (not built)."""
+    body = _body()
+    preview = _bool(body.get("preview"))
+    result, row = capture.from_sandbox(name, profile_name=body.get("name"), description=body.get("description"),
+                                       preview=preview, proposal=False, actor=g.actor)
+    if preview or row is None:
+        return jsonify({"preview": result})
+    with db.session() as conn:
+        return jsonify({"profile": _profile_view(conn, row, with_dockerfile=True)}), 201
 
 
 @admin_bp.post("/api/sandboxes/<name>/desktop")

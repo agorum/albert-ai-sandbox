@@ -331,6 +331,7 @@
     const ov = await api("overview");
     state.overview = ov;
     state.overviewAt = Date.now();
+    setProposalBadge(ov.profileProposals || 0);
     return ov;
   }
 
@@ -338,7 +339,25 @@
     state.profiles = data.profiles || [];
     state.profilesAt = Date.now();
     state.baseImage = data.baseImage || state.baseImage;
+    setProposalBadge(state.profiles.filter((p) => p.proposal).length);
     return state.profiles;
+  }
+
+  /** Number of profile proposals of ALBERT | AI next to "Profile" in the main navigation. */
+  function setProposalBadge(count) {
+    const link = document.querySelector('.mainnav a[data-nav="profiles"]');
+    if (!link) return;
+    let badge = link.querySelector(".nav-count");
+    if (!count) {
+      if (badge) badge.remove();
+      return;
+    }
+    if (!badge) {
+      badge = h("span", { class: "nav-count" });
+      link.append(badge);
+    }
+    badge.textContent = String(count);
+    badge.title = count === 1 ? "1 Vorschlag der KI wartet auf Prüfung" : `${count} Vorschläge der KI warten auf Prüfung`;
   }
 
   async function getProfiles(maxAgeMs = 15000) {
@@ -899,7 +918,7 @@
    * Returns {defaultNode, allowedNode, values(), changed(), valid(), removed()}.
    */
   function profileChoiceFields(client, profileList) {
-    const list = [...(profileList || [])];
+    const list = (profileList || []).filter((p) => !p.proposal); // proposals: accept them first
     const initialStd = client ? client.allowStandardImage !== false : true;
     const initialIds = new Set((client && client.allowedProfileIds) || []);
     const initialDefault = client && client.profileId ? String(client.profileId) : "";
@@ -1478,10 +1497,15 @@
         h("div", { class: "panel-title" }, "Software-Profile"),
         h("dl", { class: "kv" },
           h("dt", null, "Profile"), h("dd", null, h("a", { href: "#/profiles" }, fmtNum(ov.profiles || 0, 0))),
+          h("dt", null, "Vorschläge der KI"),
+          h("dd", null, ov.profileProposals
+            ? h("a", { href: "#/profiles" }, h("span", { class: "badge warn" }, `${ov.profileProposals} zu prüfen`))
+            : h("span", { class: "faint" }, "keine")),
           h("dt", null, "Clients ohne Internet"), h("dd", null, fmtNum(ov.clientsOffline || 0, 0))),
         h("p", { class: "metric-note mt-12" },
-          "Ein Profil ergänzt das mitgelieferte Sandbox-Image um Pakete (apt, pip, npm). Es wird einem Client "
-          + "zugeordnet; dessen neue Sandboxen entstehen dann aus dem Profil-Image.")));
+          "Ein Profil ergänzt das mitgelieferte Sandbox-Image um Pakete (apt, pip, npm). Clients wählen aus den für "
+          + "sie erlaubten Profilen. Die KI kann die Software einer Sandbox als Profil vorschlagen; gebaut wird es "
+          + "erst, wenn ein Admin den Vorschlag annimmt.")));
       out.push(h("div", { class: "grid cols-2 mt-16" }, isolation, profilesPanel));
     }
     return out;
@@ -2152,6 +2176,7 @@
     rebuild: [["path", { d: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94"
       + "l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" }]],
     live: [["path", { d: "M3 12h4l3-8 4 16 3-8h4" }]],
+    capture: [["path", { d: "M12 3v11" }], ["path", { d: "m7 10 5 5 5-5" }], ["path", { d: "M5 20h14" }]],
     build: [["path", { d: "M21 8 12 3 3 8l9 5 9-5z" }], ["path", { d: "M3 8v8l9 5 9-5V8" }], ["path", { d: "M12 13v8" }]],
     remove: [["path", { d: "M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" }]],
   };
@@ -2207,6 +2232,10 @@
         title: "Container mit aktuellem Image, Härtung und Netz neu erstellen; Daten und Ports bleiben, "
           + "Zugangsdaten werden erneuert",
       }));
+    buttons.push(mk("capture", "Als Profil speichern", "", () => openCaptureDialog(s), {
+      disabled: transitional || !running,
+      title: running ? "installierte Pakete und Paketquellen als neues Profil übernehmen" : "nur bei laufender Sandbox",
+    }));
     buttons.push(mk("live", "Live-Werte", "", () => openStatsDialog(s), { title: "CPU, RAM, Netz (docker stats)" }));
     buttons.push(mk("remove", "Löschen", "danger-outline", () => deleteSandbox(s), {
       disabled: s.status === "creating", busyFor: "delete",
@@ -2286,6 +2315,90 @@
       rerenderView();
       refreshView();
     }
+  }
+
+  /** New profile from the software installed in a running sandbox (preview first). */
+  async function openCaptureDialog(s) {
+    const name = h("input", { type: "text", required: true, maxlength: "80", autocomplete: "off" });
+    const description = h("input", { type: "text", maxlength: "1000", autocomplete: "off" });
+    const previewBox = h("div", { class: "mt-12" }, loadingEl("Sandbox wird untersucht …"));
+    const res = await modal({
+      title: "Software als Profil speichern",
+      wide: true,
+      submitLabel: "Profil anlegen",
+      body: [
+        h("p", null, "Übernommen werden die in ", h("strong", { class: "mono" }, s.name),
+          " installierten Pakete (apt, pip, npm) und Paketquellen – keine Dateien und kein Home-Verzeichnis. "
+          + "Das neue Profil ist noch nicht gebaut und keinem Client zugeordnet."),
+        h("div", { class: "form-row" }, field("Name", name, "z. B. Office + OCR"),
+          field("Beschreibung", description, "Wird auch der KI angezeigt. Leer: die wichtigsten Pakete.")),
+        previewBox,
+      ],
+      onOpen: async (ctl) => {
+        if (ctl.submitBtn) ctl.submitBtn.disabled = true;
+        try {
+          const data = await api(`sandboxes/${enc(s.name)}/capture`, { method: "POST", body: { preview: true } });
+          previewBox.replaceChildren(captureDetails(data.preview, { title: "Wird übernommen" }));
+          if (ctl.submitBtn) ctl.submitBtn.disabled = false;
+        } catch (err) {
+          const parts = [notice(err && err.code === "no_changes" ? "warn" : "danger", errorText(err))];
+          if (err && err.data && (err.data.hints || []).length) {
+            parts.push(captureDetails({ hints: err.data.hints, removedPackages: err.data.removedPackages },
+              { title: "Gefunden, aber nicht übernehmbar" }));
+          }
+          previewBox.replaceChildren(...parts);
+        }
+      },
+      onSubmit: () => api(`sandboxes/${enc(s.name)}/capture`, {
+        method: "POST", body: { name: name.value.trim(), description: description.value.trim() },
+      }),
+    });
+    if (!res || !res.profile) return;
+    state.profilesAt = 0;
+    toast(`Profil „${res.profile.name}“ angelegt – prüfen und bauen.`, { type: "success" });
+    location.hash = "#/profiles/" + enc(res.profile.id);
+  }
+
+  /** What a capture found (preview, or stored with a captured profile). */
+  function captureDetails(cap, { title = "Aus der Sandbox erfasst" } = {}) {
+    if (!cap) return null;
+    const rows = [];
+    const pk = cap.captured;
+    if (pk) {
+      const found = PACKAGE_KINDS.map((k) => [k.label, pk[k.key] || []]).filter(([, list]) => list.length);
+      rows.push(h("dt", null, "Pakete"), h("dd", null, found.length
+        ? h("div", { class: "capture-list" }, found.map(([label, list]) => h("div", null,
+          h("span", { class: "faint" }, label + ": "), h("span", { class: "mono small" }, list.join(", ")))))
+        : h("span", { class: "faint" }, "keine neuen")));
+    }
+    if (cap.basedOn && cap.basedOn !== "standard") {
+      rows.push(h("dt", null, "Basiert auf"), h("dd", null, "Profil ", h("strong", null, cap.basedOn),
+        h("span", { class: "faint" }, " – dessen Pakete und Befehle werden übernommen")));
+    }
+    if ((cap.aptSources || []).length) {
+      rows.push(h("dt", null, "Paketquellen"), h("dd", { class: "mono small" }, cap.aptSources.join(", ")));
+    }
+    if ((cap.removedPackages || []).length) {
+      rows.push(h("dt", null, "Entfernt"), h("dd", null, h("span", { class: "mono small" }, cap.removedPackages.join(", ")),
+        h("span", { class: "faint" }, " – im Profil bleiben sie installiert")));
+    }
+    const hints = cap.hints || [];
+    if (hints.length) {
+      rows.push(h("dt", null, "Nicht übernommen"), h("dd", null, h("ul", { class: "capture-list" },
+        hints.map((x) => h("li", null, h("span", { class: "mono small" }, x.path + (x.kind === "dir" ? "/" : "")), " ",
+          h("span", { class: "faint" }, (x.change === "added" ? "neu" : "geändert")
+            + (x.files ? ` · ${x.files} Dateien darin` : "")))),
+        cap.hintsMore ? h("li", { class: "faint" }, `… und ${cap.hintsMore} weitere`) : null)));
+    }
+    if ((cap.skipped || []).length) {
+      rows.push(h("dt", null, "Übersprungen"), h("dd", { class: "small" }, cap.skipped.join("; ")));
+    }
+    return h("div", { class: "panel" }, h("div", { class: "panel-body" },
+      h("div", { class: "panel-title" }, title),
+      h("dl", { class: "kv" }, rows),
+      hints.length ? h("p", { class: "metric-note mt-12" },
+        "Dateien außerhalb der Paketverwaltung übernimmt ein Profil nicht. Was davon gebraucht wird, gehört als "
+        + "Befehl in die zusätzlichen Befehle des Profils.") : null));
   }
 
   async function togglePersistent(s, input) {
@@ -2700,6 +2813,7 @@
     const pk = p.packages || {};
     const counts = PACKAGE_KINDS.map((k) => [k.key, (pk[k.key] || []).length]).filter(([, n]) => n > 0)
       .map(([k, n]) => `${n} ${k}`);
+    if (p.prepareScript) counts.push("Vorbereitung");
     if (p.setupScript) counts.push("eigene Befehle");
     const all = packageList(p);
     const preview = all.join(", ");
@@ -2740,6 +2854,20 @@
   }
 
   async function deleteProfile(p, { after = null } = {}) {
+    if (p.proposal) {
+      const rejected = await confirmDialog({
+        title: "Vorschlag verwerfen",
+        message: [h("p", null, "Der Vorschlag ", h("strong", null, p.name), " der KI wird gelöscht. "
+          + "Die KI kann danach einen neuen machen.")],
+        confirmLabel: "Verwerfen",
+        danger: true,
+        onConfirm: () => api("profiles/" + enc(p.id), { method: "DELETE" }),
+      });
+      state.profilesAt = 0;
+      if (rejected) toast(`Vorschlag „${p.name}“ verworfen.`, { type: "success" });
+      if (after) after(!!rejected);
+      return;
+    }
     const ok = await confirmDialog({
       title: "Profil löschen",
       message: [
@@ -2759,6 +2887,63 @@
     if (after) after(!!ok);
   }
 
+  async function acceptProposal(p, { after = null } = {}) {
+    const o = p.origin || {};
+    const client = o.clientId && !o.clientDeleted;
+    const ok = await confirmDialog({
+      title: "Vorschlag annehmen",
+      message: [
+        h("p", null, "Das Profil ", h("strong", null, p.name), " wird gebaut und ",
+          client ? ["für ", h("strong", null, o.clientLabel || `Client ${o.clientId}`), " erlaubt. "
+            + "Die KI kann dort danach Sandboxen damit anlegen."]
+            : "keinem Client zugeordnet (der Client wurde gelöscht)."),
+        notice("warn", "Vorher prüfen:", "Pakete und Paketquellen hat die KI in einer Sandbox installiert. Der Bau "
+          + "lädt sie herunter und führt ihre Installationsskripte aus – außerhalb der Sandbox-Firewall."),
+      ],
+      confirmLabel: "Annehmen und bauen",
+      onConfirm: () => api(`profiles/${enc(p.id)}/accept`, { method: "POST" }),
+    });
+    state.profilesAt = 0;
+    if (ok) toast(`„${p.name}“ angenommen, der Bau läuft.`, { type: "success" });
+    if (after) after(!!ok);
+  }
+
+  function originCell(o) {
+    if (!o || !o.sandbox) return h("span", { class: "faint" }, "–");
+    const client = o.clientId && !o.clientDeleted
+      ? h("a", { href: "#/clients/" + enc(o.clientId) }, o.clientLabel || `Client ${o.clientId}`)
+      : h("span", { class: "faint" }, o.clientDeleted ? "Client gelöscht" : "–");
+    return h("div", null, h("div", null, client),
+      h("div", { class: "cell-sub mono" }, o.sandbox),
+      o.basedOn && o.basedOn !== "standard" ? h("div", { class: "cell-sub" }, "basiert auf " + o.basedOn) : null);
+  }
+
+  function proposalsSection(list, refresh) {
+    const head = h("thead", null, h("tr", null,
+      ["Vorschlag", "Software", "Von", "Eingegangen", "Aktionen"].map((c) => h("th", null, c))));
+    const rows = list.map((p) => {
+      const o = p.origin || {};
+      const openBtn = h("button", { type: "button", class: "btn small" }, "Prüfen");
+      openBtn.addEventListener("click", () => { location.hash = "#/profiles/" + enc(p.id); });
+      const acceptBtn = h("button", { type: "button", class: "btn small primary" }, "Annehmen");
+      acceptBtn.addEventListener("click", () => acceptProposal(p, { after: () => refresh({ silent: true }) }));
+      const rejectBtn = h("button", { type: "button", class: "btn small danger-outline" }, "Verwerfen");
+      rejectBtn.addEventListener("click", () => deleteProfile(p, { after: () => refresh({ silent: true }) }));
+      return h("tr", null,
+        h("td", null, h("a", { href: "#/profiles/" + enc(p.id), class: "cell-main" }, p.name),
+          p.description ? h("div", { class: "cell-sub" }, p.description) : null),
+        h("td", null, softwareCell(p)),
+        h("td", null, originCell(o)),
+        h("td", null, timeEl(o.capturedAt || p.createdAt)),
+        h("td", { class: "actions" }, h("div", { class: "btn-row" }, openBtn, acceptBtn, rejectBtn)));
+    });
+    return h("section", { class: "section" },
+      h("div", { class: "section-head" }, h("h2", null, "Vorschläge von ALBERT | AI"),
+        h("span", { class: "hint" }, "Die KI hat die Software einer Sandbox als Profil vorgeschlagen. Gebaut und für "
+          + "den Client erlaubt wird es erst mit „Annehmen“.")),
+      h("div", { class: "table-wrap" }, h("table", { class: "data" }, head, h("tbody", null, rows))));
+  }
+
   function viewProfiles(root, _params, ctx) {
     const createBtn = h("button", { type: "button", class: "btn primary" }, "Profil anlegen");
     createBtn.addEventListener("click", () => openCreateProfile());
@@ -2771,7 +2956,9 @@
       const data = await api("profiles");
       storeProfiles(data);
       if (!ctx.alive()) return;
-      body.replaceChildren(profilesTable(state.profiles, refresh),
+      const proposals = state.profiles.filter((p) => p.proposal);
+      body.replaceChildren(...(proposals.length ? [proposalsSection(proposals, refresh)] : []),
+        profilesTable(state.profiles.filter((p) => !p.proposal), refresh),
         h("p", { class: "metric-note mt-12" },
           "Basis aller Profile: ", h("span", { class: "mono" }, data.baseImage || "–"),
           ". Wird das Sandbox-Image bei einem Update neu gebaut, baut install.sh die Profile automatisch nach; "
@@ -2800,7 +2987,8 @@
       return h("tr", null,
         h("td", null,
           h("a", { href: "#/profiles/" + enc(p.id), class: "cell-main" }, p.name),
-          p.description ? h("div", { class: "cell-sub" }, p.description) : null),
+          p.description ? h("div", { class: "cell-sub" }, p.description) : null,
+          p.origin ? h("div", { class: "cell-sub faint" }, "aus Sandbox " + p.origin.sandbox) : null),
         h("td", null, softwareCell(p)),
         h("td", null, profileStatusBadge(p)),
         h("td", null, imageCell(p)),
@@ -2869,16 +3057,24 @@
       }));
       const cloneBtn = h("button", { type: "button", class: "btn" }, "Klonen");
       cloneBtn.addEventListener("click", () => cloneProfile(profile));
+      let actions = [buildBtn, cloneBtn, deleteBtn];
+      if (profile.proposal) {
+        const acceptBtn = h("button", { type: "button", class: "btn primary" }, "Annehmen und bauen");
+        acceptBtn.addEventListener("click", () => acceptProposal(profile, { after: () => refresh({ silent: true }) }));
+        deleteBtn.textContent = "Verwerfen";
+        actions = [acceptBtn, cloneBtn, deleteBtn];
+      }
       setTitle(profile.name);
       head.replaceChildren(h("div", { class: "page-head" },
         h("div", null,
-          h("h1", null, profile.name),
+          h("h1", null, profile.name,
+            profile.proposal ? h("span", { class: "badge warn title-badge" }, "Vorschlag der KI") : null),
           h("div", { class: "meta-line" },
             h("span", null, "ID ", h("span", { class: "mono" }, String(profile.id))),
             profile.description ? h("span", null, profile.description) : null,
             h("span", null, "angelegt ", timeEl(profile.createdAt)),
             profile.updatedAt ? h("span", null, "geändert ", timeEl(profile.updatedAt)) : null)),
-        h("div", { class: "actions" }, buildBtn, cloneBtn, deleteBtn)));
+        h("div", { class: "actions" }, actions)));
     }
 
     /** Copy with the same settings (not built, assigned to no client), opened for editing. */
@@ -2889,7 +3085,7 @@
         title: "Profil klonen",
         submitLabel: "Kopie anlegen",
         body: [
-          h("p", null, "Übernommen werden Beschreibung, Pakete und Setup-Befehle von ", h("strong", null, p.name),
+          h("p", null, "Übernommen werden Beschreibung, Pakete und Befehle von ", h("strong", null, p.name),
             ". Die Kopie ist noch nicht gebaut und keinem Client zugeordnet."),
           field("Name der Kopie", name),
         ],
@@ -2918,9 +3114,15 @@
             h("dt", null, "Letzter Bau"), h("dd", null, lastBuild),
             h("dt", null, "Basis"), h("dd", { class: "mono small" }, state.baseImage || "albert-ai-sandbox:latest"),
             h("dt", null, "Erlaubt für"), h("dd", null, clientLinks(profile.clients)),
-            h("dt", null, "Sandboxen"), h("dd", null, fmtNum(profile.sandboxes || 0, 0))))),
+            h("dt", null, "Sandboxen"), h("dd", null, fmtNum(profile.sandboxes || 0, 0)),
+            profile.origin ? [h("dt", null, "Herkunft"), h("dd", null, originText(profile.origin))] : null))),
       ];
-      if (profile.status === "new") {
+      if (profile.proposal) {
+        out.unshift(notice("warn", "Vorschlag von ALBERT | AI – wartet auf Prüfung.",
+          "Die KI hat diese Software in einer Sandbox installiert und als Profil vorgeschlagen. Prüfe Pakete, "
+          + "Paketquellen und Befehle; „Annehmen und bauen“ baut das Profil und erlaubt es für den Client, "
+          + "„Verwerfen“ löscht den Vorschlag. Bis dahin bietet die KI es nicht an."));
+      } else if (profile.status === "new") {
         out.push(notice("warn", "Das Profil wurde noch nicht gebaut.",
           "Clients mit diesem Profil können erst Sandboxen erstellen, wenn der Bau erfolgreich war (sonst lehnt die API mit "
           + "profile_not_ready ab)."));
@@ -2934,7 +3136,18 @@
             : "Der Bau ist fehlgeschlagen."),
           h("pre", { class: "build-log compact" }, b.error)));
       }
+      if (profile.capture) out.push(h("div", { class: "mt-12" }, captureDetails(profile.capture)));
       statusBox.replaceChildren(...out);
+    }
+
+    function originText(o) {
+      const client = o.clientId && !o.clientDeleted
+        ? h("a", { href: "#/clients/" + enc(o.clientId) }, o.clientLabel || `Client ${o.clientId}`)
+        : h("span", { class: "faint" }, o.clientDeleted ? "Client gelöscht" : "–");
+      return h("span", null, "Sandbox ", h("span", { class: "mono" }, o.sandbox), " von ", client,
+        o.basedOn && o.basedOn !== "standard" ? [", basiert auf ", h("strong", null, o.basedOn)] : null,
+        ", erfasst ", timeEl(o.capturedAt),
+        o.user ? h("span", { class: "faint" }, " · Benutzer " + o.user) : null);
     }
 
     function renderForm() {
@@ -2951,13 +3164,23 @@
         areas[k.key] = ta;
         return field(k.label, ta, k.hint);
       });
-      const setup = h("textarea", { name: "setupScript", rows: "8", spellcheck: "false", autocomplete: "off",
+      const prepare = h("textarea", { name: "prepareScript", rows: "6", spellcheck: "false", autocomplete: "off",
         class: "mono", placeholder: "# Beispiel: Paketquelle eines Herstellers einbinden\n"
-          + "curl -fsSL https://example.com/key.gpg | gpg --dearmor -o /usr/share/keyrings/example.gpg" });
+          + "install -d -m 0755 /etc/apt/keyrings\n"
+          + "curl -fsSL https://example.com/key.gpg | gpg --dearmor -o /etc/apt/keyrings/example.gpg\n"
+          + "echo 'deb [signed-by=/etc/apt/keyrings/example.gpg] https://example.com/apt stable main' "
+          + "> /etc/apt/sources.list.d/example.list" });
+      prepare.value = profile.prepareScript || "";
+      const setup = h("textarea", { name: "setupScript", rows: "8", spellcheck: "false", autocomplete: "off",
+        class: "mono", placeholder: "# Beispiel: Programm ohne Paket einrichten\n"
+          + "curl -fsSL https://example.com/tool.tar.gz | tar -xz -C /opt" });
       setup.value = profile.setupScript || "";
-      const advanced = h("details", { class: "advanced", open: !!profile.setupScript },
+      const advanced = h("details", { class: "advanced", open: !!(profile.setupScript || profile.prepareScript) },
         h("summary", null, "Zusätzliche Befehle (für Fortgeschrittene)"),
-        field("Shell-Befehle", setup,
+        field("Vorbereitung (vor den Paketen)", prepare,
+          "Läuft vor der Installation der Pakete als root im Build-Container, z. B. um Paketquellen und Schlüssel "
+          + "eines Herstellers einzutragen. Aus einer Sandbox übernommene Paketquellen stehen hier."),
+        field("Befehle am Ende", setup,
           "Laufen am Ende des Baus als root im Build-Container (bash, Abbruch beim ersten Fehler), nicht auf dem Host. "
           + "Für alles, was sich nicht als Paket angeben lässt."));
       const dockerfile = h("details", { class: "advanced" },
@@ -2984,6 +3207,7 @@
           description: description.value.trim(),
           packages: Object.fromEntries(PACKAGE_KINDS.map((k) => [k.key, areas[k.key].value])),
           setupScript: setup.value,
+          prepareScript: prepare.value,
         };
         const btn = andBuild ? saveBuildBtn : saveBtn;
         [saveBtn, saveBuildBtn].forEach((b) => { b.disabled = true; });

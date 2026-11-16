@@ -23,6 +23,12 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`. The extra 
 | 503 | `profile_not_ready` | the chosen (or default) software profile has not been built yet (an admin has to build it) |
 | 403 | `profile_not_allowed` | the profile given in `POST /containers` is not allowed for the client; details: `allowed` (names of the allowed profiles) |
 | 404 | `profile_not_found` | no profile with this name |
+| 409 | `sandbox_not_running` | `POST /containers/{name}/profile` on a stopped sandbox – start it first |
+| 409 | `profile_name_taken` | a profile with this name already exists – choose another name |
+| 409 | `proposal_limit` | 5 proposals of the client already wait for an administrator; details: `limit`, `open` (names) |
+| 400 | `no_changes` | nothing to save: no packages or APT sources were added; details: `hints` (files changed outside the package management), `removedPackages` |
+| 502 | `capture_failed` | the sandbox could not be inspected |
+| 409 | `capture_busy` | another sandbox is being captured at the moment – try again in a minute |
 | 409 | `running_limit_exceeded` | the client already runs as many sandboxes as allowed (create or start); details: `limit`, `used`, `runningSandboxes` (only the asking user's own) – stop one of them first |
 | 409 | `quota_exceeded` | client quota (CPU/RAM of running sandboxes, disk, count) would be exceeded; details: `resource`, `limit`, `used`, `requested` |
 | 503 | `host_full` | the host cannot hold another running sandbox (memory guard: RAM limits of all running sandboxes, or free memory below the reserve); create, start or more RAM; details: `limit`, `used`, `requested`, `availableMb`, `runningSandboxes` (only the asking user's own) – stop one of them or retry later |
@@ -69,7 +75,7 @@ Errors use the shape `{"error": "<code>", "message": "<text>", ...}`. The extra 
 `status` is `running`, `stopped`, `creating`, `removing`, `rebuilding` or `error` (a rebuild failed; the sandbox and its data are kept until an admin acts). `outdated` lists why the container should be rebuilt (`image`, `hardening`, `network`, `auth` = container from before the internal tokens of MCP Hub and file service); empty when up to date. `user` is the ALBERT user the sandbox is bound to (`null` = no binding). `urls.desktop` without a one-time link only works for legacy clients; use `POST /containers/{name}/desktop`. `persistentAllowed` tells whether the owning client may switch the sandbox to persistent. `internet` is false for clients without internet access (no outgoing connections, no name resolution). `profile` is the client's software profile (`null` = standard image); `outdated` contains `image` while the sandbox still runs an older image than the client's current one and `network` while its network does not match the internet setting. `resources.storage` is `image` (hard disk limit) or `volume` (sandbox migrated from the former version, no disk limit, `diskGb` = null). The VNC port is no longer published (`"vnc": ""`), except for migrated sandboxes.
 
 ### `GET /health`
-`{"status": "ok", "docker": "up", "api": 3, "features": ["quota", "profiles", "profile-choice", "user-binding", "service-auth", "desktop-link", "no-secrets"], "legacyAccess": false, "https": true}` (API key needed, `X-Albert-User` not). `api`/`features` tell this server from older ones (no `api` field: former interface, MCP with the fixed key, no user binding). Every client API response also carries the header `X-Albert-Sandbox-Api: 3`. `legacyAccess`: the client still has the former access; `https`: HTTPS is active (API only over HTTPS).
+`{"status": "ok", "docker": "up", "api": 3, "features": ["quota", "profiles", "profile-choice", "profile-proposals", "user-binding", "service-auth", "desktop-link", "no-secrets"], "legacyAccess": false, "https": true}` (API key needed, `X-Albert-User` not). `api`/`features` tell this server from older ones (no `api` field: former interface, MCP with the fixed key, no user binding). Every client API response also carries the header `X-Albert-Sandbox-Api: 3`. `legacyAccess`: the client still has the former access; `https`: HTTPS is active (API only over HTTPS).
 
 ### `GET /quota` (new)
 ```json
@@ -97,6 +103,22 @@ Every sandbox object carries `lifecycle` (`stopAfterIdleSeconds`, `deleteWhenUnu
 ]}
 ```
 Profiles the client may choose from when it creates a sandbox (`state`: `ready`, or `building` while the first build runs). `default` marks the one used without a choice. Never built profiles are not listed; setup commands are never shown.
+
+With feature `profile-proposals` the answer also has `"proposals"`: the client's proposals that wait for an administrator (`{"name", "description", "packages", "sandbox", "createdAt", "state": "proposed"}`). Once accepted, a proposal is built and appears in `profiles`; if it is rejected it disappears.
+
+### `POST /containers/{name}/profile` (new, feature `profile-proposals`)
+Body `{"name": "Werkzeuge", "description": "jq, gh und TypeScript für Datenaufbereitung"}` – saves the software installed in the (running) sandbox as a profile **proposal**: packages added compared to the sandbox's image (apt without versions, pip incl. `--user` installs and npm with versions) and added APT sources and keys; no files, no home directory. If the sandbox was created from a profile, its packages are kept. An administrator checks the proposal, builds it and allows it for the client; until then it is not offered (`GET /profiles` lists it under `proposals`). `"preview": true` only shows what would be saved (`name` optional), nothing is stored.
+
+`201 {"proposal": {...}}` (preview: `200 {"preview": {...}}`):
+```json
+{"name": "Werkzeuge", "description": "…", "state": "proposed", "basedOn": "standard",
+ "packages": {"apt": ["gh", "jq"], "pip": ["humanize==4.11.0"], "npm": ["typescript@5.6.3"]},
+ "captured": {"apt": ["gh", "jq"], "pip": ["humanize==4.11.0"], "npm": ["typescript@5.6.3"]},
+ "aptSources": ["/etc/apt/keyrings/githubcli-archive-keyring.gpg", "/etc/apt/sources.list.d/github-cli.list"],
+ "removedPackages": [], "hints": [{"path": "/opt/myapp", "change": "added", "kind": "dir", "files": 3}],
+ "hintsMore": 0, "skipped": []}
+```
+`packages` is the full list of the new profile, `captured` what came from the sandbox; `hints` are files changed outside the package management (not taken over), `skipped` invalid package names or source files. Errors: `409 sandbox_not_running`, `409 profile_name_taken`, `409 proposal_limit`, `400 no_changes`, `502 capture_failed`. Takes a few seconds.
 
 ### `POST /containers`
 Body (all optional):
@@ -134,9 +156,11 @@ Used by the web UI under `/manager/admin/` on its **own port** (`ALBERT_ADMIN_PO
 | GET/POST | `api/clients` | list (with usage) / create (returns `apiKey` once) |
 | GET/PATCH/DELETE | `api/clients/{id}` | detail incl. sandboxes / change label, `defaultCpus`, `defaultMemoryMb`, `defaultDiskGb`, `quotaCpus`, `quotaMemoryMb`, `quotaDiskGb`, `quotaSandboxes`, `quotaRunning` (null = unset), `allowPersistent` (bool), `allowInternet` (bool; a change moves and rebuilds the client's sandboxes in the background, response field `networkPolicy: "applying"`), `profileId` (default profile, null = shipped image; allowed automatically), `allowStandardImage` (bool) and `allowedProfileIds` (list) – the profiles the client may choose from (the default must stay among them: `400 profile_default_not_allowed`; at least one: `400 no_profile_allowed`), `legacyAccess` (bool, former access without API key / user binding), `inactivitySeconds`, `maxAgeSeconds`, `maxLifetimeSeconds` (own lifetime of the client's sandboxes, null = global value, 0 = off), `allowNets` (list of IPv4 addresses/networks the client's sandboxes may reach in addition to the global ones, `[]` = none, `400 invalid_net`; the first own target gives the client an own network: `netSubnet`, `network`, existing sandboxes are moved without rebuild, `networkPolicy: "applying"`) / delete with all sandboxes |
 | POST | `api/clients/{id}/rotate-key` | new API key, sandboxes stay |
-| GET/POST | `api/profiles` | list (status, image, clients) / create `{name, description, packages: {apt, pip, npm}, setupScript}` |
+| GET/POST | `api/profiles` | list (status, image, clients, `proposal`, `origin`, `capture`) / create `{name, description, packages: {apt, pip, npm}, prepareScript, setupScript}` |
 | GET/PATCH/DELETE | `api/profiles/{id}` | detail incl. generated `dockerfile` / change (same fields) / delete (400 `profile_in_use` while assigned) |
 | POST | `api/profiles/{id}/build` | start a build (202; 409 while one runs) |
+| POST | `api/profiles/{id}/accept` | accept a proposal of ALBERT | AI: allowed for its client, build started (202; 400 `not_a_proposal`) |
+| POST | `api/sandboxes/{name}/capture` | `{name, description}` – new profile from the software of a running sandbox (201, not built, no client); `{"preview": true}` only shows the capture |
 | GET | `api/profiles/{id}/log?seq=&offset=` | build output from `offset` (`text`, next `offset`, `running`) |
 | GET | `api/sandboxes[?client=id]` | all sandboxes |
 | PATCH/DELETE | `api/sandboxes/{name}` | `persistent`, `cpus`, `memoryMb`, `diskGb` (disk can only grow) / delete |

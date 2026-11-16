@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from .config import settings
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -215,6 +215,20 @@ CREATE INDEX IF NOT EXISTS idx_client_profiles_profile ON client_profiles(profil
 API_KEY_V9_COLUMN = ("allow_standard_image", "INTEGER NOT NULL DEFAULT 1")
 SANDBOX_V9_COLUMN = ("profile_id", "INTEGER")  # NULL = shipped image
 
+# v10: profiles captured from a sandbox. A preparation script runs before the
+# packages are installed (APT sources and keys); proposals of ALBERT | AI wait
+# for an administrator (proposal=1) and remember where they came from.
+PROFILE_V10_COLUMNS = {
+    "prepare_script": "TEXT NOT NULL DEFAULT ''",
+    "proposal": "INTEGER NOT NULL DEFAULT 0",
+    "origin_client_id": "INTEGER",   # client whose sandbox was captured (no FK: kept when the client goes)
+    "origin_sandbox": "TEXT",
+    "origin_owner": "TEXT",          # pseudonymous ALBERT user that proposed it
+    "origin_profile": "TEXT",        # profile the sandbox was created with (name at capture time)
+    "captured_at": "INTEGER",
+    "capture_info": "TEXT",          # JSON: captured packages, sources, hints for the administrator
+}
+
 
 def connect() -> sqlite3.Connection:
     path = settings().db_path
@@ -299,6 +313,10 @@ def init_db() -> None:
                 conn.execute("UPDATE api_keys SET allow_standard_image = CASE WHEN profile_id IS NULL THEN 1 ELSE 0 END")
                 conn.execute("INSERT OR IGNORE INTO client_profiles(client_id, profile_id) "
                              "SELECT id, profile_id FROM api_keys WHERE profile_id IS NOT NULL")
+        existing = _columns(conn, "profiles")
+        for column, ctype in PROFILE_V10_COLUMNS.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE profiles ADD COLUMN {column} {ctype}")
         existing = _columns(conn, "sandboxes")
         for column, ctype in SANDBOX_V6_COLUMNS.items():
             if column not in existing:

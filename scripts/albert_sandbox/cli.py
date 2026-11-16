@@ -15,8 +15,8 @@ import secrets
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import access, admins, clients, db, dockerctl, lifecycle, netctl, nginxctl, profiles, reconcile, sandboxes, \
-    tlsctl, watcher
+from . import access, admins, capture, clients, db, dockerctl, lifecycle, netctl, nginxctl, profiles, reconcile, \
+    sandboxes, tlsctl, watcher
 from .config import settings
 from .errors import NotFound, SandboxError
 
@@ -170,7 +170,18 @@ def build_parser() -> argparse.ArgumentParser:
                                                          "(not built, assigned to no client)")
     pp.add_argument("profile", help="id or name")
     pp.add_argument("--name", help="name of the copy (default: '<name> (Kopie)')")
-    pp = psub.add_parser("delete", parents=[common], help="delete a profile no client uses")
+    pp = psub.add_parser("capture", parents=[common],
+                         help="new profile with the software of a running sandbox (packages, APT sources; "
+                              "not built)")
+    pp.add_argument("sandbox", help="sandbox name")
+    pp.add_argument("--name", help="name of the new profile (required unless --preview)")
+    pp.add_argument("--description")
+    pp.add_argument("--preview", action="store_true", help="only show what would be captured")
+    pp = psub.add_parser("accept", parents=[common],
+                         help="accept a proposal of ALBERT | AI: allow it for its client and build it")
+    pp.add_argument("profile", help="id or name")
+    pp.add_argument("--background", action="store_true", help="start the build job and return at once")
+    pp = psub.add_parser("delete", parents=[common], help="delete a profile no client uses (or reject a proposal)")
     pp.add_argument("profile", help="id or name")
     pp = psub.add_parser("build", parents=[common], help="build the profile image (shows the build output)")
     pp.add_argument("profile", help="id or name")
@@ -256,6 +267,8 @@ def _profile_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--pip", help="Python packages, space separated (replaces the list)")
     p.add_argument("--npm", help="global Node packages, space separated (replaces the list)")
     p.add_argument("--setup-file", help="shell script run as root at the end of the build ('-' = none)")
+    p.add_argument("--prepare-file", help="shell script run as root before the packages are installed, "
+                                          "e.g. APT sources ('-' = none)")
 
 
 # --------------------------------------------------------------------------
@@ -538,16 +551,18 @@ def _profile_fields_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         value = getattr(args, attr, None)
         if value is not None:
             fields[column] = value
-    setup = getattr(args, "setup_file", None)
-    if setup is not None:
-        if setup == "-":
-            fields["setup_script"] = ""
-        else:
-            try:
-                with open(setup, encoding="utf-8") as fh:
-                    fields["setup_script"] = fh.read()
-            except OSError as exc:
-                raise CliError(f"cannot read {setup}: {exc}", "usage", 2)
+    for attr, column in (("setup_file", "setup_script"), ("prepare_file", "prepare_script")):
+        path = getattr(args, attr, None)
+        if path is None:
+            continue
+        if path == "-":
+            fields[column] = ""
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                fields[column] = fh.read()
+        except OSError as exc:
+            raise CliError(f"cannot read {path}: {exc}", "usage", 2)
     return fields
 
 
@@ -563,8 +578,38 @@ def _profile_text(item: Dict[str, Any]) -> str:
         f"{BLUE}npm:{NC} {' '.join(pk['npm']) or '-'}",
         f"{BLUE}Clients:{NC} {', '.join(c['label'] or str(c['id']) for c in item.get('clients', [])) or '-'}",
     ]
+    origin = item.get("origin")
+    if origin:
+        who = origin["clientLabel"] or (f"client {origin['clientId']}" if origin["clientId"] else "-")
+        lines.append(f"{BLUE}Captured:{NC} from sandbox {origin['sandbox']} ({who}), based on "
+                     f"{origin['basedOn']}, {origin['capturedAt']}")
+    if item.get("proposal"):
+        lines.append(f"{YELLOW}Proposal of ALBERT | AI:{NC} accept it with 'profile accept {item['id']}' "
+                     f"or reject it with 'profile delete {item['id']}'")
+    if item.get("prepareScript"):
+        lines.append(f"{BLUE}Preparation:{NC} {len(item['prepareScript'].splitlines())} lines")
     if item["build"]["state"] == "failed" and item["build"]["error"]:
         lines.append(f"{RED}Last build failed:{NC} {item['build']['error'].splitlines()[0]}")
+    return "\n".join(lines)
+
+
+def _capture_text(result: Dict[str, Any]) -> str:
+    cap = result["captured"]
+    lines = [f"{BLUE}Captured from the sandbox{NC} (based on {result['basedOn']}):",
+             f"  apt: {' '.join(cap['apt']) or '-'}", f"  pip: {' '.join(cap['pip']) or '-'}",
+             f"  npm: {' '.join(cap['npm']) or '-'}",
+             f"  APT sources: {' '.join(result['aptSources']) or '-'}"]
+    if result["removedPackages"]:
+        lines.append(f"{YELLOW}Removed in the sandbox (not captured):{NC} {' '.join(result['removedPackages'])}")
+    if result["hints"]:
+        lines.append(f"{YELLOW}Changed outside the package management (not captured):{NC}")
+        for h in result["hints"]:
+            extra = f" (+{h['files']} files)" if h["files"] else ""
+            lines.append(f"  {h['change']:7} {h['path']}{'/' if h['kind'] == 'dir' else ''}{extra}")
+        if result["hintsMore"]:
+            lines.append(f"  … and {result['hintsMore']} more")
+    if result["skipped"]:
+        lines.append(f"{YELLOW}Skipped:{NC} " + "; ".join(result["skipped"]))
     return "\n".join(lines)
 
 
@@ -597,6 +642,17 @@ def cmd_profile(args: argparse.Namespace, out: Out) -> None:
                   f"apt={len(pk['apt'])} pip={len(pk['pip'])} npm={len(pk['npm'])} "
                   f"clients={len(it.get('clients', []))}")
         return
+    if sub == "capture":
+        result, row = capture.from_sandbox(args.sandbox, profile_name=args.name, description=args.description,
+                                           preview=args.preview, proposal=False, actor="cli")
+        if row is None:
+            out.emit(result, _capture_text(result))
+            return
+        with db.session() as conn:
+            item = profiles.serialize(conn, row, base_id)
+        out.emit(item, _capture_text(result) + "\n" + _profile_text(item)
+                 + f"\nCheck it, then build it with: albert-ai-sandbox-manager profile build {row['id']}")
+        return
     if sub == "create":
         fields = _profile_fields_from_args(args)
         name = fields.pop("name")
@@ -626,10 +682,20 @@ def cmd_profile(args: argparse.Namespace, out: Out) -> None:
             db.audit(conn, "cli", "profile.clone", copy["name"], {"profileId": copy["id"], "from": row["name"]})
             item = profiles.serialize(conn, copy, base_id)
         out.emit(item, _profile_text(item) + f"\nBuild it with: albert-ai-sandbox-manager profile build {copy['id']}")
+    elif sub == "accept":
+        with db.session() as conn:
+            accepted = profiles.accept(conn, row["id"])
+            db.audit(conn, "cli", "profile.accept", row["name"],
+                     {"profileId": row["id"], "clientId": accepted["origin_client_id"]})
+        queued = profiles.request_build(row["id"], "cli", spawn=True)
+        out.emit({"profile": row["id"], "seq": queued["build_seq"], "state": "queued"},
+                 f"Proposal '{row['name']}' accepted and allowed for its client; build {queued['build_seq']} "
+                 f"started (follow it with: albert-ai-sandbox-manager profile log {row['id']})")
     elif sub == "delete":
         with db.session() as conn:
             profiles.delete(conn, row["id"])
-            db.audit(conn, "cli", "profile.delete", row["name"], {"profileId": row["id"]})
+            db.audit(conn, "cli", "profile.reject" if row["proposal"] else "profile.delete", row["name"],
+                     {"profileId": row["id"]})
         out.emit({"deleted": row["id"]}, f"Profile '{row['name']}' deleted (its images are removed by reconcile).")
     elif sub == "build":
         queued = profiles.request_build(row["id"], "cli", spawn=args.background)
@@ -649,7 +715,8 @@ def cmd_profile(args: argparse.Namespace, out: Out) -> None:
         data = profiles.read_log(row["id"], seq=args.seq)
         out.emit(data, data["text"] or "(no build output)")
     else:
-        raise CliError("usage: profile {list,show,create,set,delete,build,rebuild-outdated,log}", "usage", 2)
+        raise CliError("usage: profile {list,show,create,set,clone,capture,accept,delete,build,rebuild-outdated,log}",
+                       "usage", 2)
 
 
 def _read_password(args: argparse.Namespace, out: Out) -> str:

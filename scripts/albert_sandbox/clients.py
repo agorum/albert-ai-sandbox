@@ -138,8 +138,13 @@ def _clean_profile_id(value: Any) -> Optional[int]:
 
 def _check_profile(conn: sqlite3.Connection, clean: Dict[str, Any]) -> None:
     profile_id = clean.get("profile_id")
-    if profile_id and not conn.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
-        raise BadRequest(f"profile {profile_id} does not exist")
+    if profile_id:
+        found = conn.execute("SELECT name, proposal FROM profiles WHERE id=?", (profile_id,)).fetchone()
+        if not found:
+            raise BadRequest(f"profile {profile_id} does not exist")
+        if found["proposal"]:
+            raise BadRequest(f"profile '{found['name']}' is a proposal of ALBERT | AI; accept it first",
+                             code="profile_is_proposal")
 
 
 def _clean_profile_ids(conn: sqlite3.Connection, value: Any) -> List[int]:
@@ -156,8 +161,12 @@ def _clean_profile_ids(conn: sqlite3.Connection, value: Any) -> List[int]:
             number = int(item)
         except (TypeError, ValueError):
             raise BadRequest("allowedProfileIds must be a list of profile ids")
-        if not conn.execute("SELECT 1 FROM profiles WHERE id=?", (number,)).fetchone():
+        found = conn.execute("SELECT name, proposal FROM profiles WHERE id=?", (number,)).fetchone()
+        if not found:
             raise BadRequest(f"profile {number} does not exist")
+        if found["proposal"]:
+            raise BadRequest(f"profile '{found['name']}' is a proposal of ALBERT | AI; accept it first",
+                             code="profile_is_proposal")
         if number not in ids:
             ids.append(number)
     return ids

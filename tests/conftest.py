@@ -78,8 +78,10 @@ class FakeDocker:
     def build_streaming(self, tag, context_dir, labels, on_line, timeout):
         dockerfile = (Path(context_dir) / "Dockerfile").read_text()
         setup = Path(context_dir) / "setup.sh"
+        prepare = Path(context_dir) / "prepare.sh"
         self.builds.append({"tag": tag, "dockerfile": dockerfile, "labels": dict(labels),
-                            "setup": setup.read_text() if setup.exists() else None})
+                            "setup": setup.read_text() if setup.exists() else None,
+                            "prepare": prepare.read_text() if prepare.exists() else None})
         on_line("#1 [internal] load build definition from Dockerfile")
         if self.fail_build:
             on_line(f"ERROR: {self.fail_build}")

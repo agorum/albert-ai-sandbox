@@ -48,6 +48,95 @@ def _text(proc: subprocess.CompletedProcess) -> str:
     return proc.stdout.decode("utf-8", "replace")
 
 
+def _run_bounded(args: Sequence[str], timeout: float, max_bytes: int, input_bytes: Optional[bytes] = None,
+                 truncate: bool = False) -> bytes:
+    """docker command whose output comes from an untrusted source (a sandbox):
+    at most ``max_bytes`` are read; more is an error (or cut off with ``truncate``)."""
+    try:
+        proc = subprocess.Popen(["docker", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL)
+    except FileNotFoundError as exc:
+        raise DockerError("docker binary not found", 127) from exc
+    killed = threading.Event()
+
+    def kill() -> None:
+        killed.set()
+        proc.kill()
+
+    stderr: List[bytes] = []
+
+    def drain_stderr() -> None:
+        assert proc.stderr is not None
+        stderr.append(proc.stderr.read(64 * 1024))
+        proc.stderr.read()  # discard the rest so the process never blocks
+
+    def feed() -> None:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(input_bytes or b"")
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    timer = threading.Timer(timeout, kill)
+    timer.start()
+    helpers = [threading.Thread(target=drain_stderr, daemon=True)]
+    if input_bytes is not None:
+        helpers.append(threading.Thread(target=feed, daemon=True))
+    for t in helpers:
+        t.start()
+    try:
+        assert proc.stdout is not None
+        data = proc.stdout.read(max_bytes + 1)
+        too_big = len(data) > max_bytes
+        if too_big:
+            proc.kill()
+        proc.wait()
+    finally:
+        timer.cancel()
+    for t in helpers:
+        t.join(timeout=5)
+    if killed.is_set():
+        raise DockerError(f"docker {' '.join(args[:1])} timed out after {timeout}s", 124)
+    if too_big:
+        if not truncate:
+            raise DockerError(f"docker {args[0]}: output larger than {max_bytes} bytes", 1)
+        return data[:max_bytes]
+    if proc.returncode != 0:
+        text = b"".join(stderr).decode("utf-8", "replace").strip()
+        raise DockerError(f"docker {args[0]} failed: {text or 'exit ' + str(proc.returncode)}", proc.returncode, text)
+    return data
+
+
+def exec_capture(container: str, command: Sequence[str], user: str = "ubuntu", input_bytes: Optional[bytes] = None,
+                 timeout: float = 120, max_bytes: int = 8 * 1024 * 1024) -> bytes:
+    """Run a read-only inspection command inside a running sandbox (untrusted output, bounded)."""
+    args = ["exec"] + (["-i"] if input_bytes is not None else []) + ["-u", user, container, *command]
+    return _run_bounded(args, timeout, max_bytes, input_bytes)
+
+
+def run_capture(image: str, command: Sequence[str], user: str = "ubuntu", timeout: float = 180,
+                max_bytes: int = 8 * 1024 * 1024) -> bytes:
+    """Run the same inspection in a throwaway container of an image (no network, small limits)."""
+    args = ["run", "--rm", "--network", "none", "-u", user, "--memory", "1g", "--pids-limit", "256",
+            "--entrypoint", command[0], image, *command[1:]]
+    return _run_bounded(args, timeout, max_bytes)
+
+
+def diff(container: str, max_bytes: int = 32 * 1024 * 1024) -> List[tuple]:
+    """Files added (A), changed (C) or deleted (D) in a container compared to its image."""
+    out = _run_bounded(["diff", container], 300, max_bytes, truncate=True).decode("utf-8", "replace")
+    lines = out.splitlines()
+    if len(out.encode("utf-8")) >= max_bytes and lines:
+        lines = lines[:-1]  # cut off in the middle
+    result = []
+    for line in lines:
+        kind, _, path = line.partition(" ")
+        if kind in ("A", "C", "D") and path.startswith("/"):
+            result.append((kind, path))
+    return result
+
+
 def available() -> bool:
     try:
         _run(["info", "--format", "{{.ServerVersion}}"], timeout=10)

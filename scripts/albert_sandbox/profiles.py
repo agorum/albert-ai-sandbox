@@ -19,6 +19,12 @@ output to ``<data>/profiles/<id>/build-<seq>.log`` and keeps a heartbeat in
 the database; a build whose heartbeat stops is marked failed. The previous
 image stays in use until a build succeeds.
 
+An optional preparation script runs before the packages are installed (e.g.
+APT sources and keys of a vendor). Profiles can also be captured from a
+running sandbox (``capture.py``); captures of ALBERT | AI are proposals that
+an administrator accepts (``accept``: allowed for the client and built) or
+deletes.
+
 A profile image is outdated when its configuration changed after the build or
 when the shipped base image was rebuilt (``install.sh`` rebuilds such profiles
 automatically). Sandboxes then show the reason ``image`` and are updated with
@@ -54,6 +60,8 @@ HEARTBEAT_SECONDS = 10
 KEEP_LOGS = 5
 MAX_PACKAGES = 300
 MAX_SETUP_CHARS = 20000
+MAX_PREPARE_CHARS = 200000  # base64 keys of captured APT sources
+MAX_OPEN_PROPOSALS = 5      # per client
 
 BUILD_ACTIVE = ("queued", "building")
 
@@ -70,7 +78,7 @@ PACKAGE_RULES = {
             "e.g. typescript or @mermaid-js/mermaid-cli@11.4.2"),
 }
 PACKAGE_COLUMNS = {"apt": "apt_packages", "pip": "pip_packages", "npm": "npm_packages"}
-TEXT_FIELDS = ("name", "description", "setup_script")
+TEXT_FIELDS = ("name", "description", "setup_script", "prepare_script")
 EDITABLE_FIELDS = TEXT_FIELDS + tuple(PACKAGE_COLUMNS.values())
 
 
@@ -128,12 +136,14 @@ def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
             if len(text) > 1000:
                 raise BadRequest("description too long (max 1000 characters)")
             clean[key] = text
-        elif key == "setup_script":
+        elif key in ("setup_script", "prepare_script"):
+            label = "setup script" if key == "setup_script" else "preparation script"
+            limit = MAX_SETUP_CHARS if key == "setup_script" else MAX_PREPARE_CHARS
             if value is not None and not isinstance(value, str):
-                raise BadRequest("setup script must be text")
+                raise BadRequest(f"{label} must be text")
             text = (value or "").replace("\r\n", "\n").strip("\n")
-            if len(text) > MAX_SETUP_CHARS:
-                raise BadRequest(f"setup script too long (max {MAX_SETUP_CHARS} characters)")
+            if len(text) > limit:
+                raise BadRequest(f"{label} too long (max {limit} characters)")
             clean[key] = text
         else:
             for kind, column in PACKAGE_COLUMNS.items():
@@ -194,6 +204,7 @@ def clone(conn: sqlite3.Connection, profile_id: int, name: Optional[str] = None)
     script). Not built, assigned to no client: a variant is edited and built anew."""
     source = get(conn, profile_id)
     fields = {"description": source["description"], "setup_script": source["setup_script"],
+              "prepare_script": source["prepare_script"],
               **{column: source[column] for column in PACKAGE_COLUMNS.values()}}
     wanted = name.strip() if isinstance(name, str) and name.strip() else _free_clone_name(conn, source["name"])
     return create(conn, wanted, **fields)
@@ -243,12 +254,74 @@ def delete(conn: sqlite3.Connection, profile_id: int) -> sqlite3.Row:
     return row
 
 
+def open_proposals(conn: sqlite3.Connection, client_id: int) -> List[sqlite3.Row]:
+    return conn.execute("SELECT * FROM profiles WHERE proposal=1 AND origin_client_id=? "
+                        "ORDER BY created_at", (client_id,)).fetchall()
+
+
+def proposal_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM profiles WHERE proposal=1").fetchone()[0]
+
+
+def create_captured(conn: sqlite3.Connection, name: str, fields: Dict[str, Any], *, proposal: bool,
+                    client_id: Optional[int], sandbox: str, owner: Optional[str], based_on: Optional[str],
+                    info: str) -> sqlite3.Row:
+    """Profile from a sandbox capture (not built). ``proposal``: made by ALBERT | AI,
+    waits for an administrator and is offered to nobody until accepted."""
+    row = create(conn, name, **fields)
+    conn.execute("UPDATE profiles SET proposal=?, origin_client_id=?, origin_sandbox=?, origin_owner=?, "
+                 "origin_profile=?, captured_at=?, capture_info=? WHERE id=?",
+                 (1 if proposal else 0, client_id, sandbox, owner, based_on, int(time.time()), info, row["id"]))
+    return get(conn, row["id"])
+
+
+def accept(conn: sqlite3.Connection, profile_id: int) -> sqlite3.Row:
+    """Accept a proposal: it becomes a normal profile, allowed for the client that
+    proposed it (if the client still exists). The caller starts the build."""
+    row = get(conn, profile_id)
+    if not row["proposal"]:
+        raise BadRequest(f"profile '{row['name']}' is not a proposal", code="not_a_proposal")
+    conn.execute("UPDATE profiles SET proposal=0, updated_at=? WHERE id=?", (int(time.time()), profile_id))
+    client = row["origin_client_id"]
+    if client and conn.execute("SELECT 1 FROM api_keys WHERE id=?", (client,)).fetchone():
+        conn.execute("INSERT OR IGNORE INTO client_profiles(client_id, profile_id) VALUES(?, ?)",
+                     (client, profile_id))
+    return get(conn, profile_id)
+
+
+def origin(conn: sqlite3.Connection, row: sqlite3.Row) -> Optional[Dict[str, Any]]:
+    """Where a captured profile came from (None for profiles made by hand)."""
+    from .sandboxes import iso  # local import: sandboxes imports this module
+    if not row["origin_sandbox"]:
+        return None
+    client = None
+    if row["origin_client_id"]:
+        client = conn.execute("SELECT id, label FROM api_keys WHERE id=?", (row["origin_client_id"],)).fetchone()
+    return {"clientId": row["origin_client_id"], "clientLabel": (client["label"] or "") if client else None,
+            "clientDeleted": bool(row["origin_client_id"]) and client is None,
+            "sandbox": row["origin_sandbox"], "user": row["origin_owner"],
+            "basedOn": row["origin_profile"] or STANDARD_NAME, "capturedAt": iso(row["captured_at"])}
+
+
+def capture_info(row: sqlite3.Row) -> Optional[Dict[str, Any]]:
+    if not row["capture_info"]:
+        return None
+    try:
+        data = json.loads(row["capture_info"])
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 # --------------------------------------------------------------------------
 # status
 # --------------------------------------------------------------------------
 
 def config_hash(row: sqlite3.Row) -> str:
-    payload = json.dumps([TEMPLATE_VERSION, packages(row), row["setup_script"] or ""], sort_keys=True)
+    parts: List[Any] = [TEMPLATE_VERSION, packages(row), row["setup_script"] or ""]
+    if (row["prepare_script"] or "").strip():
+        parts.append(row["prepare_script"])  # only then: older profiles keep their hash
+    payload = json.dumps(parts, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -284,6 +357,10 @@ def serialize(conn: sqlite3.Connection, row: sqlite3.Row, base_id: Optional[str]
         "description": row["description"] or "",
         "packages": packages(row),
         "setupScript": row["setup_script"] or "",
+        "prepareScript": row["prepare_script"] or "",
+        "proposal": bool(row["proposal"]),
+        "origin": origin(conn, row),
+        "capture": capture_info(row),
         "status": status(row, base_id),
         "outdatedReasons": outdated_reasons(row, base_id),
         "image": row["image"],
@@ -320,6 +397,8 @@ def ai_view(row: Optional[sqlite3.Row], default: bool) -> Optional[Dict[str, Any
     if row is None:
         return {"name": STANDARD_NAME, "description": STANDARD_DESCRIPTION, "packages": [],
                 "default": default, "state": "ready"}
+    if row["proposal"]:
+        return None
     if row["image"]:
         state = "ready"
     elif row["build_state"] in BUILD_ACTIVE:
@@ -391,6 +470,9 @@ def dockerfile(row: sqlite3.Row) -> str:
         "USER root",
         "ENV DEBIAN_FRONTEND=noninteractive",
     ]
+    if (row["prepare_script"] or "").strip():
+        lines += ["COPY prepare.sh /tmp/albert-profile-prepare.sh",
+                  "RUN bash -euo pipefail /tmp/albert-profile-prepare.sh && rm -f /tmp/albert-profile-prepare.sh"]
     if pk["apt"]:
         lines.append("RUN apt-get update && apt-get install -y " + " ".join(shlex.quote(p) for p in pk["apt"])
                      + " && apt-get clean && rm -rf /var/lib/apt/lists/*")
@@ -412,6 +494,8 @@ def write_context(row: sqlite3.Row, seq: int) -> Path:
     shutil.rmtree(ctx, ignore_errors=True)
     ctx.mkdir(parents=True)
     (ctx / "Dockerfile").write_text(dockerfile(row), encoding="utf-8")
+    if (row["prepare_script"] or "").strip():
+        (ctx / "prepare.sh").write_text(row["prepare_script"].rstrip("\n") + "\n", encoding="utf-8")
     if (row["setup_script"] or "").strip():
         (ctx / "setup.sh").write_text(row["setup_script"].rstrip("\n") + "\n", encoding="utf-8")
     return ctx
