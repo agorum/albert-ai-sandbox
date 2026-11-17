@@ -168,7 +168,7 @@ The plaintext key is shown once; only its SHA-256 hash is stored. `scripts/api-k
 ## Sandbox Profiles
 A profile adds software to the shipped sandbox image, e.g. for customers whose sandboxes have no internet access and therefore cannot install anything at runtime. It consists of:
 
-- **OS packages** (apt), **Python packages** (pip) and **global Node packages** (npm), one per line or separated by spaces, optionally with a version (`tesseract-ocr-deu=4.1.1-2`, `openpyxl==3.1.5`, `@mermaid-js/mermaid-cli@11.4.2`). Names are validated, so nothing can be injected through them.
+- **OS packages** (apt), **Python packages** (pip) and **global Node packages** (npm), one per line or separated by spaces, optionally with a version (`tesseract-ocr-deu=4.1.1-2`, `openpyxl==3.1.5`, `@mermaid-js/mermaid-cli@11.4.2`). Names are validated, so nothing can be injected through them. pip installs system-wide next to the Python packages of the distribution (`--ignore-installed`): a version from pip goes to `/usr/local` and takes precedence, the apt package (e.g. numpy for LibreOffice) stays.
 - an optional **preparation script** that runs before the packages are installed, e.g. to add a vendor's APT repository and key ("Vorbereitung").
 - optional **setup commands** for anything that is not a package. They run as root at the end of the build inside the build container – never on the host – with `bash -euo pipefail` (as does the preparation script).
 

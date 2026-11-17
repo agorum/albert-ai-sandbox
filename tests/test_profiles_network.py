@@ -79,7 +79,7 @@ def test_dockerfile_builds_on_the_shipped_image(env):
     text = profiles.dockerfile(row)
     assert text.splitlines()[1] == "FROM albert-ai-sandbox:latest"
     assert "apt-get install -y libreoffice tesseract-ocr-deu" in text
-    assert "pip3 install --no-cache-dir pandas" in text and "npm install -g --no-fund --no-audit typescript" in text
+    assert "pip3 install --no-cache-dir --ignore-installed pandas" in text and "npm install -g --no-fund --no-audit typescript" in text
     assert "COPY setup.sh" in text and text.rstrip().endswith("USER root")
 
 
@@ -126,7 +126,7 @@ def test_profile_outdated_after_change_and_base_update(env, make_client):
     assert profiles.rebuild_outdated("test") == {"Office": "ok"}
     status = _status(row["id"])
     assert status["status"] == "ready" and status["image"] == "albert-ai-sandbox-profile-1:2"
-    assert "pip3 install --no-cache-dir pandas" in env["docker"].builds[-1]["dockerfile"]
+    assert "pip3 install --no-cache-dir --ignore-installed pandas" in env["docker"].builds[-1]["dockerfile"]
     # the sandbox still runs the previous profile image until it is rebuilt
     assert sandboxes.describe(name)["outdated"] == ["image"]
     assert sandboxes.recreate(name)["outdated"] == []

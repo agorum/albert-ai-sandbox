@@ -259,6 +259,15 @@ def open_proposals(conn: sqlite3.Connection, client_id: int) -> List[sqlite3.Row
                         "ORDER BY created_at", (client_id,)).fetchall()
 
 
+def failed_proposals(conn: sqlite3.Connection, client_id: int) -> List[sqlite3.Row]:
+    """Accepted proposals of the client whose first build failed: allowed for the
+    client, but without an image (the AI would not see them otherwise)."""
+    return conn.execute(
+        "SELECT p.* FROM profiles p JOIN client_profiles cp ON cp.profile_id=p.id AND cp.client_id=? "
+        "WHERE p.origin_client_id=? AND p.proposal=0 AND p.image IS NULL AND p.build_state='failed' "
+        "ORDER BY p.created_at", (client_id, client_id)).fetchall()
+
+
 def proposal_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM profiles WHERE proposal=1").fetchone()[0]
 
@@ -477,8 +486,10 @@ def dockerfile(row: sqlite3.Row) -> str:
         lines.append("RUN apt-get update && apt-get install -y " + " ".join(shlex.quote(p) for p in pk["apt"])
                      + " && apt-get clean && rm -rf /var/lib/apt/lists/*")
     if pk["pip"]:
-        # system-wide on purpose (the sandbox user should see the packages); no root warning in the log
-        lines.append("RUN PIP_ROOT_USER_ACTION=ignore pip3 install --no-cache-dir "
+        # System-wide on purpose (the sandbox user should see the packages); no root warning in the log.
+        # --ignore-installed: Python packages of the distribution (apt, e.g. numpy for LibreOffice) cannot
+        # be uninstalled by pip; the pip version goes to /usr/local and takes precedence when importing.
+        lines.append("RUN PIP_ROOT_USER_ACTION=ignore pip3 install --no-cache-dir --ignore-installed "
                      + " ".join(shlex.quote(p) for p in pk["pip"]))
     if pk["npm"]:
         lines.append("RUN npm install -g --no-fund --no-audit " + " ".join(shlex.quote(p) for p in pk["npm"]))

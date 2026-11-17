@@ -439,3 +439,28 @@ def test_mcp_tools_tell_the_work_dir():
     tools = json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["bash-mcp"]["tools"]
     for name in ("run", "run_background"):
         assert "/tmp/albert-files" in tools[name]["description"]
+
+
+def test_pip_installs_next_to_distribution_packages(env):
+    with db.session() as conn:
+        row = profiles.create(conn, "Plot", pip_packages="numpy==2.5.5 matplotlib==3.11.2")
+    assert "pip3 install --no-cache-dir --ignore-installed numpy==2.5.5 matplotlib==3.11.2" in profiles.dockerfile(row)
+
+
+def test_failed_build_of_an_accepted_proposal_stays_visible(app, admin, make_client, inspect, env):
+    client, key = make_client(allow_profile_proposals=True)
+    row = _propose(app, key, _sandbox(client["id"]))
+    env["docker"].fail_build = "pip failed"
+    assert admin.post(f"/admin/api/profiles/{row['id']}/accept", headers=admin.csrf).status_code == 202
+    http, headers = _api(app, key)
+    listing = http.get("/profiles", headers=headers).get_json()
+    assert [p["name"] for p in listing["profiles"]] == ["standard"]  # cannot be chosen
+    failed = listing["proposals"]
+    assert [(p["name"], p["state"]) for p in failed] == [("Werkzeuge", "failed")]
+    assert "administrator" in failed[0]["message"] and "pip failed" not in failed[0]["message"]
+    assert failed[0]["failedAt"]
+    # rebuilt successfully: an ordinary profile to choose from
+    env["docker"].fail_build = None
+    assert admin.post(f"/admin/api/profiles/{row['id']}/build", headers=admin.csrf).status_code == 202
+    listing = http.get("/profiles", headers=headers).get_json()
+    assert [p["name"] for p in listing["profiles"]] == ["standard", "Werkzeuge"] and listing["proposals"] == []

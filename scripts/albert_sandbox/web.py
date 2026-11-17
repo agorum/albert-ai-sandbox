@@ -214,15 +214,24 @@ def client_profiles() -> Any:
             view = profiles.ai_view(row, default=client["profile_id"] == row["id"])
             if view:
                 items.append(view)
-        pending = [_proposal_view(r) for r in profiles.open_proposals(conn, client["id"])]
+        profiles.expire_stale(conn)
+        pending = [_proposal_view(r, "proposed") for r in profiles.open_proposals(conn, client["id"])]
+        pending += [_proposal_view(r, "failed") for r in profiles.failed_proposals(conn, client["id"])]
     return jsonify({"profiles": items, "proposals": pending})
 
 
-def _proposal_view(row: Any) -> Dict[str, Any]:
+def _proposal_view(row: Any, state: str) -> Dict[str, Any]:
+    """A proposal of the client that cannot be chosen (yet): "proposed" = waits for an
+    administrator, "failed" = accepted, but the build failed (an administrator has to fix it)."""
     pk = profiles.packages(row)
-    return {"name": row["name"], "description": row["description"] or "", "state": "proposed",
+    view = {"name": row["name"], "description": row["description"] or "", "state": state,
             "packages": [p for kind in ("apt", "pip", "npm") for p in pk[kind]][:profiles.AI_PACKAGES_MAX],
             "sandbox": row["origin_sandbox"], "createdAt": sandboxes.iso(row["created_at"])}
+    if state == "failed":
+        view["message"] = ("The administrator accepted the proposal, but building the profile failed. "
+                           "An administrator has to check the build log, fix the profile and build it again.")
+        view["failedAt"] = sandboxes.iso(row["build_finished_at"])
+    return view
 
 
 @client_api.get("/containers")
