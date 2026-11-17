@@ -301,7 +301,7 @@ Opening the desktop of a stopped sandbox shows a short explanation page (HTTP 50
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 .venv/bin/python -m pytest
 ```
-The tests use an in-memory fake for Docker and the disk images and run without root.
+The tests use an in-memory fake for Docker and the disk images and run without root. Layout check of the admin UI: paste `tests/ui_baselines.js` into the browser console (signed in); texts side by side in the top bar must report a baseline difference of 0.
 
 ## Uninstall
 ```bash

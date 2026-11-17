@@ -193,7 +193,9 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 .wordmark { height: 16px; width: 67px; flex: none; fill: currentColor; color: var(--text); display: block; }
 .brand-app { font-weight: 500; font-size: 1.05rem; }
 .brand-sep { color: var(--text-faint); font-weight: 400; }
-.brand-meta { color: var(--text-faint); font-size: .8rem; align-self: flex-end; margin-bottom: 9px; }
+/* Product name and "Admin · Version" on one baseline (the group itself is centred in the bar). */
+.brand-text { display: flex; align-items: baseline; gap: 9px; }
+.brand-meta { color: var(--text-faint); font-size: .8rem; }
 #app-version:not(:empty)::before { content: " · Version "; }
 
 .mainnav { display: flex; gap: 2px; flex-wrap: wrap; }
@@ -220,7 +222,8 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 .capture-list { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
 div.capture-list { padding-left: 0; }
 
-.userbox { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+/* "Angemeldet als …" and the label of the "Abmelden" button on one baseline, whatever the font. */
+.userbox { display: flex; align-items: baseline; gap: 10px; white-space: nowrap; }
 .userbox-name { color: var(--text-muted); }
 .userbox-name strong { color: var(--text); font-weight: 600; }
 
