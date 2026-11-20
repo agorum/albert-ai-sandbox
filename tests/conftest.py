@@ -250,6 +250,18 @@ class FakeStorage:
         return {n: {"image": True, "mountpoint": True} for n in self.disks}
 
 
+def _assert_paths_inside(s, root: Path) -> None:
+    """Every path setting must point into the test directory: a test once wrote the
+    real nginx site of a host (run as root there) and nginx did not start after the
+    next reboot."""
+    import dataclasses
+    outside = [f"{f.name}={getattr(s, f.name)}" for f in dataclasses.fields(s)
+               if isinstance(getattr(s, f.name), Path)
+               and not str(getattr(s, f.name)).startswith(str(root))]
+    if outside:
+        pytest.fail("settings point outside the test directory: " + ", ".join(outside))
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     config.reset()
@@ -261,10 +273,17 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("ALBERT_PUBLIC_URL", "https://sandbox.test")
     monkeypatch.setenv("ALBERT_NGINX_ACCESS_LOG", str(tmp_path / "access.log"))
     monkeypatch.setenv("ALBERT_MCPHUB_SETTLE_SECONDS", "0")
+    # Host paths outside the install dir: never the real ones (tests may run as root on a host).
+    for key, rel in (("ALBERT_NGINX_SITE_FILE", "nginx-sites/albert-sandbox"),
+                     ("ALBERT_NGINX_SITE_LINK", "nginx-enabled/albert-sandbox"),
+                     ("ALBERT_TLS_DIR", "tls"), ("ALBERT_ACME_DIR", "acme"),
+                     ("ALBERT_LETSENCRYPT_DIR", "letsencrypt"), ("ALBERT_NOVNC_DIR", "novnc")):
+        monkeypatch.setenv(key, str(tmp_path / rel))
     for key in ("ALBERT_DEFAULT_CPUS", "ALBERT_DEFAULT_MEMORY_MB", "ALBERT_DEFAULT_DISK_GB",
                 "ALBERT_MAX_AGE_SECONDS", "ALBERT_INACTIVITY_SECONDS"):
         monkeypatch.delenv(key, raising=False)
     s = config.settings()
+    _assert_paths_inside(s, tmp_path)
 
     fake = FakeDocker()
     for attr in ("available", "image_id", "inspect", "inspect_one", "managed_container_names", "running_names",
