@@ -341,7 +341,13 @@ else
 fi
 ADMIN_PORT="$("$CLI" selfcheck --json | "${VENV_DIR}/bin/python" -c 'import json,sys;print(json.load(sys.stdin)["adminPort"])')"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-	ufw allow "${ADMIN_PORT}/tcp" comment 'albert admin ui' >/dev/null || true
+	# Open the admin port only while the administrator has no rule of their own for it
+	# (e.g. allowed from the office network only, or denied: admin UI via SSH tunnel).
+	if ufw status 2>/dev/null | grep -Eq "^${ADMIN_PORT}(/tcp)?[[:space:]]"; then
+		info "ufw: keeping the existing rule for the admin port ${ADMIN_PORT}"
+	else
+		ufw allow "${ADMIN_PORT}/tcp" comment 'albert admin ui' >/dev/null || true
+	fi
 fi
 
 # ---------------------------------------------------------------------------

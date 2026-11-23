@@ -48,7 +48,7 @@ SQLite is the single source of truth. Docker containers, disk images and nginx r
   |---|---|
   | 80 | HTTP: Let's Encrypt challenges, redirect to HTTPS (with HTTPS active it refuses API, MCP and file requests) |
   | 443 | HTTPS: client API, MCP Hub, file service and desktops of the sandboxes |
-  | 8443 | Admin UI (`ALBERT_ADMIN_PORT`) – open it only for your admin networks |
+  | 8443 | Admin UI (`ALBERT_ADMIN_PORT`) – open it only for your admin networks. With an active ufw, `install.sh` opens it for everyone unless a ufw rule for this port exists (e.g. `ufw allow from <office> to any port 8443`, or `ufw deny 8443/tcp` and the admin UI through an SSH tunnel); such a rule is kept. |
 - **Subnets**: the sandbox networks `172.30.0.0/16`, `172.31.0.0/16` and the pool for client networks `172.29.0.0/16` must not overlap your networks (`ALBERT_NETWORK_SUBNET`, `ALBERT_OFFLINE_SUBNET`, `ALBERT_CLIENT_SUBNET_POOL`).
 - **Internal targets**: sandboxes cannot reach private networks. If they must reach internal systems (e.g. an agorum core server), open them in the admin UI – for all sandboxes under *Einstellungen*, for one client in its settings (see "Internal targets" below).
 - **Proxy or load balancer in front**: let nginx on this host terminate TLS (the certificate is managed in the admin UI) and pass on the real client address (nginx `real_ip`); otherwise the admin address list and the login throttle only see the proxy.
